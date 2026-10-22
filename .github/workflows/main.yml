@@ -70,8 +70,8 @@ jobs:
                   applicationId = "com.yas.flashedl"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 10
-                  versionName = "3.0-YAS-X216B-Embedded"
+                  versionCode = 11
+                  versionName = "4.0-YAS-X216B-Odin"
               }
 
               buildTypes {
@@ -1400,6 +1400,8 @@ jobs:
               companion object {
                   const val QCOM_VID = 0x05C6
                   const val EDL_PID = 0x9008
+                  const val SAMSUNG_VID = 0x04E8
+                  val SAMSUNG_DOWNLOAD_MODE_PIDS = listOf(0x6601, 0x685D, 0x68C3, 0x6860, 0x685C)
                   const val ACTION_USB_PERMISSION = "com.yas.flashedl.USB_PERMISSION"
                   private const val USB_CHUNK_LIMIT = 16384
               }
@@ -1416,6 +1418,12 @@ jobs:
               fun findEdlDevice(): UsbDevice? {
                   return usbManager.deviceList.values.firstOrNull { device ->
                       device.vendorId == QCOM_VID && device.productId == EDL_PID
+                  }
+              }
+
+              fun findSamsungDownloadModeDevice(): UsbDevice? {
+                  return usbManager.deviceList.values.firstOrNull { device ->
+                      device.vendorId == SAMSUNG_VID && device.productId in SAMSUNG_DOWNLOAD_MODE_PIDS
                   }
               }
 
@@ -2633,6 +2641,380 @@ jobs:
           }
           EOF
 
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/OdinProtocol.kt
+          package com.edl.flasher.protocol
+
+          import com.edl.flasher.usb.EdlUsbTransport
+          import java.io.IOException
+          import java.io.InputStream
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+          import kotlin.math.min
+
+          /**
+           * Samsung Download Mode ("Odin") protocol: the same wire protocol used by
+           * Samsung's official Odin tool and by the open-source Heimdall project.
+           *
+           * This implementation only performs standard protocol operations (handshake,
+           * session setup, named-partition file transfer, control commands). It never
+           * attempts to bypass a device's own MDM lock, Knox state, or signature/size
+           * verification -- any rejection the device itself returns (including an MDM
+           * or signature failure) is surfaced to the caller as a normal protocol error,
+           * exactly like official Odin / Heimdall behave.
+           */
+          class OdinProtocol(
+              private val transport: EdlUsbTransport,
+              private val logger: (String) -> Unit
+          ) {
+              companion object {
+                  private val HANDSHAKE_REQUEST = "ODIN".toByteArray(Charsets.US_ASCII)
+                  private val HANDSHAKE_RESPONSE = "LOKE".toByteArray(Charsets.US_ASCII)
+
+                  const val PACKET_SIZE = 1024
+
+                  // Top-level packet command IDs
+                  const val CMD_SESSION = 0x64       // Session setup / Thor session packets
+                  const val CMD_FILE_TRANSFER = 0x66 // File part announcement + data
+                  const val CMD_CONTROL = 0x67       // Device control (reboot, erase, flash-complete)
+
+                  // Session (0x64) sub-commands
+                  const val SESSION_BEGIN = 0x00
+                  const val SESSION_TOTAL_SIZE = 0x02
+                  const val SESSION_END = 0x04
+
+                  // File transfer (0x66) sub-commands
+                  const val FILE_FLASH_REQUEST = 0x00
+                  const val FILE_FLASH_END = 0x01
+
+                  // Control (0x67) sub-commands
+                  const val CONTROL_INIT = 0x00
+                  const val CONTROL_ERASE_PARTITION = 0x01
+                  const val CONTROL_FLASH_COMPLETE = 0x02
+                  const val CONTROL_REBOOT = 0x03
+
+                  const val DEFAULT_PART_CHUNK = 131072 // 128KB per on-wire part (standard Odin chunk size)
+              }
+
+              private var sessionActive = false
+
+              @Throws(IOException::class)
+              fun handshake() {
+                  logger("Sending ODIN handshake...")
+                  transport.write(HANDSHAKE_REQUEST)
+                  val resp = ByteArray(4)
+                  transport.readFully(resp, timeoutMs = 10000)
+                  if (!resp.contentEquals(HANDSHAKE_RESPONSE)) {
+                      throw IOException("Unexpected handshake response: ${String(resp, Charsets.US_ASCII)}")
+                  }
+                  logger("Handshake OK (ODIN <-> LOKE).")
+              }
+
+              @Throws(IOException::class)
+              fun beginSession(): Int {
+                  transport.write(buildSessionPacket(SESSION_BEGIN, 0))
+                  val rsp = readPacket()
+                  val protocolVersion = rsp.getInt(4)
+                  sessionActive = true
+                  logger("Odin session established (protocol v$protocolVersion).")
+                  return protocolVersion
+              }
+
+              @Throws(IOException::class)
+              fun endSession() {
+                  if (!sessionActive) return
+                  transport.write(buildSessionPacket(SESSION_END, 0))
+                  runCatching { readPacket() }
+                  sessionActive = false
+                  logger("Odin session ended.")
+              }
+
+              @Throws(IOException::class)
+              fun initializeControl() {
+                  transport.write(buildControlPacket(CONTROL_INIT, 0))
+                  readPacket()
+              }
+
+              @Throws(IOException::class)
+              fun notifyFlashComplete() {
+                  transport.write(buildControlPacket(CONTROL_FLASH_COMPLETE, 0))
+                  readPacket()
+                  logger("Flash-complete notification sent.")
+              }
+
+              @Throws(IOException::class)
+              fun rebootDevice() {
+                  logger("Sending reboot command...")
+                  runCatching {
+                      transport.write(buildControlPacket(CONTROL_REBOOT, 0))
+                      readPacket()
+                  }
+              }
+
+              /**
+               * Flashes a single named partition from [inputStream] ([totalBytes] long).
+               * The partition is addressed by name -- modern Download Mode bootloaders
+               * resolve the physical location themselves, exactly like a standard
+               * Odin/Thor file flash. No checksum, signature or lock-state bypass is
+               * performed anywhere in this function: the device validates the image
+               * itself, and any rejection propagates as an IOException.
+               */
+              @Throws(IOException::class)
+              fun flashNamedPartition(
+                  partitionName: String,
+                  inputStream: InputStream,
+                  totalBytes: Long,
+                  onProgress: (Long, Long) -> Unit
+              ) {
+                  if (!sessionActive) throw IllegalStateException("Odin session not started")
+                  logger("Flashing '$partitionName' ($totalBytes bytes)...")
+
+                  transport.write(buildSessionPacket(SESSION_TOTAL_SIZE, totalBytes.toInt()))
+                  readPacket()
+
+                  val buffer = ByteArray(DEFAULT_PART_CHUNK)
+                  var sent = 0L
+                  var sequence = 0
+
+                  while (sent < totalBytes) {
+                      val toRead = min(DEFAULT_PART_CHUNK.toLong(), totalBytes - sent).toInt()
+                      var filled = 0
+                      while (filled < toRead) {
+                          val r = inputStream.read(buffer, filled, toRead - filled)
+                          if (r < 0) throw IOException("Unexpected EOF flashing '$partitionName' at offset ${sent + filled}")
+                          filled += r
+                      }
+
+                      val isLastPart = (sent + toRead) >= totalBytes
+                      sendFlashRequest(partitionName, sequence, toRead, isLastPart)
+
+                      transport.write(buffer, 0, toRead, timeoutMs = 60000)
+                      val ack = readPacket()
+                      val ackStatus = ack.getInt(4)
+                      if (ackStatus != 0) {
+                          throw IOException("Device rejected part $sequence of '$partitionName' (status=$ackStatus)")
+                      }
+
+                      sent += toRead
+                      sequence++
+                      onProgress(sent, totalBytes)
+                  }
+
+                  transport.write(buildFileTransferPacket(FILE_FLASH_END, partitionName, sequence, 0, true))
+                  val finalRsp = readPacket()
+                  val finalStatus = finalRsp.getInt(4)
+                  if (finalStatus != 0) {
+                      throw IOException("Device reported failure finishing '$partitionName' (status=$finalStatus)")
+                  }
+                  logger("'$partitionName' flashed and verified by device ($sequence parts).")
+              }
+
+              private fun sendFlashRequest(partitionName: String, sequence: Int, partSize: Int, isLastPart: Boolean) {
+                  transport.write(buildFileTransferPacket(FILE_FLASH_REQUEST, partitionName, sequence, partSize, isLastPart))
+                  val rsp = readPacket()
+                  val status = rsp.getInt(4)
+                  if (status != 0) {
+                      throw IOException("Device rejected flash request for '$partitionName' part $sequence (status=$status)")
+                  }
+              }
+
+              private fun buildSessionPacket(subCommand: Int, value: Int): ByteArray {
+                  val buf = ByteBuffer.allocate(PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                  buf.putInt(CMD_SESSION)
+                  buf.putInt(subCommand)
+                  buf.putInt(value)
+                  return buf.array()
+              }
+
+              private fun buildControlPacket(subCommand: Int, value: Int): ByteArray {
+                  val buf = ByteBuffer.allocate(PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                  buf.putInt(CMD_CONTROL)
+                  buf.putInt(subCommand)
+                  buf.putInt(value)
+                  return buf.array()
+              }
+
+              private fun buildFileTransferPacket(
+                  subCommand: Int,
+                  partitionName: String,
+                  sequence: Int,
+                  partSize: Int,
+                  isLastPart: Boolean
+              ): ByteArray {
+                  val buf = ByteBuffer.allocate(PACKET_SIZE).order(ByteOrder.LITTLE_ENDIAN)
+                  buf.putInt(CMD_FILE_TRANSFER)
+                  buf.putInt(subCommand)
+                  buf.putInt(sequence)
+                  buf.putInt(partSize)
+                  buf.putInt(if (isLastPart) 1 else 0)
+                  val nameBytes = partitionName.take(31).toByteArray(Charsets.US_ASCII)
+                  buf.put(nameBytes)
+                  return buf.array()
+              }
+
+              private fun readPacket(timeoutMs: Int = 30000): ByteBuffer {
+                  val raw = ByteArray(PACKET_SIZE)
+                  transport.readFully(raw, timeoutMs = timeoutMs)
+                  return ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/OdinTarFlasher.kt
+          package com.edl.flasher.protocol
+
+          import java.io.IOException
+          import java.io.InputStream
+          import java.nio.charset.Charset
+
+          /**
+           * Reads a standard POSIX/GNU .tar archive (such as Samsung's userdata.tar, or
+           * any BL/AP/CP/CSC .tar.md5 firmware package) sequentially and flashes every
+           * image file found inside to the partition matching its filename, via
+           * [OdinProtocol]. Only the partitions physically present inside the given tar
+           * are touched -- nothing else on the device is modified, and no verification
+           * the device performs is skipped.
+           *
+           * Recognised image extensions are stripped from the filename to derive the
+           * partition name (e.g. "userdata.img" -> "userdata", "boot.img.lz4" -> "boot").
+           * Compressed (.lz4) images are streamed to the device as-is; modern Samsung
+           * Download Mode bootloaders decompress them on-device, the same way a real
+           * Odin flash works (and the same way this project's Firehose code already
+           * lets the target handle Android Sparse images).
+           */
+          object OdinTarFlasher {
+
+              private val IMAGE_EXTENSIONS = listOf(".img.lz4", ".img.ext4", ".img", ".bin.lz4", ".bin")
+
+              @Throws(IOException::class)
+              fun flashTarStream(
+                  tarInput: InputStream,
+                  odin: OdinProtocol,
+                  logger: (String) -> Unit,
+                  onPartitionProgress: (String, Long, Long) -> Unit,
+                  shouldFlash: (String) -> Boolean = { true }
+              ): List<String> {
+                  val flashed = mutableListOf<String>()
+                  while (true) {
+                      val header = readTarHeader(tarInput) ?: break
+                      if (header.typeFlag != '0' && header.typeFlag != '\u0000') {
+                          skipEntry(tarInput, header.size)
+                          continue
+                      }
+
+                      val partitionName = derivePartitionName(header.name)
+                      if (partitionName == null) {
+                          logger("Skipping non-image entry in tar: ${header.name}")
+                          skipEntry(tarInput, header.size)
+                          continue
+                      }
+
+                      if (!shouldFlash(partitionName)) {
+                          logger("Skipping '$partitionName' (not selected).")
+                          skipEntry(tarInput, header.size)
+                          continue
+                      }
+
+                      logger("Found '${header.name}' -> flashing partition '$partitionName' (${header.size} bytes)")
+                      val bounded = BoundedInputStream(tarInput, header.size)
+                      odin.flashNamedPartition(partitionName, bounded, header.size) { done, total ->
+                          onPartitionProgress(partitionName, done, total)
+                      }
+                      bounded.drainRemaining()
+                      skipPaddingOnly(tarInput, header.size)
+                      flashed.add(partitionName)
+                  }
+                  return flashed
+              }
+
+              private fun derivePartitionName(entryName: String): String? {
+                  val baseName = entryName.substringAfterLast('/')
+                  for (ext in IMAGE_EXTENSIONS) {
+                      if (baseName.endsWith(ext, ignoreCase = true)) {
+                          return baseName.substring(0, baseName.length - ext.length)
+                      }
+                  }
+                  return null
+              }
+
+              private data class TarHeader(val name: String, val size: Long, val typeFlag: Char)
+
+              private fun readTarHeader(input: InputStream): TarHeader? {
+                  val block = ByteArray(512)
+                  var read = 0
+                  while (read < 512) {
+                      val r = input.read(block, read, 512 - read)
+                      if (r < 0) return null
+                      read += r
+                  }
+                  if (block.all { it == 0.toByte() }) return null // end-of-archive marker
+
+                  val name = String(block, 0, 100, Charset.forName("US-ASCII")).trim('\u0000', ' ')
+                  val sizeField = String(block, 124, 12, Charset.forName("US-ASCII")).trim('\u0000', ' ')
+                  val size = if (sizeField.isBlank()) 0L else sizeField.trim().toLong(8)
+                  val typeFlag = block[156].toInt().toChar()
+                  return TarHeader(name, size, typeFlag)
+              }
+
+              private fun skipEntry(input: InputStream, size: Long) {
+                  var remaining = size
+                  val buf = ByteArray(8192)
+                  while (remaining > 0) {
+                      val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                      val r = input.read(buf, 0, toRead)
+                      if (r < 0) break
+                      remaining -= r
+                  }
+                  skipPaddingOnly(input, size)
+              }
+
+              private fun skipPaddingOnly(input: InputStream, size: Long) {
+                  val padding = (512 - (size % 512)) % 512
+                  var remaining = padding
+                  val buf = ByteArray(512)
+                  while (remaining > 0) {
+                      val toRead = minOf(buf.size.toLong(), remaining).toInt()
+                      val r = input.read(buf, 0, toRead)
+                      if (r < 0) break
+                      remaining -= r
+                  }
+              }
+
+              /** Lets the caller read at most [limit] bytes of [delegate] before signalling EOF. */
+              private class BoundedInputStream(private val delegate: InputStream, private val limit: Long) : InputStream() {
+                  private var consumed = 0L
+
+                  override fun read(): Int {
+                      if (consumed >= limit) return -1
+                      val b = delegate.read()
+                      if (b >= 0) consumed++
+                      return b
+                  }
+
+                  override fun read(b: ByteArray, off: Int, len: Int): Int {
+                      if (consumed >= limit) return -1
+                      val toRead = minOf(len.toLong(), limit - consumed).toInt()
+                      val r = delegate.read(b, off, toRead)
+                      if (r > 0) consumed += r
+                      return r
+                  }
+
+                  fun drainRemaining() {
+                      val buf = ByteArray(8192)
+                      while (consumed < limit) {
+                          val toRead = minOf(buf.size.toLong(), limit - consumed).toInt()
+                          val r = delegate.read(buf, 0, toRead)
+                          if (r < 0) break
+                          consumed += r
+                      }
+                  }
+
+                  override fun close() {
+                      // Intentionally does not close the underlying tar stream.
+                  }
+              }
+          }
+          EOF
+
           cat << 'EOF' > app/src/main/java/com/edl/flasher/ui/EdlViewModel.kt
           package com.edl.flasher.ui
 
@@ -2680,11 +3062,24 @@ jobs:
               val partitions: List<PartitionEntry> = emptyList(),
               val selectedPartKeys: Set<String> = emptySet(),
               val selectedLunFilter: Int = -1,
+              val odinConnected: Boolean = false,
+              val odinSessionReady: Boolean = false,
+              val odinDeviceDescription: String = "No Download-Mode Device Detected",
+              val blTarUri: Uri? = null,
+              val blTarName: String = "BL (Bootloader) .tar/.md5: Not Selected",
+              val apTarUri: Uri? = null,
+              val apTarName: String = "AP (System/Kernel) .tar/.md5: Not Selected",
+              val cpTarUri: Uri? = null,
+              val cpTarName: String = "CP (Modem) .tar/.md5: Not Selected",
+              val cscTarUri: Uri? = null,
+              val cscTarName: String = "CSC .tar/.md5: Not Selected",
+              val userdataTarUri: Uri? = null,
+              val userdataTarName: String = "userdata.tar: Not Selected",
               val isBusy: Boolean = false,
               val currentTask: String = "Ready",
               val progress: Float = 0f,
               val transferSpeedMbps: Double = 0.0,
-              val logs: List<String> = listOf("Welcome to YAS FLASH EDL SOFTWARE v3.0 (Embedded X216B Firmware + New Logo)")
+              val logs: List<String> = listOf("Welcome to YAS FLASH EDL SOFTWARE v4.0 (Embedded X216B Firmware + Samsung Odin)")
           )
 
           class EdlViewModel(application: Application) : AndroidViewModel(application) {
@@ -2693,6 +3088,7 @@ jobs:
               private val transport = EdlUsbTransport(context)
               private val sahara = SaharaProtocol(transport, ::appendLog)
               private val firehose = FirehoseProtocol(transport, ::appendLog)
+              private val odin = OdinProtocol(transport, ::appendLog)
 
               private val _uiState = MutableStateFlow(EdlUiState())
               val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -2862,7 +3258,9 @@ jobs:
                           _uiState.update {
                               it.copy(
                                   usbConnected = true,
-                                  deviceDescription = "Qualcomm HS-USB QDLoader 9008"
+                                  deviceDescription = "Qualcomm HS-USB QDLoader 9008",
+                                  odinConnected = false,
+                                  odinSessionReady = false
                               )
                           }
                           appendLog("USB Bulk IN/OUT connected successfully.")
@@ -3079,6 +3477,170 @@ jobs:
                       }
 
                       appendLog("=== X216B WIPE & WRITE SEQUENCE FINISHED SUCCESSFULLY! ===")
+                  }
+              }
+
+              fun setBlTarUri(uri: Uri) {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
+                  _uiState.update { it.copy(blTarUri = uri, blTarName = "BL: $name") }
+                  appendLog("Selected BL package: $name")
+              }
+
+              fun setApTarUri(uri: Uri) {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
+                  _uiState.update { it.copy(apTarUri = uri, apTarName = "AP: $name") }
+                  appendLog("Selected AP package: $name")
+              }
+
+              fun setCpTarUri(uri: Uri) {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
+                  _uiState.update { it.copy(cpTarUri = uri, cpTarName = "CP: $name") }
+                  appendLog("Selected CP package: $name")
+              }
+
+              fun setCscTarUri(uri: Uri) {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
+                  _uiState.update { it.copy(cscTarUri = uri, cscTarName = "CSC: $name") }
+                  appendLog("Selected CSC package: $name")
+              }
+
+              fun setUserdataTarUri(uri: Uri) {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
+                  _uiState.update { it.copy(userdataTarUri = uri, userdataTarName = "userdata: $name") }
+                  appendLog("Selected userdata package: $name")
+              }
+
+              fun connectSamsungDownloadMode() {
+                  viewModelScope.launch(Dispatchers.IO) {
+                      val device = transport.findSamsungDownloadModeDevice()
+                      if (device == null) {
+                          _uiState.update {
+                              it.copy(
+                                  odinConnected = false,
+                                  odinSessionReady = false,
+                                  odinDeviceDescription = "No Download-Mode Device Detected"
+                              )
+                          }
+                          appendLog("No Samsung Download-Mode device detected on OTG.")
+                          return@launch
+                      }
+
+                      appendLog("Detected Samsung Download-Mode device (${device.deviceName})")
+                      val opened = transport.requestPermissionAndOpen(device)
+                      if (opened) {
+                          _uiState.update {
+                              it.copy(
+                                  odinConnected = true,
+                                  odinSessionReady = false,
+                                  odinDeviceDescription = "Samsung Download Mode (Odin Protocol)",
+                                  usbConnected = false,
+                                  firehoseReady = false
+                              )
+                          }
+                          appendLog("USB connected to Download-Mode device.")
+                      } else {
+                          appendLog("ERROR: USB permission denied or interface busy.")
+                      }
+                  }
+              }
+
+              private fun ensureOdinSession() {
+                  if (!_uiState.value.odinSessionReady) {
+                      odin.handshake()
+                      odin.beginSession()
+                      odin.initializeControl()
+                      _uiState.update { it.copy(odinSessionReady = true) }
+                  }
+              }
+
+              private fun openOdinConnectionIfNeeded() {
+                  if (!transport.isConnected) {
+                      val device = transport.findSamsungDownloadModeDevice()
+                          ?: throw IllegalStateException("No Download-Mode device detected on USB!")
+                      val opened = transport.requestPermissionAndOpen(device)
+                      if (!opened) throw IllegalStateException("Could not open USB Download-Mode interface.")
+                      _uiState.update {
+                          it.copy(
+                              odinConnected = true,
+                              odinDeviceDescription = "Samsung Download Mode (Odin Protocol)",
+                              usbConnected = false,
+                              firehoseReady = false
+                          )
+                      }
+                  }
+                  ensureOdinSession()
+              }
+
+              private fun flashTarFromUri(label: String, uri: Uri) {
+                  var partitionStartNs = System.nanoTime()
+                  var lastPartition = ""
+                  context.contentResolver.openInputStream(uri)?.use { tarInput ->
+                      val flashed = OdinTarFlasher.flashTarStream(
+                          tarInput = tarInput,
+                          odin = odin,
+                          logger = ::appendLog,
+                          onPartitionProgress = { partName, done, total ->
+                              if (partName != lastPartition) {
+                                  lastPartition = partName
+                                  partitionStartNs = System.nanoTime()
+                              }
+                              updateProgress(done, total, partitionStartNs)
+                          }
+                      )
+                      if (flashed.isEmpty()) {
+                          appendLog("WARN: No recognizable partition images found inside the $label package.")
+                      }
+                  } ?: throw IllegalStateException("Cannot open $label file.")
+              }
+
+              fun runOdinFlashSequence() {
+                  runTask("Samsung Odin Flash") {
+                      openOdinConnectionIfNeeded()
+
+                      val slots = listOf(
+                          "BL" to _uiState.value.blTarUri,
+                          "AP" to _uiState.value.apTarUri,
+                          "CP" to _uiState.value.cpTarUri,
+                          "CSC" to _uiState.value.cscTarUri,
+                          "USERDATA" to _uiState.value.userdataTarUri
+                      ).filter { it.second != null }
+
+                      if (slots.isEmpty()) {
+                          throw IllegalStateException("No .tar files selected. Pick at least one of BL/AP/CP/CSC/USERDATA.")
+                      }
+
+                      appendLog("=== STARTING ODIN FLASH SEQUENCE (${slots.size} package(s)) ===")
+                      slots.forEachIndexed { idx, (label, uri) ->
+                          appendLog("[${idx + 1}/${slots.size}] Opening $label package...")
+                          flashTarFromUri(label, uri!!)
+                      }
+
+                      odin.notifyFlashComplete()
+                      appendLog("=== ODIN FLASH SEQUENCE FINISHED SUCCESSFULLY! ===")
+                      odin.rebootDevice()
+                      transport.close()
+                      _uiState.update {
+                          it.copy(
+                              odinConnected = false,
+                              odinSessionReady = false,
+                              odinDeviceDescription = "No Download-Mode Device Detected"
+                          )
+                      }
+                  }
+              }
+
+              fun runFlashUserdataTarOnly() {
+                  runTask("Flash userdata.tar") {
+                      val uri = _uiState.value.userdataTarUri
+                          ?: throw IllegalStateException("Please select userdata.tar first!")
+
+                      openOdinConnectionIfNeeded()
+
+                      appendLog("=== FLASHING ${_uiState.value.userdataTarName} ===")
+                      flashTarFromUri("USERDATA", uri)
+
+                      odin.notifyFlashComplete()
+                      appendLog("=== USERDATA FLASH FINISHED SUCCESSFULLY! ===")
                   }
               }
 
@@ -3401,10 +3963,18 @@ jobs:
               onPickFirmwareDir: () -> Unit,
               onFlashFirmwareXml: () -> Unit,
               onResetDevice: (String) -> Unit,
-              onClearLogs: () -> Unit
+              onClearLogs: () -> Unit,
+              onConnectOdinDevice: () -> Unit,
+              onPickBlTar: () -> Unit,
+              onPickApTar: () -> Unit,
+              onPickCpTar: () -> Unit,
+              onPickCscTar: () -> Unit,
+              onPickUserdataTar: () -> Unit,
+              onRunOdinFlash: () -> Unit,
+              onFlashUserdataOnly: () -> Unit
           ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. X216B Service", "2. GPT Partitions", "3. XML Flasher")
+              val tabs = listOf("1. X216B Service", "2. GPT Partitions", "3. XML Flasher", "4. Samsung Odin")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
 
@@ -3613,6 +4183,17 @@ jobs:
                               onPickPatchXml = onPickPatchXml,
                               onPickFirmwareDir = onPickFirmwareDir,
                               onFlashFirmwareXml = onFlashFirmwareXml
+                          )
+                          3 -> SamsungOdinTab(
+                              state = state,
+                              onConnectOdinDevice = onConnectOdinDevice,
+                              onPickBlTar = onPickBlTar,
+                              onPickApTar = onPickApTar,
+                              onPickCpTar = onPickCpTar,
+                              onPickCscTar = onPickCscTar,
+                              onPickUserdataTar = onPickUserdataTar,
+                              onRunOdinFlash = onRunOdinFlash,
+                              onFlashUserdataOnly = onFlashUserdataOnly
                           )
                       }
                   }
@@ -4084,6 +4665,152 @@ jobs:
           }
 
           @Composable
+          private fun SamsungOdinTab(
+              state: EdlUiState,
+              onConnectOdinDevice: () -> Unit,
+              onPickBlTar: () -> Unit,
+              onPickApTar: () -> Unit,
+              onPickCpTar: () -> Unit,
+              onPickCscTar: () -> Unit,
+              onPickUserdataTar: () -> Unit,
+              onRunOdinFlash: () -> Unit,
+              onFlashUserdataOnly: () -> Unit
+          ) {
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .border(1.dp, if (state.odinConnected) YasGreen else YasRed, RoundedCornerShape(8.dp))
+                  ) {
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(10.dp),
+                          horizontalArrangement = Arrangement.SpaceBetween,
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Column {
+                              Text("Samsung Download Mode (Odin Protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                              Text(
+                                  state.odinDeviceDescription,
+                                  fontSize = 11.sp,
+                                  color = if (state.odinConnected) YasGreen else YasRed
+                              )
+                          }
+                          Button(
+                              onClick = onConnectOdinDevice,
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(
+                                  containerColor = if (state.odinConnected) Color(0xFF1E3A5F) else YasCyan,
+                                  contentColor = if (state.odinConnected) Color.White else Color.Black
+                              ),
+                              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                          ) {
+                              Text(if (state.odinConnected) "Connected" else "Connect Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          }
+                      }
+                  }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text("Quick: Flash userdata.tar Only", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+
+                          OutlinedButton(
+                              onClick = onPickUserdataTar,
+                              enabled = !state.isBusy,
+                              modifier = Modifier.fillMaxWidth(),
+                              contentPadding = PaddingValues(8.dp)
+                          ) {
+                              Text(state.userdataTarName, fontSize = 11.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+
+                          Button(
+                              onClick = onFlashUserdataOnly,
+                              enabled = !state.isBusy && state.userdataTarUri != null,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .height(42.dp)
+                          ) {
+                              Text("⚡ Flash userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                          }
+                      }
+                  }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text("Full Package Flash (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                          Text(
+                              "Select any combination below; selected packages flash in BL -> AP -> CP -> CSC -> USERDATA order, same as official Odin.",
+                              fontSize = 10.sp,
+                              color = Color.LightGray
+                          )
+
+                          OutlinedButton(onClick = onPickBlTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
+                              Text(state.blTarName, fontSize = 11.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          OutlinedButton(onClick = onPickApTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
+                              Text(state.apTarName, fontSize = 11.sp, color = YasOrange, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          OutlinedButton(onClick = onPickCpTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
+                              Text(state.cpTarName, fontSize = 11.sp, color = YasGreen, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+                          OutlinedButton(onClick = onPickCscTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
+                              Text(state.cscTarName, fontSize = 11.sp, color = Color.LightGray, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                          }
+
+                          Button(
+                              onClick = onRunOdinFlash,
+                              enabled = !state.isBusy && (
+                                  state.blTarUri != null || state.apTarUri != null ||
+                                  state.cpTarUri != null || state.cscTarUri != null ||
+                                  state.userdataTarUri != null
+                              ),
+                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .height(44.dp)
+                          ) {
+                              Text("Start Odin Flash (Selected Packages)", fontWeight = FontWeight.Bold)
+                          }
+                      }
+                  }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp)) {
+                          Text(
+                              "Note: the device itself validates every image (signature, partition size, lock/MDM state). " +
+                                  "Any rejection from the device is shown as-is in the console below -- nothing here attempts to override it.",
+                              fontSize = 10.sp,
+                              color = Color.Gray
+                          )
+                      }
+                  }
+              }
+          }
+
+          @Composable
           private fun TelemetryAndConsolePanel(
               state: EdlUiState,
               onClearLogs: () -> Unit,
@@ -4237,6 +4964,26 @@ jobs:
                               ActivityResultContracts.OpenDocumentTree()
                           ) { uri -> uri?.let(viewModel::setFirmwareDirUri) }
 
+                          val blTarPicker = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenDocument()
+                          ) { uri -> uri?.let(viewModel::setBlTarUri) }
+
+                          val apTarPicker = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenDocument()
+                          ) { uri -> uri?.let(viewModel::setApTarUri) }
+
+                          val cpTarPicker = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenDocument()
+                          ) { uri -> uri?.let(viewModel::setCpTarUri) }
+
+                          val cscTarPicker = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenDocument()
+                          ) { uri -> uri?.let(viewModel::setCscTarUri) }
+
+                          val userdataTarPicker = rememberLauncherForActivityResult(
+                              ActivityResultContracts.OpenDocument()
+                          ) { uri -> uri?.let(viewModel::setUserdataTarUri) }
+
                           val backupSaver = rememberLauncherForActivityResult(
                               ActivityResultContracts.CreateDocument("application/octet-stream")
                           ) { uri ->
@@ -4290,7 +5037,15 @@ jobs:
                               onPickFirmwareDir = { firmwareDirPicker.launch(null) },
                               onFlashFirmwareXml = viewModel::flashFullFirmwarePackage,
                               onResetDevice = viewModel::resetDevice,
-                              onClearLogs = viewModel::clearLogs
+                              onClearLogs = viewModel::clearLogs,
+                              onConnectOdinDevice = viewModel::connectSamsungDownloadMode,
+                              onPickBlTar = { blTarPicker.launch(arrayOf("*/*")) },
+                              onPickApTar = { apTarPicker.launch(arrayOf("*/*")) },
+                              onPickCpTar = { cpTarPicker.launch(arrayOf("*/*")) },
+                              onPickCscTar = { cscTarPicker.launch(arrayOf("*/*")) },
+                              onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
+                              onRunOdinFlash = viewModel::runOdinFlashSequence,
+                              onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly
                           )
                       }
                   }
