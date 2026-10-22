@@ -3190,17 +3190,16 @@ jobs:
 
               private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
+              private val connecting = java.util.concurrent.atomic.AtomicBoolean(false)
+              @Volatile private var autoSuppressedFor: String? = null
+
               init {
                   checkEmbeddedFirmware()
                   transport.registerDetachListener(
                       onDetached = { onUsbDetached() },
                       onAttached = { autoSuppressedFor = null; autoConnect() }
                   )
-                  autoConnect()
               }
-
-              private val connecting = java.util.concurrent.atomic.AtomicBoolean(false)
-              @Volatile private var autoSuppressedFor: String? = null
 
               /** Called on app start/resume and whenever a 9008 / Download-Mode device is plugged in. */
               fun autoConnect() {
