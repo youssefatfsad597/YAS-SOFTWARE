@@ -3349,6 +3349,9 @@ jobs:
               // Some T505N userdata packages contain extra system images.  Keep the
               // safe default enabled so only userdata is sent from that package.
               val skipSystemFilesInUserdataTar: Boolean = true,
+              val adbConnected: Boolean = false,
+              val mtpInfoText: String = "Tap 'Read MTP Info' while the device is connected in File Transfer/MTP mode.",
+              val adbInfoText: String = "Tap 'Read ADB Info' while USB Debugging is enabled on the target device.",
               val isBusy: Boolean = false,
               val currentTask: String = "Ready",
               val progress: Float = 0f,
@@ -3363,6 +3366,7 @@ jobs:
               private val sahara = SaharaProtocol(transport, ::appendLog)
               private val firehose = FirehoseProtocol(transport, ::appendLog)
               private val odin = OdinProtocol(transport, ::appendLog)
+              private val adbClient = AdbClient(context, ::appendLog)
 
               private val _uiState = MutableStateFlow(EdlUiState())
               val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -4235,6 +4239,74 @@ jobs:
                   }
               }
 
+              /** Reads descriptor-level info (VID/PID, manufacturer, product, serial) from a
+               *  device currently connected in MTP / File Transfer mode. No ADB needed. */
+              fun readMtpInfo() {
+                  runTask("Reading MTP Device Info") {
+                      val devices = MtpInfoReader.findMtpDevices(context)
+                      if (devices.isEmpty()) {
+                          appendLog("No MTP device detected. Connect the phone in 'File Transfer / MTP' mode.")
+                          _uiState.update { it.copy(mtpInfoText = "No MTP device found.") }
+                          return@runTask
+                      }
+                      val info = devices.joinToString("\n---\n") { dev ->
+                          runCatching { MtpInfoReader.describe(context, dev) }
+                              .getOrElse { e -> "Error reading device: ${e.message}" }
+                      }
+                      appendLog("MTP info read (${devices.size} device(s)).")
+                      _uiState.update { it.copy(mtpInfoText = info) }
+                  }
+              }
+
+              /** Connects over the standard ADB protocol (same handshake a PC's adb uses --
+               *  the target still shows its normal "Allow USB debugging?" prompt on first use)
+               *  and reads basic build/device properties via 'getprop'. */
+              fun readAdbInfo() {
+                  runTask("Reading ADB Device Info") {
+                      if (!adbClient.connect()) {
+                          _uiState.update {
+                              it.copy(
+                                  adbConnected = false,
+                                  adbInfoText = "ADB connection failed. Enable USB Debugging on the target and accept the on-device authorization prompt."
+                              )
+                          }
+                          return@runTask
+                      }
+                      val raw = adbClient.shell(
+                          "getprop ro.product.manufacturer; getprop ro.product.model; " +
+                              "getprop ro.build.version.release; getprop ro.build.version.sdk; getprop ro.serialno"
+                      )
+                      val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
+                      val manufacturer = lines.getOrNull(0) ?: "?"
+                      val model = lines.getOrNull(1) ?: "?"
+                      val androidVer = lines.getOrNull(2) ?: "?"
+                      val sdk = lines.getOrNull(3) ?: "?"
+                      val serial = lines.getOrNull(4) ?: "?"
+                      val summary = "Manufacturer: $manufacturer\nModel: $model\n" +
+                          "Android: $androidVer (SDK $sdk)\nSerial: $serial\nADB Banner: ${adbClient.banner}"
+                      appendLog("ADB info read successfully.")
+                      _uiState.update { it.copy(adbConnected = true, adbInfoText = summary) }
+                  }
+              }
+
+              /** Reboots the connected device into the requested target mode over ADB.
+               *  'target' follows the standard adb reboot targets: "" (normal), "recovery",
+               *  "download" (Samsung Odin/Download mode), "edl" (Qualcomm chips that expose it).
+               *  The device itself decides whether a given target is supported. */
+              fun adbRebootTo(target: String, label: String) {
+                  runTask("ADB Reboot -> $label") {
+                      if (!adbClient.connect()) {
+                          appendLog("ERROR: could not establish ADB connection (is USB Debugging enabled and authorized?).")
+                          return@runTask
+                      }
+                      appendLog("Sending 'reboot:$target' ...")
+                      adbClient.reboot(target)
+                      appendLog("Reboot command sent. Device should switch to $label shortly.")
+                      adbClient.close()
+                      _uiState.update { it.copy(adbConnected = false) }
+                  }
+              }
+
               private fun updateProgress(doneBytes: Long, totalBytes: Long, startTimeNs: Long) {
                   if (totalBytes <= 0L) return
                   val elapsedSec = ((System.nanoTime() - startTimeNs) / 1_000_000_000.0).coerceAtLeast(0.001)
@@ -4267,6 +4339,7 @@ jobs:
                   super.onCleared()
                   transport.unregisterDetachListener()
                   transport.close()
+                  adbClient.close()
               }
           }
           EOF
@@ -4344,10 +4417,13 @@ jobs:
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
-              onFlashUserdataOnly: () -> Unit
+              onFlashUserdataOnly: () -> Unit,
+              onReadMtpInfo: () -> Unit,
+              onReadAdbInfo: () -> Unit,
+              onAdbReboot: (String, String) -> Unit
           ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. X216B Service", "2. GPT Partitions", "3. XML Flasher", "4. Samsung Odin")
+              val tabs = listOf("1. X216B Service", "2. GPT Partitions", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
 
@@ -4568,6 +4644,12 @@ jobs:
                               onToggleSkipSystemFilesInUserdataTar = onToggleSkipSystemFilesInUserdataTar,
                               onRunOdinFlash = onRunOdinFlash,
                               onFlashUserdataOnly = onFlashUserdataOnly
+                          )
+                          4 -> AdbMtpTab(
+                              state = state,
+                              onReadMtpInfo = onReadMtpInfo,
+                              onReadAdbInfo = onReadAdbInfo,
+                              onAdbReboot = onAdbReboot
                           )
                       }
                   }
@@ -5206,6 +5288,141 @@ jobs:
           }
 
           @Composable
+          private fun AdbMtpTab(
+              state: EdlUiState,
+              onReadMtpInfo: () -> Unit,
+              onReadAdbInfo: () -> Unit,
+              onAdbReboot: (String, String) -> Unit
+          ) {
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text("MTP Device Info", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                          Text(
+                              "Reads USB descriptor info (Vendor/Product ID, manufacturer, product, serial) while the phone is connected in File Transfer / MTP mode.",
+                              fontSize = 10.sp,
+                              color = Color.LightGray
+                          )
+                          OutlinedButton(
+                              onClick = onReadMtpInfo,
+                              enabled = !state.isBusy,
+                              modifier = Modifier.fillMaxWidth(),
+                              contentPadding = PaddingValues(8.dp)
+                          ) {
+                              Text("Read MTP Info", fontSize = 12.sp, color = YasCyan, fontWeight = FontWeight.Bold)
+                          }
+                          Text(
+                              state.mtpInfoText,
+                              fontSize = 11.sp,
+                              color = Color.LightGray,
+                              fontFamily = FontFamily.Monospace
+                          )
+                      }
+                  }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .border(1.dp, if (state.adbConnected) YasGreen else Color(0xFF2A3A4F), RoundedCornerShape(8.dp))
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text("ADB Device Info", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                          Text(
+                              "Connects over standard ADB (USB Debugging must be enabled; the target device still shows its own 'Allow USB debugging?' prompt on first use, exactly as with a PC).",
+                              fontSize = 10.sp,
+                              color = Color.LightGray
+                          )
+                          OutlinedButton(
+                              onClick = onReadAdbInfo,
+                              enabled = !state.isBusy,
+                              modifier = Modifier.fillMaxWidth(),
+                              contentPadding = PaddingValues(8.dp)
+                          ) {
+                              Text("Read ADB Info", fontSize = 12.sp, color = YasCyan, fontWeight = FontWeight.Bold)
+                          }
+                          Text(
+                              state.adbInfoText,
+                              fontSize = 11.sp,
+                              color = Color.LightGray,
+                              fontFamily = FontFamily.Monospace
+                          )
+                      }
+                  }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Text("Reboot Target (via ADB)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                          Text(
+                              "Each button opens an ADB connection and sends the matching 'adb reboot <target>' command. Support for a given target depends on the connected device/chipset.",
+                              fontSize = 10.sp,
+                              color = Color.LightGray
+                          )
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              Button(
+                                  onClick = { onAdbReboot("download", "Download Mode") },
+                                  enabled = !state.isBusy,
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                                  modifier = Modifier.weight(1f),
+                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                              ) {
+                                  Text("MTP -> Download", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                              }
+                              Button(
+                                  onClick = { onAdbReboot("recovery", "Recovery") },
+                                  enabled = !state.isBusy,
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                                  modifier = Modifier.weight(1f),
+                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                              ) {
+                                  Text("MTP -> Recovery", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                              }
+                          }
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              Button(
+                                  onClick = { onAdbReboot("edl", "EDL (9008)") },
+                                  enabled = !state.isBusy,
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
+                                  modifier = Modifier.weight(1f),
+                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                              ) {
+                                  Text("MTP -> EDL", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                              }
+                              OutlinedButton(
+                                  onClick = { onAdbReboot("", "Normal Restart") },
+                                  enabled = !state.isBusy,
+                                  modifier = Modifier.weight(1f),
+                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                              ) {
+                                  Text("Restart", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          @Composable
           private fun TelemetryAndConsolePanel(
               state: EdlUiState,
               onClearLogs: () -> Unit,
@@ -5446,10 +5663,561 @@ jobs:
                               onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
                               onToggleSkipSystemFilesInUserdataTar = viewModel::setSkipSystemFilesInUserdataTar,
                               onRunOdinFlash = viewModel::runOdinFlashSequence,
-                              onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly
+                              onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
+                              onReadMtpInfo = viewModel::readMtpInfo,
+                              onReadAdbInfo = viewModel::readAdbInfo,
+                              onAdbReboot = viewModel::adbRebootTo
                           )
                       }
                   }
+              }
+          }
+          EOF
+
+      - name: Create MTP/ADB Tab Support Files
+        run: |
+          mkdir -p app/src/main/java/com/edl/flasher/usb
+          mkdir -p app/src/main/java/com/edl/flasher/protocol
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/usb/AdbUsbTransport.kt
+          package com.edl.flasher.usb
+
+          import android.content.Context
+          import android.hardware.usb.UsbConstants
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+          import android.hardware.usb.UsbEndpoint
+          import android.hardware.usb.UsbInterface
+          import android.hardware.usb.UsbManager
+          import java.io.Closeable
+          import java.io.IOException
+          import kotlin.math.min
+
+          /**
+           * Minimal USB transport for the standard ADB protocol (interface class 0xFF,
+           * subclass 0x42, protocol 0x01 -- the same descriptor every "USB debugging"
+           * capable Android device exposes). This only moves raw bytes; the ADB framing,
+           * auth and shell logic live in [com.edl.flasher.protocol.AdbClient].
+           */
+          class AdbUsbTransport(private val context: Context) : Closeable {
+
+              companion object {
+                  private const val ADB_CLASS = 0xFF
+                  private const val ADB_SUBCLASS = 0x42
+                  private const val ADB_PROTOCOL = 0x01
+                  private const val USB_CHUNK_LIMIT = 16384
+              }
+
+              private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+              private var connection: UsbDeviceConnection? = null
+              private var usbInterface: UsbInterface? = null
+              private var epIn: UsbEndpoint? = null
+              private var epOut: UsbEndpoint? = null
+
+              var device: UsbDevice? = null
+                  private set
+
+              val isOpen: Boolean
+                  get() = connection != null && epIn != null && epOut != null
+
+              fun findAdbCapableDevices(): List<UsbDevice> =
+                  usbManager.deviceList.values.filter { dev -> hasAdbInterface(dev) }
+
+              private fun hasAdbInterface(dev: UsbDevice): Boolean {
+                  for (i in 0 until dev.interfaceCount) {
+                      val intf = dev.getInterface(i)
+                      if (intf.interfaceClass == ADB_CLASS &&
+                          intf.interfaceSubclass == ADB_SUBCLASS &&
+                          intf.interfaceProtocol == ADB_PROTOCOL
+                      ) return true
+                  }
+                  return false
+              }
+
+              fun hasPermission(dev: UsbDevice): Boolean = usbManager.hasPermission(dev)
+
+              fun requestPermission(dev: UsbDevice, pendingIntent: android.app.PendingIntent) {
+                  usbManager.requestPermission(dev, pendingIntent)
+              }
+
+              fun open(dev: UsbDevice): Boolean {
+                  close()
+                  for (i in 0 until dev.interfaceCount) {
+                      val intf = dev.getInterface(i)
+                      if (intf.interfaceClass != ADB_CLASS ||
+                          intf.interfaceSubclass != ADB_SUBCLASS ||
+                          intf.interfaceProtocol != ADB_PROTOCOL
+                      ) continue
+
+                      var foundIn: UsbEndpoint? = null
+                      var foundOut: UsbEndpoint? = null
+                      for (j in 0 until intf.endpointCount) {
+                          val ep = intf.getEndpoint(j)
+                          if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                          if (ep.direction == UsbConstants.USB_DIR_IN) foundIn = ep else foundOut = ep
+                      }
+
+                      if (foundIn != null && foundOut != null) {
+                          val conn = usbManager.openDevice(dev) ?: return false
+                          if (!conn.claimInterface(intf, true)) {
+                              conn.close()
+                              return false
+                          }
+                          connection = conn
+                          usbInterface = intf
+                          epIn = foundIn
+                          epOut = foundOut
+                          device = dev
+                          return true
+                      }
+                  }
+                  return false
+              }
+
+              @Throws(IOException::class)
+              fun write(data: ByteArray, timeoutMs: Int = 10000) {
+                  val conn = connection ?: throw IOException("ADB USB transport not open")
+                  val out = epOut ?: throw IOException("ADB OUT endpoint missing")
+                  var sent = 0
+                  while (sent < data.size) {
+                      val chunk = min(USB_CHUNK_LIMIT, data.size - sent)
+                      val n = conn.bulkTransfer(out, data, sent, chunk, timeoutMs)
+                      if (n < 0) throw IOException("ADB bulk write failed at offset $sent")
+                      sent += n
+                  }
+              }
+
+              @Throws(IOException::class)
+              fun readExact(length: Int, timeoutMs: Int = 10000): ByteArray {
+                  val conn = connection ?: throw IOException("ADB USB transport not open")
+                  val inEp = epIn ?: throw IOException("ADB IN endpoint missing")
+                  val result = ByteArray(length)
+                  var got = 0
+                  while (got < length) {
+                      val tmp = ByteArray(min(USB_CHUNK_LIMIT, length - got))
+                      val n = conn.bulkTransfer(inEp, tmp, tmp.size, timeoutMs)
+                      if (n < 0) throw IOException("ADB bulk read failed at offset $got")
+                      if (n > 0) {
+                          System.arraycopy(tmp, 0, result, got, n)
+                          got += n
+                      }
+                  }
+                  return result
+              }
+
+              override fun close() {
+                  runCatching {
+                      usbInterface?.let { connection?.releaseInterface(it) }
+                      connection?.close()
+                  }
+                  connection = null
+                  usbInterface = null
+                  epIn = null
+                  epOut = null
+                  device = null
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/AdbProtocol.kt
+          package com.edl.flasher.protocol
+
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          /** Wire-format constants for the standard ADB host<->device protocol. */
+          object AdbProtocolConst {
+              const val A_CNXN = 0x4e584e43
+              const val A_OPEN = 0x4e45504f
+              const val A_OKAY = 0x59414b4f
+              const val A_CLSE = 0x45534c43
+              const val A_WRTE = 0x45545257
+              const val A_AUTH = 0x48545541
+
+              const val AUTH_TOKEN = 1
+              const val AUTH_SIGNATURE = 2
+              const val AUTH_RSAPUBLICKEY = 3
+
+              const val A_VERSION = 0x01000000
+              const val MAX_PAYLOAD = 256 * 1024
+          }
+
+          /** One framed ADB packet: a fixed 24-byte header, optionally followed by [payload]. */
+          class AdbMessage(
+              val command: Int,
+              val arg0: Int,
+              val arg1: Int,
+              val payload: ByteArray = ByteArray(0)
+          ) {
+              fun encodeHeader(): ByteArray {
+                  val buf = ByteBuffer.allocate(24).order(ByteOrder.LITTLE_ENDIAN)
+                  buf.putInt(command)
+                  buf.putInt(arg0)
+                  buf.putInt(arg1)
+                  buf.putInt(payload.size)
+                  buf.putInt(checksum(payload))
+                  buf.putInt(command.inv())
+                  return buf.array()
+              }
+
+              companion object {
+                  fun checksum(data: ByteArray): Int {
+                      var sum = 0
+                      for (b in data) sum += (b.toInt() and 0xFF)
+                      return sum
+                  }
+
+                  /** Returns [command, arg0, arg1, dataLength, dataChecksum, magic]. */
+                  fun decodeHeader(bytes: ByteArray): IntArray {
+                      val buf = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
+                      return intArrayOf(buf.int, buf.int, buf.int, buf.int, buf.int, buf.int)
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/AdbCrypto.kt
+          package com.edl.flasher.protocol
+
+          import android.content.Context
+          import android.util.Base64
+          import java.io.File
+          import java.math.BigInteger
+          import java.security.KeyFactory
+          import java.security.KeyPair
+          import java.security.KeyPairGenerator
+          import java.security.spec.PKCS8EncodedKeySpec
+          import java.security.spec.X509EncodedKeySpec
+          import java.security.interfaces.RSAPrivateCrtKey
+          import java.security.interfaces.RSAPublicKey
+          import javax.crypto.Cipher
+
+          /**
+           * RSA key-pair generation/storage and the ADB AUTH signing scheme used by the
+           * real `adb` host tool. This re-implements the public, documented wire format
+           * only -- it does not and cannot skip the on-device "Allow USB debugging?"
+           * authorization prompt the first time a given key talks to a given phone.
+           */
+          object AdbCrypto {
+
+              private const val KEY_LEN_BITS = 2048
+              private const val KEY_LEN_BYTES = KEY_LEN_BITS / 8
+              private const val KEY_LEN_WORDS = KEY_LEN_BYTES / 4
+
+              fun loadOrGenerateKeyPair(context: Context): KeyPair {
+                  val dir = File(context.filesDir, "adbkey")
+                  val privFile = File(dir, "adbkey.priv")
+                  val pubFile = File(dir, "adbkey.pub")
+                  if (privFile.exists() && pubFile.exists()) {
+                      runCatching {
+                          val kf = KeyFactory.getInstance("RSA")
+                          val priv = kf.generatePrivate(PKCS8EncodedKeySpec(Base64.decode(privFile.readText(), Base64.DEFAULT)))
+                          val pub = kf.generatePublic(X509EncodedKeySpec(Base64.decode(pubFile.readText(), Base64.DEFAULT)))
+                          return KeyPair(pub, priv)
+                      }
+                  }
+                  val kpg = KeyPairGenerator.getInstance("RSA")
+                  kpg.initialize(KEY_LEN_BITS)
+                  val pair = kpg.generateKeyPair()
+                  dir.mkdirs()
+                  runCatching {
+                      privFile.writeText(Base64.encodeToString(pair.private.encoded, Base64.DEFAULT))
+                      pubFile.writeText(Base64.encodeToString(pair.public.encoded, Base64.DEFAULT))
+                  }
+                  return pair
+              }
+
+              /** Signs a 20-byte ADB auth token using the ADB-specific PKCS#1 v1.5 padding
+               *  (fixed 0x00 0x01 0xFF...0xFF 0x00 prefix, no DigestInfo/OID wrapper). */
+              fun sign(keyPair: KeyPair, token: ByteArray): ByteArray {
+                  val padded = ByteArray(KEY_LEN_BYTES)
+                  padded[0] = 0x00
+                  padded[1] = 0x01
+                  val padLen = KEY_LEN_BYTES - 3 - token.size
+                  for (i in 0 until padLen) padded[2 + i] = 0xFF.toByte()
+                  padded[2 + padLen] = 0x00
+                  System.arraycopy(token, 0, padded, 3 + padLen, token.size)
+
+                  val cipher = Cipher.getInstance("RSA/ECB/NoPadding")
+                  cipher.init(Cipher.ENCRYPT_MODE, keyPair.private)
+                  return cipher.doFinal(padded)
+              }
+
+              /** Encodes the public key in ADB's own binary RSAPublicKey struct format,
+               *  base64s it and appends a " comment" field, matching what a real adb
+               *  client sends for AUTH_RSAPUBLICKEY. */
+              fun publicKeyToAdbFormat(keyPair: KeyPair): String {
+                  val priv = keyPair.private as RSAPrivateCrtKey
+                  val n = priv.modulus
+                  val e = priv.publicExponent
+
+                  val r32 = BigInteger.ONE.shiftLeft(32)
+                  val r = BigInteger.ONE.shiftLeft(32 * KEY_LEN_WORDS)
+                  val rr = r.multiply(r).mod(n)
+                  val n0 = n.mod(r32)
+                  val n0invRaw = n0.modInverse(r32)
+                  val n0inv = r32.subtract(n0invRaw).mod(r32)
+
+                  val buf = java.io.ByteArrayOutputStream()
+                  buf.write(leWord(KEY_LEN_WORDS))
+                  buf.write(leWord(n0inv.toInt()))
+                  buf.write(bigIntToLeWords(n, KEY_LEN_WORDS))
+                  buf.write(bigIntToLeWords(rr, KEY_LEN_WORDS))
+                  buf.write(leWord(e.toInt()))
+
+                  val encoded = Base64.encodeToString(buf.toByteArray(), Base64.NO_WRAP)
+                  return "$encoded yas-flash-edl@mtp-adb"
+              }
+
+              private fun leWord(value: Int): ByteArray {
+                  return byteArrayOf(
+                      (value and 0xFF).toByte(),
+                      ((value shr 8) and 0xFF).toByte(),
+                      ((value shr 16) and 0xFF).toByte(),
+                      ((value shr 24) and 0xFF).toByte()
+                  )
+              }
+
+              private fun bigIntToLeWords(value: BigInteger, words: Int): ByteArray {
+                  var v = value
+                  val out = ByteArray(words * 4)
+                  val mask = BigInteger.valueOf(0xFFFFFFFFL)
+                  for (i in 0 until words) {
+                      val word = v.and(mask).toInt()
+                      val wordBytes = leWord(word)
+                      System.arraycopy(wordBytes, 0, out, i * 4, 4)
+                      v = v.shiftRight(32)
+                  }
+                  return out
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/AdbClient.kt
+          package com.edl.flasher.protocol
+
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbManager
+          import android.os.Build
+          import com.edl.flasher.usb.AdbUsbTransport
+          import kotlinx.coroutines.suspendCancellableCoroutine
+          import kotlin.coroutines.resume
+
+          /**
+           * Thin client over the standard ADB protocol: CONNECT/AUTH handshake, opening
+           * a "shell:<cmd>" stream and reading its output, and sending "reboot:<target>".
+           * Authorization is exactly what a PC's adb would require -- the very first
+           * connection from this app's key still needs the user to tap "Allow" on the
+           * target device's own USB-debugging prompt.
+           */
+          class AdbClient(private val context: Context, private val log: (String) -> Unit) {
+
+              companion object {
+                  private const val ACTION_ADB_USB_PERMISSION = "com.yas.flashedl.ADB_USB_PERMISSION"
+              }
+
+              private val transport = AdbUsbTransport(context)
+              private var localIdCounter = 1
+
+              var banner: String = ""
+                  private set
+
+              suspend fun connect(): Boolean {
+                  val dev = transport.findAdbCapableDevices().firstOrNull()
+                  if (dev == null) {
+                      log("No USB-debugging capable device found. Enable Developer Options -> USB debugging on the target and keep it plugged in.")
+                      return false
+                  }
+                  if (!transport.hasPermission(dev) && !requestPermission(dev)) {
+                      log("USB permission denied for the ADB-capable device.")
+                      return false
+                  }
+                  if (!transport.open(dev)) {
+                      log("Failed to open the ADB USB interface.")
+                      return false
+                  }
+
+                  val keyPair = AdbCrypto.loadOrGenerateKeyPair(context)
+                  sendMessage(
+                      AdbMessage(
+                          AdbProtocolConst.A_CNXN,
+                          AdbProtocolConst.A_VERSION,
+                          AdbProtocolConst.MAX_PAYLOAD,
+                          "host::yas-flash-edl\u0000".toByteArray()
+                      )
+                  )
+
+                  var authAttempts = 0
+                  while (authAttempts < 4) {
+                      val msg = readMessage() ?: return false
+                      when (msg.command) {
+                          AdbProtocolConst.A_CNXN -> {
+                              banner = String(msg.payload).trimEnd('\u0000')
+                              log("ADB connected: $banner")
+                              return true
+                          }
+                          AdbProtocolConst.A_AUTH -> {
+                              if (msg.arg0 != AdbProtocolConst.AUTH_TOKEN) continue
+                              authAttempts++
+                              if (authAttempts == 1) {
+                                  val signature = AdbCrypto.sign(keyPair, msg.payload)
+                                  sendMessage(AdbMessage(AdbProtocolConst.A_AUTH, AdbProtocolConst.AUTH_SIGNATURE, 0, signature))
+                              } else {
+                                  log("Check the target device's screen and tap 'Allow' for USB debugging.")
+                                  val pubKey = (AdbCrypto.publicKeyToAdbFormat(keyPair) + "\u0000").toByteArray()
+                                  sendMessage(AdbMessage(AdbProtocolConst.A_AUTH, AdbProtocolConst.AUTH_RSAPUBLICKEY, 0, pubKey))
+                              }
+                          }
+                          else -> { /* ignore stray packets before the handshake completes */ }
+                      }
+                  }
+                  log("ADB handshake timed out waiting for device authorization.")
+                  return false
+              }
+
+              suspend fun shell(command: String, timeoutMs: Long = 15000): String {
+                  val localId = localIdCounter++
+                  sendMessage(AdbMessage(AdbProtocolConst.A_OPEN, localId, 0, "shell:$command\u0000".toByteArray()))
+
+                  val output = StringBuilder()
+                  val deadline = System.currentTimeMillis() + timeoutMs
+                  while (System.currentTimeMillis() < deadline) {
+                      val msg = readMessage() ?: break
+                      when (msg.command) {
+                          AdbProtocolConst.A_WRTE -> {
+                              if (msg.arg1 == localId) {
+                                  output.append(String(msg.payload))
+                                  sendMessage(AdbMessage(AdbProtocolConst.A_OKAY, localId, msg.arg0))
+                              }
+                          }
+                          AdbProtocolConst.A_CLSE -> {
+                              if (msg.arg1 == localId) {
+                                  sendMessage(AdbMessage(AdbProtocolConst.A_CLSE, localId, msg.arg0))
+                                  return output.toString()
+                              }
+                          }
+                          else -> { /* OKAY for the OPEN itself, etc. -- nothing to do */ }
+                      }
+                  }
+                  return output.toString()
+              }
+
+              /** target: "" (normal), "recovery", "download" (Samsung Odin/Download mode),
+               *  "edl" (Qualcomm chips that expose it), "bootloader". */
+              suspend fun reboot(target: String) {
+                  val localId = localIdCounter++
+                  sendMessage(AdbMessage(AdbProtocolConst.A_OPEN, localId, 0, "reboot:$target\u0000".toByteArray()))
+                  runCatching {
+                      val deadline = System.currentTimeMillis() + 3000
+                      while (System.currentTimeMillis() < deadline) {
+                          val msg = readMessage() ?: break
+                          if (msg.command == AdbProtocolConst.A_CLSE) break
+                      }
+                  }
+              }
+
+              fun close() {
+                  transport.close()
+              }
+
+              private suspend fun requestPermission(dev: UsbDevice): Boolean = suspendCancellableCoroutine { cont ->
+                  val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                  val receiver = object : BroadcastReceiver() {
+                      override fun onReceive(ctx: Context, intent: Intent) {
+                          if (intent.action == ACTION_ADB_USB_PERMISSION) {
+                              context.unregisterReceiver(this)
+                              if (cont.isActive) {
+                                  cont.resume(intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false))
+                              }
+                          }
+                      }
+                  }
+                  val filter = IntentFilter(ACTION_ADB_USB_PERMISSION)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      context.registerReceiver(receiver, filter)
+                  }
+                  val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                      PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+                  } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      PendingIntent.FLAG_MUTABLE
+                  } else {
+                      0
+                  }
+                  val pendingIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_ADB_USB_PERMISSION), flags)
+                  usbManager.requestPermission(dev, pendingIntent)
+                  cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+              }
+
+              private fun sendMessage(msg: AdbMessage) {
+                  transport.write(msg.encodeHeader())
+                  if (msg.payload.isNotEmpty()) transport.write(msg.payload)
+              }
+
+              private fun readMessage(): AdbMessage? {
+                  return try {
+                      val header = transport.readExact(24)
+                      val fields = AdbMessage.decodeHeader(header)
+                      val dataLen = fields[3]
+                      val payload = if (dataLen > 0) transport.readExact(dataLen) else ByteArray(0)
+                      AdbMessage(fields[0], fields[1], fields[2], payload)
+                  } catch (e: Exception) {
+                      log("ADB read error: ${e.message}")
+                      null
+                  }
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/MtpInfoReader.kt
+          package com.edl.flasher.protocol
+
+          import android.content.Context
+          import android.hardware.usb.UsbConstants
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbManager
+
+          /** Reads USB-descriptor-level info from a device connected in MTP / File
+           *  Transfer mode. No ADB and no extra permissions beyond normal USB host
+           *  access are required for the VID/PID/interface info; manufacturer, product
+           *  and serial strings need the standard USB permission grant. */
+          object MtpInfoReader {
+
+              private const val USB_CLASS_STILL_IMAGE = 6 // PTP/MTP devices commonly expose this class
+
+              fun findMtpDevices(context: Context): List<UsbDevice> {
+                  val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                  return usbManager.deviceList.values.filter { dev ->
+                      (0 until dev.interfaceCount).any { i ->
+                          val intf = dev.getInterface(i)
+                          intf.interfaceClass == USB_CLASS_STILL_IMAGE ||
+                              (intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC && intf.interfaceSubclass == 0xFF)
+                      }
+                  }
+              }
+
+              fun describe(context: Context, dev: UsbDevice): String {
+                  val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                  val hasPermission = usbManager.hasPermission(dev)
+                  val sb = StringBuilder()
+                  sb.appendLine("Vendor ID: 0x${dev.vendorId.toString(16).uppercase()}")
+                  sb.appendLine("Product ID: 0x${dev.productId.toString(16).uppercase()}")
+                  sb.appendLine("Device Name: ${dev.deviceName}")
+                  if (hasPermission) {
+                      sb.appendLine("Manufacturer: ${runCatching { dev.manufacturerName }.getOrNull() ?: "Unknown"}")
+                      sb.appendLine("Product: ${runCatching { dev.productName }.getOrNull() ?: "Unknown"}")
+                      sb.appendLine("Serial: ${runCatching { dev.serialNumber }.getOrNull() ?: "Unavailable"}")
+                  } else {
+                      sb.appendLine("Grant USB permission to read Manufacturer/Product/Serial.")
+                  }
+                  sb.appendLine("Interfaces: ${dev.interfaceCount}")
+                  return sb.toString()
               }
           }
           EOF
