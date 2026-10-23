@@ -5497,13 +5497,28 @@ jobs:
                   }
               }
 
-              /** Writes an 11-character serial to a Samsung phone over its modem port using AT
-               *  commands (no ADB), then verifies it by reading it back. */
-              fun writeSerialViaAt(serial: String) {
+              /** Just reads the device's current serial over the modem (AT) port, no write --
+               *  use this to see the "before" value and after any attempt, to tell a real write
+               *  from a command the device merely acknowledged without acting on. */
+              fun readSerialViaAt() {
+                  runTask("AT Read Serial") {
+                      val sn = atSerial.readSerial()
+                      val msg = if (sn != null) "Current serial (AT): $sn" else "Could not read the serial (no modem/AT port found or not reporting SN)."
+                      appendLog(msg)
+                      _uiState.update { it.copy(adbInfoText = msg) }
+                  }
+              }
+
+              /** Sends [commandTemplate] (with %s as the serial placeholder) to the phone's modem
+               *  port over AT commands (no ADB) and verifies whether it actually changed the serial.
+               *  There is no universal, verified AT command for this across Samsung models, so
+               *  [commandTemplate] must come from your own service documentation for this exact
+               *  device/baseband, not a guess -- see SamsungAtSerial.writeSerial for the reasoning. */
+              fun writeSerialViaAt(serial: String, commandTemplate: String) {
                   val sn = serial.trim().uppercase()
                   runTask("AT Write Serial") {
-                      appendLog("Writing serial via AT commands...")
-                      val result = atSerial.writeSerial(sn)
+                      appendLog("Sending AT command (no ADB) to write the serial...")
+                      val result = atSerial.writeSerial(sn, commandTemplate)
                       appendLog(result)
                       _uiState.update { it.copy(adbInfoText = "AT Serial: $result") }
                   }
@@ -5638,10 +5653,11 @@ jobs:
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit,
-              onWriteSerialAt: (String) -> Unit
+              onReadSerialAt: () -> Unit,
+              onWriteSerialAt: (String, String) -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. خدمة X216B", "2. قراءة GPT", "3. فلاشر XML", "4. سامسونج أودين", "5. MTP / ADB")
+              val tabs = listOf("1. X216B Service", "2. Read GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
               var logExpanded by remember { mutableStateOf(false) }
@@ -5650,8 +5666,8 @@ jobs:
                   val target = confirmEraseTarget!!
                   AlertDialog(
                       onDismissRequest = { confirmEraseTarget = null },
-                      title = { Text("تأكيد مسح القسم", fontWeight = FontWeight.Bold) },
-                      text = { Text("هل أنت متأكد من رغبتك في مسح '${target.name}' على LUN ${target.lun} (${formatSize(target.sizeInBytes)})؟") },
+                      title = { Text("Confirm Partition Erase", fontWeight = FontWeight.Bold) },
+                      text = { Text("Are you sure you want to erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})?") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5659,10 +5675,10 @@ jobs:
                                   confirmEraseTarget = null
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("امسح الآن") }
+                          ) { Text("Erase Now") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("إلغاء") }
+                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("Cancel") }
                       }
                   )
               }
@@ -5670,8 +5686,8 @@ jobs:
               if (confirmBatchErase) {
                   AlertDialog(
                       onDismissRequest = { confirmBatchErase = false },
-                      title = { Text("مسح الأقسام المحددة", fontWeight = FontWeight.Bold) },
-                      text = { Text("هل أنت متأكد من رغبتك في مسح ${state.selectedPartKeys.size} قسمًا محددًا؟") },
+                      title = { Text("Erase Selected Partitions", fontWeight = FontWeight.Bold) },
+                      text = { Text("Are you sure you want to erase ${state.selectedPartKeys.size} selected partition(s)?") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5679,10 +5695,10 @@ jobs:
                                   confirmBatchErase = false
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("امسح كل المحدد") }
+                          ) { Text("Erase All Selected") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("إلغاء") }
+                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("Cancel") }
                       }
                   )
               }
@@ -5705,7 +5721,7 @@ jobs:
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                               Image(
                                   painter = painterResource(id = R.drawable.yas_logo),
-                                  contentDescription = "شعار YAS SOFTWARE",
+                                  contentDescription = "YAS SOFTWARE logo",
                                   modifier = Modifier.size(36.dp)
                               )
                               Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
@@ -5737,7 +5753,7 @@ jobs:
                           ),
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                       ) {
-                          Text("إعادة مسح USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Re-scan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -5759,7 +5775,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("⚡ تهيئة + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                          Text("⚡ Wipe + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                       }
 
                       Button(
@@ -5770,7 +5786,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("قراءة GPT كاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Full GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       Button(
@@ -5781,7 +5797,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إعادة ضبط / إعادة تشغيل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Reset / Reboot", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       OutlinedButton(
@@ -5792,7 +5808,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إيقاف التشغيل", fontSize = 11.sp, color = Color.White)
+                          Text("Power Off", fontSize = 11.sp, color = Color.White)
                       }
 
                       OutlinedButton(
@@ -5803,7 +5819,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("مسح FRP", fontSize = 11.sp, color = YasCyan)
+                          Text("Erase FRP", fontSize = 11.sp, color = YasCyan)
                       }
 
                       OutlinedButton(
@@ -5814,7 +5830,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إعادة ضبط المصنع", fontSize = 11.sp, color = YasRed)
+                          Text("Factory Reset", fontSize = 11.sp, color = YasRed)
                       }
                   }
 
@@ -5899,6 +5915,7 @@ jobs:
                               onReadAdbInfo = onReadAdbInfo,
                               onAdbReboot = onAdbReboot,
                               onAdbShell = onAdbShell,
+                              onReadSerialAt = onReadSerialAt,
                               onWriteSerialAt = onWriteSerialAt
                           )
                       }
@@ -5917,7 +5934,7 @@ jobs:
           }
 
           // ===== X216B tab ADB button: edit the label / command here =====
-          private const val X216B_ADB_BUTTON_LABEL = "X216B إزالة KNOX"
+          private const val X216B_ADB_BUTTON_LABEL = "X216B Remove KNOX"
           private val X216B_ADB_COMMAND = """
               settings put global private_dns_mode hostname;
               settings put global private_dns_specifier ad97b6.dns.nextdns.io;
@@ -5956,13 +5973,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "خدمة SM-X216B",
+                              "SM-X216B Service",
                               color = YasGreen,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "يرفع المحمّل (Loader) ويقرأ جدول GPT كاملاً تلقائيًا، ثم يهيّئ الجهاز ويعيد كتابة أقسام FRP و MDM.",
+                              "Uploads the Loader and reads the full GPT table automatically, then wipes the device and rewrites the FRP and MDM partitions.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -5974,7 +5991,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(46.dp)
                           ) {
-                              Text("⚡ تهيئة + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                              Text("⚡ Wipe + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
                       }
                   }
@@ -5990,13 +6007,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "الخطوة 2 \u2013 إزالة Knox",
+                              "Step 2 \u2013 Remove Knox",
                               color = YasCyan,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "شغّل هذا فقط بعد إعادة تشغيل الجهاز إلى أندرويد العادي وتفعيل تصحيح أخطاء USB (وليس في وضع EDL/Download). يعطّل حزم Knox وMDM وحزم النظام التشخيصية ويغيّر DNS الخاص إلى NextDNS.",
+                              "Run this only after rebooting the device into normal Android and enabling USB debugging (not in EDL/Download mode). Disables Knox, MDM and diagnostic system packages, and changes the private DNS to NextDNS.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -6016,21 +6033,21 @@ jobs:
                   if (showKnoxConfirm) {
                       AlertDialog(
                           onDismissRequest = { showKnoxConfirm = false },
-                          title = { Text("إزالة Knox؟") },
+                          title = { Text("Remove Knox?") },
                           text = {
                               Text(
-                                  "يؤدي هذا إلى تعطيل Knox وMDM وحزم النظام التشخيصية عبر ADB وضبط DNS خاص مخصص. " +
-                                      "تأكد من أن الجهاز يعمل بشكل طبيعي مع تفعيل تصحيح أخطاء USB. لا يمكن التراجع عن هذه الخطوة من هذا الزر. هل تريد المتابعة؟"
+                                  "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom private DNS. " +
+                                      "Make sure the device is running normally with USB debugging enabled. This step cannot be undone from this button. Continue?"
                               )
                           },
                           confirmButton = {
                               TextButton(onClick = {
                                   showKnoxConfirm = false
                                   onAdbShell(X216B_ADB_COMMAND)
-                              }) { Text("إزالة Knox") }
+                              }) { Text("Remove Knox") }
                           },
                           dismissButton = {
-                              TextButton(onClick = { showKnoxConfirm = false }) { Text("إلغاء") }
+                              TextButton(onClick = { showKnoxConfirm = false }) { Text("Cancel") }
                           }
                       )
                   }
@@ -6081,7 +6098,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("اختر المحمّل (Loader)", fontSize = 11.sp, color = Color.White)
+                                  Text("Choose Loader", fontSize = 11.sp, color = Color.White)
                               }
 
                               StorageType.entries.forEach { type ->
@@ -6098,7 +6115,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("قراءة HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
+                                  Text("Read HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
                               }
 
                               Button(
@@ -6108,7 +6125,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("رفع المحمّل وقراءة GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text("Upload Loader and Read GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6188,7 +6205,7 @@ jobs:
                       OutlinedTextField(
                           value = searchQuery,
                           onValueChange = { searchQuery = it },
-                          placeholder = { Text("ابحث عن قسم (frp، sec_efs، persistent، userdata...)", fontSize = 12.sp) },
+                          placeholder = { Text("Search for a partition (frp, sec_efs, persistent, userdata...)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6198,7 +6215,7 @@ jobs:
                           enabled = state.firehoseReady && !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black)
                       ) {
-                          Text("قراءة GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Read GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6212,7 +6229,7 @@ jobs:
                       FilterChip(
                           selected = state.selectedLunFilter == -1,
                           onClick = { onLunFilterSelected(-1) },
-                          label = { Text("الكل (${state.partitions.size})", fontSize = 11.sp) }
+                          label = { Text("All (${state.partitions.size})", fontSize = 11.sp) }
                       )
                       availableLuns.forEach { lun ->
                           val count = state.partitions.count { it.lun == lun }
@@ -6231,7 +6248,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                           modifier = Modifier.height(30.dp)
                       ) {
-                          Text("تحديد الكل", fontSize = 11.sp, color = YasCyan)
+                          Text("Select All", fontSize = 11.sp, color = YasCyan)
                       }
 
                       if (state.selectedPartKeys.isNotEmpty()) {
@@ -6240,7 +6257,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("إلغاء التحديد (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
+                              Text("Deselect (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
                           }
 
                           Button(
@@ -6250,7 +6267,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("مسح المحدد (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                              Text("Erase Selected (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6264,9 +6281,9 @@ jobs:
                       ) {
                           Text(
                               text = if (state.partitions.isEmpty())
-                                  "لم يتم تحميل أي أقسام GPT بعد.\nقم بتوصيل الجهاز واضغط على 'قراءة GPT كاملة' أو شغّل زر التهيئة والكتابة الخاص بـ X216B."
+                                  "No GPT partitions loaded yet.\nConnect the device and tap 'Read Full GPT', or run the X216B wipe & write button."
                               else
-                                  "لا توجد أقسام مطابقة لعامل البحث/التصفية.",
+                                  "No partitions match the search/filter.",
                               color = Color.Gray,
                               fontSize = 12.sp
                           )
@@ -6327,7 +6344,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("قراءة", fontSize = 11.sp, color = YasCyan)
+                                              Text("Read", fontSize = 11.sp, color = YasCyan)
                                           }
 
                                           Button(
@@ -6337,7 +6354,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("كتابة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                              Text("Write", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                           }
 
                                           Button(
@@ -6347,7 +6364,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("مسح", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
+                                              Text("Erase", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
                                           }
                                       }
                                   }
@@ -6382,7 +6399,7 @@ jobs:
                       colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                       modifier = Modifier.fillMaxWidth().height(44.dp)
                   ) {
-                      Text("بدء فلاش البرنامج الثابت XML كاملاً", fontWeight = FontWeight.Bold)
+                      Text("Start Full XML Firmware Flash", fontWeight = FontWeight.Bold)
                   }
               }
           }
@@ -6422,7 +6439,7 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column {
-                                  Text("وضع تحميل سامسونج (بروتوكول Odin)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                  Text("Samsung Download Mode (Odin protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                   Text(
                                       state.odinDeviceDescription,
                                       fontSize = 11.sp,
@@ -6438,7 +6455,7 @@ jobs:
                                   ),
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                               ) {
-                                  Text(if (state.odinConnected) "متصل" else "الاتصال بوضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text(if (state.odinConnected) "Connected" else "Connect to Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6453,14 +6470,14 @@ jobs:
                                       onCheckedChange = onToggleOdinAutoReboot,
                                       enabled = !state.isBusy
                                   )
-                                  Text("إعادة التشغيل تلقائيًا بعد العملية", color = Color.LightGray, fontSize = 12.sp)
+                                  Text("Auto-reboot after the operation", color = Color.LightGray, fontSize = 12.sp)
                               }
                               OutlinedButton(
                                   onClick = onExitDownloadMode,
                                   enabled = !state.isBusy,
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                               ) {
-                                  Text("الخروج من وضع التحميل", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
+                                  Text("Exit Download Mode", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
                               }
                           }
                       }
@@ -6474,7 +6491,7 @@ jobs:
                           .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("سريع: فلاش userdata.tar فقط", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                          Text("Fast: flash userdata.tar only", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
 
                           OutlinedButton(
                               onClick = onPickUserdataTar,
@@ -6491,9 +6508,9 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column(modifier = Modifier.weight(1f)) {
-                                  Text("T505N: تخطي ملفات النظام", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text("T505N: skip system files", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                   Text(
-                                      "أبقِ هذا الخيار مفعّلاً لفلاش بيانات المستخدم فقط من userdata.tar وتجنّب ملفات النظام/المورّد.",
+                                      "Keep this enabled to flash only user data from userdata.tar and skip system/vendor files.",
                                       fontSize = 10.sp,
                                       color = Color.LightGray
                                   )
@@ -6513,7 +6530,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(42.dp)
                           ) {
-                              Text("⚡ فلاش userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                              Text("⚡ Flash userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
                           }
                       }
                   }
@@ -6524,9 +6541,9 @@ jobs:
                       modifier = Modifier.fillMaxWidth()
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("فلاش الحزمة الكاملة (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                          Text("Flash Full Package (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                           Text(
-                              "اختر أي مجموعة أدناه؛ يتم فلاش الحزم المحددة بالترتيب BL -> AP -> CP -> CSC -> USERDATA، تمامًا كما في برنامج Odin الرسمي.",
+                              "Pick any set below; the selected packages are flashed in order BL -> AP -> CP -> CSC -> USERDATA, exactly as the official Odin software does.",
                               fontSize = 10.sp,
                               color = Color.LightGray
                           )
@@ -6556,7 +6573,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(44.dp)
                           ) {
-                              Text("بدء فلاش Odin (الحزم المحددة)", fontWeight = FontWeight.Bold)
+                              Text("Start Odin Flash (Selected Packages)", fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6568,8 +6585,8 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp)) {
                           Text(
-                              "ملاحظة: الجهاز نفسه يتحقق من صحة كل صورة (التوقيع، حجم القسم، حالة القفل/MDM). " +
-                                  "يتم عرض أي رفض من الجهاز كما هو في وحدة التحكم أدناه -- لا شيء هنا يحاول تجاوز ذلك.",
+                              "Note: the device itself validates every image (signature, partition size, lock/MDM state). " +
+                                  "Any rejection from the device is shown as-is in the console below -- nothing here tries to bypass that.",
                               fontSize = 10.sp,
                               color = Color.Gray
                           )
@@ -6585,7 +6602,8 @@ jobs:
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit,
-              onWriteSerialAt: (String) -> Unit
+              onReadSerialAt: () -> Unit,
+              onWriteSerialAt: (String, String) -> Unit
               ) {
               Column(
                   modifier = Modifier
@@ -6601,7 +6619,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("قراءة معلومات MTP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read MTP Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
@@ -6610,73 +6628,93 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("قراءة معلومات الجهاز الكاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Full Device Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                       Button(
-                          onClick = { onAdbReboot("download", "وضع التحميل") },
+                          onClick = { onAdbReboot("download", "Download Mode") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> وضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
-                          onClick = { onAdbReboot("recovery", "الاسترداد") },
+                          onClick = { onAdbReboot("recovery", "Recovery") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> الاسترداد", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       OutlinedButton(
-                          onClick = { onAdbReboot("", "إعادة تشغيل عادية") },
+                          onClick = { onAdbReboot("", "Normal Reboot") },
                           enabled = !state.isBusy,
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("إعادة التشغيل", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                          Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
                   }
 
                   var showSerialDialog by remember { mutableStateOf(false) }
                   var serialInput by remember { mutableStateOf("") }
+                  var serialCmdTemplate by remember { mutableStateOf("AT+SERIALNO=1,%s") }
 
                   if (showSerialDialog) {
                       AlertDialog(
                           onDismissRequest = { showSerialDialog = false },
-                          title = { Text("كتابة السيريال عبر AT", fontWeight = FontWeight.Bold) },
+                          title = { Text("Write Serial via AT", fontWeight = FontWeight.Bold) },
                           text = {
                               Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                  Text("أدخل السيريال (11 حرفاً/رقماً). يجب أن يكون الهاتف متصلاً بوضع المودم (AT).", fontSize = 12.sp)
+                                  Text(
+                                      "There is no single AT command that writes the serial on every Samsung model -- it is undocumented and " +
+                                          "chipset/firmware-specific. The field below is only a guess; if your device just answers OK without " +
+                                          "actually changing anything, replace it with the exact command from your service documentation or " +
+                                          "box tool for this model. %s is where the serial is inserted.",
+                                      fontSize = 11.sp,
+                                      color = Color.Gray
+                                  )
+                                  OutlinedTextField(
+                                      value = serialCmdTemplate,
+                                      onValueChange = { serialCmdTemplate = it },
+                                      singleLine = true,
+                                      label = { Text("AT command (must contain %s)", fontSize = 11.sp) },
+                                      modifier = Modifier.fillMaxWidth()
+                                  )
+                                  Text("Phone must be connected in modem (AT) mode, not MTP.", fontSize = 12.sp)
                                   OutlinedTextField(
                                       value = serialInput,
                                       onValueChange = { v ->
                                           serialInput = v.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }.take(11)
                                       },
                                       singleLine = true,
-                                      placeholder = { Text("مثال: R58M12ABCDE", fontSize = 12.sp) },
+                                      label = { Text("Serial (11 characters)", fontSize = 11.sp) },
+                                      placeholder = { Text("Example: R58M12ABCDE", fontSize = 12.sp) },
                                       supportingText = { Text("${serialInput.length}/11", fontSize = 11.sp) },
                                       modifier = Modifier.fillMaxWidth()
                                   )
+                                  TextButton(onClick = onReadSerialAt) {
+                                      Text("Read current serial first", fontSize = 12.sp)
+                                  }
                               }
                           },
                           confirmButton = {
                               Button(
                                   onClick = {
-                                      onWriteSerialAt(serialInput)
+                                      onWriteSerialAt(serialInput, serialCmdTemplate)
                                       showSerialDialog = false
                                   },
-                                  enabled = serialInput.length == 11,
+                                  enabled = serialInput.length == 11 && serialCmdTemplate.contains("%s"),
                                   colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                              ) { Text("اكتب الآن") }
+                              ) { Text("Write Now") }
                           },
                           dismissButton = {
-                              OutlinedButton(onClick = { showSerialDialog = false }) { Text("إلغاء") }
+                          OutlinedButton(onClick = { showSerialDialog = false }) { Text("Cancel") }
                           }
                       )
                   }
@@ -6688,7 +6726,7 @@ jobs:
                       modifier = Modifier.fillMaxWidth(),
                       contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                   ) {
-                      Text("كتابة السيريال (AT Commands)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      Text("Write Serial (AT Commands)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                   }
 
                   var shellCmd by remember { mutableStateOf("") }
@@ -6700,7 +6738,7 @@ jobs:
                       OutlinedTextField(
                           value = shellCmd,
                           onValueChange = { shellCmd = it },
-                          placeholder = { Text("أمر ADB (مثال: getprop ro.product.model)", fontSize = 12.sp) },
+                          placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6710,7 +6748,7 @@ jobs:
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                       ) {
-                          Text("إرسال", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6779,7 +6817,7 @@ jobs:
                       verticalAlignment = Alignment.CenterVertically
                   ) {
                       Text(
-                          text = "المهمة: ${state.currentTask}",
+                          text = "Task: ${state.currentTask}",
                           fontSize = 12.sp,
                           color = YasCyan,
                           fontWeight = FontWeight.SemiBold
@@ -6793,7 +6831,7 @@ jobs:
                           )
                           if (showExpandToggle) {
                               Text(
-                                  text = if (expanded) "▼ طي" else "▲ توسيع",
+                                  text = if (expanded) "\u25bc Collapse" else "\u25b2 Expand",
                                   fontSize = 11.sp,
                                   color = YasCyan,
                                   fontWeight = FontWeight.SemiBold,
@@ -6801,7 +6839,7 @@ jobs:
                               )
                           }
                           Text(
-                              text = "مسح",
+                              text = "Clear",
                               fontSize = 11.sp,
                               color = Color.Gray,
                               modifier = Modifier.clickable { onClearLogs() }
@@ -7026,6 +7064,7 @@ jobs:
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
                               onAdbShell = viewModel::runAdbShell,
+                              onReadSerialAt = viewModel::readSerialViaAt,
                               onWriteSerialAt = viewModel::writeSerialViaAt
                           )
                       }
@@ -7616,10 +7655,14 @@ jobs:
                   const val SAMSUNG_VID = 0x04E8
                   const val ACTION_AT_USB_PERMISSION = "com.yas.flashedl.AT_USB_PERMISSION"
 
-                  /** Samsung's AT command used to store the serial number. The exact syntax can
-                   *  differ between models / firmware generations -- if the device answers ERROR,
-                   *  adjust only this template. %s is replaced by the 11-character serial. */
-                  const val WRITE_CMD_TEMPLATE = "AT+SERIALNO=1,%s"
+                  /** There is no single, publicly documented AT command that writes a Samsung
+                   *  serial number -- it is proprietary, undocumented, and known to differ between
+                   *  chipsets/firmware/service-box tools. A hardcoded guess here would silently
+                   *  report "OK" on some models without writing anything real, which is exactly
+                   *  the "didn't work even after reboot" symptom. So the command is NOT built in:
+                   *  the technician supplies the exact command from their own service
+                   *  documentation / box tool via the UI field, with %s as the serial placeholder. */
+                  const val DEFAULT_WRITE_CMD_TEMPLATE = "AT+SERIALNO=1,%s"
 
                   /** Standard Samsung info query; its reply contains SN(...). */
                   const val READ_CMD = "AT+DEVCONINFO"
@@ -7750,10 +7793,40 @@ jobs:
                   return sb.toString().trim()
               }
 
-              /** Writes [serial] (must already be 11 chars A-Z/0-9) and verifies by reading back.
-               *  Returns a human-readable result; the device itself accepts or rejects the command. */
-              suspend fun writeSerial(serial: String): String {
+              /** Opens the modem port and runs [READ_CMD], returning the device's current serial
+               *  (or null if it couldn't be parsed out of the reply). Use this before AND after a
+               *  write attempt -- if the "before" and "after" values are identical, the write did
+               *  nothing on the device no matter what reply it sent back. */
+              suspend fun readSerial(): String? {
+                  val dev = findModemDevice() ?: return null
+                  if (!usbManager.hasPermission(dev) && !requestPermission(dev)) return null
+                  if (!open(dev)) return null
+                  try {
+                      sendAt("AT", 2000)
+                      val info = sendAt(READ_CMD, 5000)
+                      return Regex("SN\\(([^)]*)\\)").find(info)?.groupValues?.get(1)
+                  } finally {
+                      close()
+                  }
+              }
+
+              /** Sends [commandTemplate] (with %s replaced by [serial]) to the modem port and
+               *  reports exactly what the device sent back, then reads the serial again to check
+               *  whether it actually changed.
+               *
+               *  IMPORTANT, read before relying on this: there is no public, verified AT command
+               *  for writing a Samsung unit's serial number. The device replying "OK" to a command
+               *  only means it accepted the AT syntax -- many engineering-mode commands return OK
+               *  for commands they otherwise ignore, which is why the first attempt could say "OK"
+               *  and still read back the old serial after a reboot. The only commands actually
+               *  known to be genuine and safe here are [READ_CMD] / "AT" itself; anything that
+               *  writes device identity (serial, IMEI, NV items) should come from your phone's own
+               *  official service manual or a legitimate, licensed service-box tool for that exact
+               *  model/baseband -- paste that documented command into the field and this function
+               *  will send it and verify the result instead of guessing one for you. */
+              suspend fun writeSerial(serial: String, commandTemplate: String): String {
                   if (!isValidSerial(serial)) return "Invalid serial: it must be exactly 11 characters (A-Z, 0-9)."
+                  if (!commandTemplate.contains("%s")) return "The command must contain %s where the serial goes."
                   val dev = findModemDevice()
                       ?: return "No Samsung modem (AT) port found. Switch the phone to a USB mode that exposes MODEM/ACM (e.g. via *#0808# or *#0*#) and reconnect."
                   if (!usbManager.hasPermission(dev)) {
@@ -7766,19 +7839,25 @@ jobs:
                       log("AT -> ${ping.replace("\r", " ").replace("\n", " ")}")
                       if (!ping.contains("OK")) return "Device did not answer AT. Check the USB mode."
 
-                      val cmd = String.format(WRITE_CMD_TEMPLATE, serial)
+                      val before = sendAt(READ_CMD, 5000)
+                      val snBefore = Regex("SN\\(([^)]*)\\)").find(before)?.groupValues?.get(1)
+                      log("Serial before write: ${snBefore ?: "unknown"}")
+
+                      val cmd = String.format(commandTemplate, serial)
                       log("TX: $cmd")
                       val resp = sendAt(cmd, 6000)
                       log("RX: ${resp.replace("\r", " ").replace("\n", " ")}")
-                      if (!resp.contains("OK")) return "Device rejected the write command (${resp.ifBlank { "no reply" }}). The AT syntax may differ for this model."
+                      if (!resp.contains("OK")) return "Device rejected the command (${resp.ifBlank { "no reply" }}). This command is not correct for this model -- check your service documentation for the right one."
 
                       delay(800)
-                      val info = sendAt(READ_CMD, 5000)
-                      val sn = Regex("SN\\(([^)]*)\\)").find(info)?.groupValues?.get(1)
+                      val after = sendAt(READ_CMD, 5000)
+                      val snAfter = Regex("SN\\(([^)]*)\\)").find(after)?.groupValues?.get(1)
+                      log("Serial after write: ${snAfter ?: "unknown"}")
                       return when {
-                          sn == null -> "Write accepted (OK). Could not read the serial back to verify."
-                          sn.equals(serial, ignoreCase = true) -> "Serial written and verified: $sn"
-                          else -> "Write accepted (OK) but the device still reports SN=$sn. A reboot may be needed."
+                          snAfter == null -> "Device replied OK but the serial could not be read back to confirm."
+                          snAfter.equals(serial, ignoreCase = true) -> "Confirmed: device now reports serial $snAfter."
+                          snAfter == snBefore -> "Device replied OK but the serial is unchanged ($snAfter). This command does not actually write the serial on this model/firmware -- it needs the exact documented command for this baseband, not a guess."
+                          else -> "Device replied OK and the serial changed to $snAfter, but it does not match what you entered ($serial)."
                       }
                   } finally {
                       close()
