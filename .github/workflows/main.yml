@@ -4141,7 +4141,8 @@ jobs:
               fun sumFlashableSize(
                   tarInput: InputStream,
                   pit: OdinPitTable,
-                  shouldFlash: (String) -> Boolean = { true }
+                  shouldFlash: (String) -> Boolean = { true },
+                  allowUndersizedUserdata: Boolean = false
               ): Long {
                   var total = 0L
                   while (true) {
@@ -4154,7 +4155,7 @@ jobs:
                       val label = displayLabel(baseName)
                       val part = pit.findByFileName(baseName)
                       if (part != null && header.size > 0L && shouldFlash(label) &&
-                          undersizedUserdataReason(label, header.size, part) == null
+                          (allowUndersizedUserdata || undersizedUserdataReason(label, header.size, part) == null)
                       ) {
                           total += header.size
                       }
@@ -4170,7 +4171,8 @@ jobs:
                   odin: OdinProtocol,
                   logger: (String) -> Unit,
                   onPartitionProgress: (String, Long, Long) -> Unit,
-                  shouldFlash: (String) -> Boolean = { true }
+                  shouldFlash: (String) -> Boolean = { true },
+                  allowUndersizedUserdata: Boolean = false
               ): List<String> {
                   val flashed = mutableListOf<String>()
                   while (true) {
@@ -4201,7 +4203,10 @@ jobs:
                       }
 
                       val undersizedReason = undersizedUserdataReason(label, header.size, part)
-                      if (undersizedReason != null) {
+                      if (undersizedReason != null && allowUndersizedUserdata) {
+                          logger("Quick-format mode: sending small '$label' (${header.size} bytes) on purpose. " +
+                              "Storage may show smaller until a factory reset from Settings.")
+                      } else if (undersizedReason != null) {
                           logger(
                               "Skipping '$label': $undersizedReason Not writing it -- do a factory " +
                                   "data reset from the device after this flash finishes and Android " +
@@ -4364,11 +4369,13 @@ jobs:
               val cscTarUri: Uri? = null,
               val cscTarName: String = "CSC .tar/.md5: Not Selected",
               val userdataTarUri: Uri? = null,
-              val userdataTarName: String = "userdata.tar: Not Selected",
+              val userdataTarName: String = "userdata.img / .tar: Not Selected",
               val odinAutoReboot: Boolean = true,
               // Some T505N userdata packages contain extra system images.  Keep the
               // safe default enabled so only userdata is sent from that package.
               val skipSystemFilesInUserdataTar: Boolean = true,
+              // Quick format: allow a small (e.g. 64 MB) userdata.img to be written as-is.
+              val allowSmallUserdata: Boolean = true,
               val adbConnected: Boolean = false,
               val mtpInfoText: String = "",
               val adbInfoText: String = "",
@@ -4973,6 +4980,14 @@ jobs:
                   )
               }
 
+              fun setAllowSmallUserdata(enabled: Boolean) {
+                  _uiState.update { it.copy(allowSmallUserdata = enabled) }
+                  appendLog(
+                      if (enabled) "Quick format enabled: small userdata.img will be flashed as-is."
+                      else "Quick format disabled: undersized userdata images are skipped."
+                  )
+              }
+
               fun setOdinAutoReboot(enabled: Boolean) {
                   _uiState.update { it.copy(odinAutoReboot = enabled) }
               }
@@ -5073,6 +5088,45 @@ jobs:
                   }
               }
 
+              /** True when [uri] is a bare .img (not a tar): no "ustar" magic at offset 257. */
+              private fun isRawImage(uri: Uri): Boolean {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name.orEmpty().lowercase(Locale.US)
+                  if (name.endsWith(".tar") || name.endsWith(".md5") || name.endsWith(".tar.md5")) return false
+                  if (name.endsWith(".img")) return true
+                  return runCatching {
+                      context.contentResolver.openInputStream(uri)?.use { ins ->
+                          val head = ByteArray(262)
+                          var n = 0
+                          while (n < head.size) { val r = ins.read(head, n, head.size - n); if (r < 0) break; n += r }
+                          n < 262 || String(head, 257, 5, Charsets.US_ASCII) != "ustar"
+                      } ?: false
+                  }.getOrDefault(false)
+              }
+
+              private fun rawImageSize(uri: Uri, pit: OdinPitTable): Long {
+                  pit.findByFileName("userdata.img")
+                      ?: throw IllegalStateException("This device's PIT has no userdata.img entry.")
+                  return context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+                      ?: throw IllegalStateException("Cannot read the size of the selected image.")
+              }
+
+              /** Flashes a bare userdata.img (e.g. the 64 MB quick-format image) to the PIT's userdata partition. */
+              private fun flashRawImage(uri: Uri, pit: OdinPitTable) {
+                  val part = pit.findByFileName("userdata.img")
+                      ?: throw IllegalStateException("This device's PIT has no userdata.img entry.")
+                  val size = rawImageSize(uri, pit)
+                  val reason = OdinTarFlasher.undersizedUserdataReason("userdata", size, part)
+                  if (reason != null && !_uiState.value.allowSmallUserdata) {
+                      throw IllegalStateException("Refusing small userdata.img: $reason (enable Quick format to allow it).")
+                  }
+                  if (reason != null) appendLog("Quick-format mode: sending small userdata.img ($size bytes) on purpose.")
+                  appendLog("Flashing raw userdata.img -> PIT '${part.name}' (id=${part.id}, $size bytes)")
+                  val start = System.nanoTime()
+                  context.contentResolver.openInputStream(uri)?.use { ins ->
+                      odin.flashImage(part, ins, size) { done, total -> updateProgress(done, total, start) }
+                  } ?: throw IllegalStateException("Cannot open userdata image.")
+              }
+
               /**
                * Real ODIN requires the combined size of every partition that will be
                * flashed to be sent once, before the first partition's transfer begins.
@@ -5088,7 +5142,14 @@ jobs:
                   var total = 0L
                   for ((label, uri) in slots) {
                       context.contentResolver.openInputStream(uri)?.use { sizingStream ->
-                          total += OdinTarFlasher.sumFlashableSize(sizingStream, pit, userdataFilterFor(label))
+                          total += if (isRawImage(uri)) {
+                              rawImageSize(uri, pit)
+                          } else {
+                              OdinTarFlasher.sumFlashableSize(
+                                  sizingStream, pit, userdataFilterFor(label),
+                                  allowUndersizedUserdata = _uiState.value.allowSmallUserdata
+                              )
+                          }
                       } ?: throw IllegalStateException("Cannot open $label file.")
                   }
                   if (total <= 0L) {
@@ -5103,6 +5164,10 @@ jobs:
                   var lastPartition = ""
                   for ((label, uri) in slots) {
                       appendLog("Opening $label package...")
+                      if (isRawImage(uri)) {
+                          flashRawImage(uri, pit)
+                          continue
+                      }
                       context.contentResolver.openInputStream(uri)?.use { tarInput ->
                           val flashed = OdinTarFlasher.flashTarStream(
                               tarInput = tarInput,
@@ -5116,7 +5181,8 @@ jobs:
                                   }
                                   updateProgress(done, partTotal, partitionStartNs)
                               },
-                              shouldFlash = userdataFilterFor(label)
+                              shouldFlash = userdataFilterFor(label),
+                              allowUndersizedUserdata = _uiState.value.allowSmallUserdata
                           )
                           if (flashed.isEmpty()) {
                               appendLog("WARN: No recognizable/matching partition images found inside the $label package.")
@@ -5656,6 +5722,7 @@ jobs:
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
+              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -5913,6 +5980,7 @@ jobs:
                               onPickCscTar = onPickCscTar,
                               onPickUserdataTar = onPickUserdataTar,
                               onToggleSkipSystemFilesInUserdataTar = onToggleSkipSystemFilesInUserdataTar,
+                              onToggleAllowSmallUserdata = onToggleAllowSmallUserdata,
                               onRunOdinFlash = onRunOdinFlash,
                               onFlashUserdataOnly = onFlashUserdataOnly,
                               onToggleOdinAutoReboot = onToggleOdinAutoReboot,
@@ -6421,6 +6489,7 @@ jobs:
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
+              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -6529,6 +6598,26 @@ jobs:
                               )
                           }
 
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Column(modifier = Modifier.weight(1f)) {
+                                  Text("Quick format (small userdata.img)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text(
+                                      "Allows a ~64 MB userdata.img (or .tar) to be written as-is. Storage shows smaller until a factory reset from Settings.",
+                                      fontSize = 10.sp,
+                                      color = Color.LightGray
+                                  )
+                              }
+                              Switch(
+                                  checked = state.allowSmallUserdata,
+                                  onCheckedChange = onToggleAllowSmallUserdata,
+                                  enabled = !state.isBusy
+                              )
+                          }
+
                           Button(
                               onClick = onFlashUserdataOnly,
                               enabled = !state.isBusy && state.userdataTarUri != null,
@@ -6537,7 +6626,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(42.dp)
                           ) {
-                              Text("⚡ Flash userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                              Text("⚡ Flash userdata (img / tar)", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
                           }
                       }
                   }
@@ -6993,6 +7082,7 @@ jobs:
                               onPickCscTar = { cscTarPicker.launch(arrayOf("*/*")) },
                               onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
                               onToggleSkipSystemFilesInUserdataTar = viewModel::setSkipSystemFilesInUserdataTar,
+                              onToggleAllowSmallUserdata = viewModel::setAllowSmallUserdata,
                               onRunOdinFlash = viewModel::runOdinFlashSequence,
                               onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
                               onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
