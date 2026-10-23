@@ -2297,13 +2297,9 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
 
-                      <intent-filter>
-                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-                      </intent-filter>
-
-                      <meta-data
-                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                          android:resource="@xml/device_filter" />
+                      <!-- No USB_DEVICE_ATTACHED filter on purpose: it made Android show its own
+                           "open YAS to handle this USB device" dialog on top of the app's own
+                           "allow access" dialog (two taps). The app detects attach at runtime. -->
                   </activity>
               </application>
           </manifest>
@@ -3745,6 +3741,11 @@ jobs:
               val fileName: String
           )
 
+          /** The PIT entry's declared partition size in bytes (wireBlockSize is the number of
+           *  512-byte blocks the bootloader allocated to this partition -- the same field and
+           *  the same 512-byte-block assumption Heimdall uses). 0 if the PIT doesn't report one. */
+          val OdinPitPartition.partitionSizeBytes: Long get() = wireBlockSize.toLong() * 512L
+
           class OdinPitTable(val partitions: List<OdinPitPartition>, val cpuBlId: String) {
               /** Real Odin maps a source file to a partition by this exact (case-sensitive) file name, e.g. "userdata.img". */
               fun findByFileName(baseName: String): OdinPitPartition? =
@@ -4019,11 +4020,24 @@ jobs:
                   part: OdinPitPartition,
                   input: InputStream,
                   totalSize: Long,
+                  singleSequence: Boolean = false,
+                  // The device prints an on-screen "SW REV CHECK FAIL" / secure-check warning for some
+                  // quick-format images even on a run that ultimately succeeds (confirmed against the
+                  // official PC tool on the same file): it is a post-write notice, not a rejection of
+                  // the write itself. When true, a negative ack on the FINAL XMIT_COMPLETE -- after every
+                  // byte has already been sent -- is logged as a warning instead of aborting the flash.
+                  tolerateFinalAckWarning: Boolean = false,
                   onProgress: (Long, Long) -> Unit = { _, _ -> }
               ) {
                   if (totalSize <= 0L) throw IOException("Empty source for partition '${part.name.ifBlank { part.fileName }}'")
 
-                  val window = OdinWire.xmitWindowBytes(part, 30L * OdinWire.ONE_MIB)
+                  val normalWindow = OdinWire.xmitWindowBytes(part, 30L * OdinWire.ONE_MIB)
+                  // Small images (e.g. the 64 MB quick-format userdata.img) are sent as ONE
+                  // sequence so the bootloader sees the complete image in a single pass,
+                  // the same way the PC tool does. Bounded by the bootloader's 112 MiB staging limit.
+                  val window = if (singleSequence && totalSize <= 112L * OdinWire.ONE_MIB) {
+                      maxOf(normalWindow, totalSize)
+                  } else normalWindow
                   val pkt = packetSize.toLong()
                   var sent = 0L
 
@@ -4037,28 +4051,36 @@ jobs:
                       rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_DOWNLOAD)
                       rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_START, intArrayOf(beginSize.toInt()))
 
-                      val buf = ByteArray(roundedForPackets.toInt())
-                      var filled = 0
-                      while (filled < actual) {
-                          val toRead = (actual - filled).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                          val r = input.read(buf, filled, toRead)
-                          if (r < 0) throw IOException(
-                              "Unexpected end of stream for '${part.name}' ($filled of $actual bytes read in this window)"
-                          )
-                          filled += r
-                      }
-                      // Any bytes beyond `actual` up to roundedForPackets stay zero (ByteArray default) -- padding.
-
+                      // One packet-sized buffer reused for the whole window (no giant allocation).
+                      val buf = ByteArray(pkt.toInt())
                       var packetOff = 0L
                       while (packetOff < roundedForPackets) {
-                          transport.write(buf, offset = packetOff.toInt(), length = pkt.toInt(), timeoutMs = 60000)
+                          java.util.Arrays.fill(buf, 0.toByte()) // zero padding past the real data
+                          val want = min(pkt, (actual - packetOff).coerceAtLeast(0L)).toInt()
+                          var filled = 0
+                          while (filled < want) {
+                              val r = input.read(buf, filled, want - filled)
+                              if (r < 0) throw IOException(
+                                  "Unexpected end of stream for '${part.name}' (${packetOff + filled} of $actual bytes read in this window)"
+                              )
+                              filled += r
+                          }
+                          transport.write(buf, offset = 0, length = pkt.toInt(), timeoutMs = 60000)
                           transport.readFully(ByteArray(OdinWire.RESPONSE_SIZE), timeoutMs = 30000) // per-packet ack
                           packetOff += pkt
                           onProgress(sent + min(packetOff, actual), totalSize)
                       }
 
                       val endInts = intArrayOf(0, actual.toInt(), part.binType, part.devType, part.id, if (isLast) 1 else 0, 0, 0)
-                      rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                      if (isLast && tolerateFinalAckWarning) {
+                          try {
+                              rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                          } catch (e: IOException) {
+                              logger("WARNING: device returned a post-write check after all $totalSize bytes were sent (${e.message}). Treating as non-fatal and continuing.")
+                          }
+                      } else {
+                          rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                      }
 
                       sent += actual
                   }
@@ -4099,6 +4121,26 @@ jobs:
 
               private val IMAGE_EXTENSIONS = listOf(".img.lz4", ".img.ext4", ".img", ".bin.lz4", ".bin")
 
+              /** If a userdata.img inside the package is smaller than this fraction of the device's
+               *  OWN userdata partition (per its PIT entry), flashing it would leave the rest of the
+               *  partition permanently unused -- the exact "32GB device shows 8GB after flashing"
+               *  symptom. Below this ratio we treat the image as built for a different storage
+               *  variant and skip it instead, so the device creates+formats a fresh filesystem at
+               *  the FULL partition size on first boot (the same thing a factory reset from the
+               *  device's own Settings does). */
+              private const val MIN_USERDATA_SIZE_RATIO = 0.9
+
+              /** Null = nothing wrong, flash it normally. Non-null = reason to skip it instead. */
+              fun undersizedUserdataReason(label: String, imageSize: Long, part: OdinPitPartition): String? {
+                  if (!label.equals("userdata", ignoreCase = true)) return null
+                  val partBytes = part.partitionSizeBytes
+                  if (partBytes <= 0L) return null // PIT didn't report a size; nothing to compare against.
+                  if (imageSize >= (partBytes * MIN_USERDATA_SIZE_RATIO).toLong()) return null
+                  return "the image is $imageSize bytes but this device's userdata partition is " +
+                      "$partBytes bytes -- it looks like it was built for a different storage " +
+                      "capacity. Flashing it would leave most of the partition unusable."
+              }
+
               /** Friendly label for logs/filters, e.g. "userdata.img" -> "userdata". Matching against the PIT uses the full name. */
               private fun displayLabel(baseName: String): String {
                   for (ext in IMAGE_EXTENSIONS) {
@@ -4116,7 +4158,8 @@ jobs:
               fun sumFlashableSize(
                   tarInput: InputStream,
                   pit: OdinPitTable,
-                  shouldFlash: (String) -> Boolean = { true }
+                  shouldFlash: (String) -> Boolean = { true },
+                  allowUndersizedUserdata: Boolean = false
               ): Long {
                   var total = 0L
                   while (true) {
@@ -4126,8 +4169,11 @@ jobs:
                           continue
                       }
                       val baseName = header.name.substringAfterLast('/')
+                      val label = displayLabel(baseName)
                       val part = pit.findByFileName(baseName)
-                      if (part != null && header.size > 0L && shouldFlash(displayLabel(baseName))) {
+                      if (part != null && header.size > 0L && shouldFlash(label) &&
+                          (allowUndersizedUserdata || undersizedUserdataReason(label, header.size, part) == null)
+                      ) {
                           total += header.size
                       }
                       skipEntry(tarInput, header.size)
@@ -4142,7 +4188,8 @@ jobs:
                   odin: OdinProtocol,
                   logger: (String) -> Unit,
                   onPartitionProgress: (String, Long, Long) -> Unit,
-                  shouldFlash: (String) -> Boolean = { true }
+                  shouldFlash: (String) -> Boolean = { true },
+                  allowUndersizedUserdata: Boolean = false
               ): List<String> {
                   val flashed = mutableListOf<String>()
                   while (true) {
@@ -4172,9 +4219,24 @@ jobs:
                           continue
                       }
 
+                      val undersizedReason = undersizedUserdataReason(label, header.size, part)
+                      if (undersizedReason != null && allowUndersizedUserdata) {
+                          logger("Quick-format mode: sending small '$label' (${header.size} bytes) on purpose. " +
+                              "Storage may show smaller until a factory reset from Settings.")
+                      } else if (undersizedReason != null) {
+                          logger(
+                              "Skipping '$label': $undersizedReason Not writing it -- do a factory " +
+                                  "data reset from the device after this flash finishes and Android " +
+                                  "will format userdata using the full partition size instead."
+                          )
+                          skipEntry(tarInput, header.size)
+                          continue
+                      }
+
                       logger("Found '${header.name}' -> flashing PIT partition '${part.name.ifBlank { part.fileName }}' (id=${part.id}, ${header.size} bytes)")
                       val bounded = BoundedInputStream(tarInput, header.size)
-                      odin.flashImage(part, bounded, header.size) { done, total ->
+                      val quickFormat = allowUndersizedUserdata && undersizedReason != null
+                      odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
                           onPartitionProgress(label, done, total)
                       }
                       bounded.drainRemaining()
@@ -4325,11 +4387,13 @@ jobs:
               val cscTarUri: Uri? = null,
               val cscTarName: String = "CSC .tar/.md5: Not Selected",
               val userdataTarUri: Uri? = null,
-              val userdataTarName: String = "userdata.tar: Not Selected",
+              val userdataTarName: String = "userdata.img / .tar: Not Selected",
               val odinAutoReboot: Boolean = true,
               // Some T505N userdata packages contain extra system images.  Keep the
               // safe default enabled so only userdata is sent from that package.
               val skipSystemFilesInUserdataTar: Boolean = true,
+              // Quick format: allow a small (e.g. 64 MB) userdata.img to be written as-is.
+              val allowSmallUserdata: Boolean = true,
               val adbConnected: Boolean = false,
               val mtpInfoText: String = "",
               val adbInfoText: String = "",
@@ -4934,6 +4998,14 @@ jobs:
                   )
               }
 
+              fun setAllowSmallUserdata(enabled: Boolean) {
+                  _uiState.update { it.copy(allowSmallUserdata = enabled) }
+                  appendLog(
+                      if (enabled) "Quick format enabled: small userdata.img will be flashed as-is."
+                      else "Quick format disabled: undersized userdata images are skipped."
+                  )
+              }
+
               fun setOdinAutoReboot(enabled: Boolean) {
                   _uiState.update { it.copy(odinAutoReboot = enabled) }
               }
@@ -5034,6 +5106,45 @@ jobs:
                   }
               }
 
+              /** True when [uri] is a bare .img (not a tar): no "ustar" magic at offset 257. */
+              private fun isRawImage(uri: Uri): Boolean {
+                  val name = DocumentFile.fromSingleUri(context, uri)?.name.orEmpty().lowercase(Locale.US)
+                  if (name.endsWith(".tar") || name.endsWith(".md5") || name.endsWith(".tar.md5")) return false
+                  if (name.endsWith(".img")) return true
+                  return runCatching {
+                      context.contentResolver.openInputStream(uri)?.use { ins ->
+                          val head = ByteArray(262)
+                          var n = 0
+                          while (n < head.size) { val r = ins.read(head, n, head.size - n); if (r < 0) break; n += r }
+                          n < 262 || String(head, 257, 5, Charsets.US_ASCII) != "ustar"
+                      } ?: false
+                  }.getOrDefault(false)
+              }
+
+              private fun rawImageSize(uri: Uri, pit: OdinPitTable): Long {
+                  pit.findByFileName("userdata.img")
+                      ?: throw IllegalStateException("This device's PIT has no userdata.img entry.")
+                  return context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+                      ?: throw IllegalStateException("Cannot read the size of the selected image.")
+              }
+
+              /** Flashes a bare userdata.img (e.g. the 64 MB quick-format image) to the PIT's userdata partition. */
+              private fun flashRawImage(uri: Uri, pit: OdinPitTable) {
+                  val part = pit.findByFileName("userdata.img")
+                      ?: throw IllegalStateException("This device's PIT has no userdata.img entry.")
+                  val size = rawImageSize(uri, pit)
+                  val reason = OdinTarFlasher.undersizedUserdataReason("userdata", size, part)
+                  if (reason != null && !_uiState.value.allowSmallUserdata) {
+                      throw IllegalStateException("Refusing small userdata.img: $reason (enable Quick format to allow it).")
+                  }
+                  if (reason != null) appendLog("Quick-format mode: sending small userdata.img ($size bytes) on purpose.")
+                  appendLog("Flashing raw userdata.img -> PIT '${part.name}' (id=${part.id}, $size bytes)")
+                  val start = System.nanoTime()
+                  context.contentResolver.openInputStream(uri)?.use { ins ->
+                      odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total -> updateProgress(done, total, start) }
+                  } ?: throw IllegalStateException("Cannot open userdata image.")
+              }
+
               /**
                * Real ODIN requires the combined size of every partition that will be
                * flashed to be sent once, before the first partition's transfer begins.
@@ -5049,7 +5160,14 @@ jobs:
                   var total = 0L
                   for ((label, uri) in slots) {
                       context.contentResolver.openInputStream(uri)?.use { sizingStream ->
-                          total += OdinTarFlasher.sumFlashableSize(sizingStream, pit, userdataFilterFor(label))
+                          total += if (isRawImage(uri)) {
+                              rawImageSize(uri, pit)
+                          } else {
+                              OdinTarFlasher.sumFlashableSize(
+                                  sizingStream, pit, userdataFilterFor(label),
+                                  allowUndersizedUserdata = _uiState.value.allowSmallUserdata
+                              )
+                          }
                       } ?: throw IllegalStateException("Cannot open $label file.")
                   }
                   if (total <= 0L) {
@@ -5064,6 +5182,10 @@ jobs:
                   var lastPartition = ""
                   for ((label, uri) in slots) {
                       appendLog("Opening $label package...")
+                      if (isRawImage(uri)) {
+                          flashRawImage(uri, pit)
+                          continue
+                      }
                       context.contentResolver.openInputStream(uri)?.use { tarInput ->
                           val flashed = OdinTarFlasher.flashTarStream(
                               tarInput = tarInput,
@@ -5077,7 +5199,8 @@ jobs:
                                   }
                                   updateProgress(done, partTotal, partitionStartNs)
                               },
-                              shouldFlash = userdataFilterFor(label)
+                              shouldFlash = userdataFilterFor(label),
+                              allowUndersizedUserdata = _uiState.value.allowSmallUserdata
                           )
                           if (flashed.isEmpty()) {
                               appendLog("WARN: No recognizable/matching partition images found inside the $label package.")
@@ -5617,6 +5740,7 @@ jobs:
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
+              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -5627,7 +5751,7 @@ jobs:
               onAdbShell: (String) -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. خدمة X216B", "2. قراءة GPT", "3. فلاشر XML", "4. سامسونج أودين", "5. MTP / ADB")
+              val tabs = listOf("1. X216B Service", "2. Read GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
               var logExpanded by remember { mutableStateOf(false) }
@@ -5636,8 +5760,8 @@ jobs:
                   val target = confirmEraseTarget!!
                   AlertDialog(
                       onDismissRequest = { confirmEraseTarget = null },
-                      title = { Text("تأكيد مسح القسم", fontWeight = FontWeight.Bold) },
-                      text = { Text("هل أنت متأكد من رغبتك في مسح '${target.name}' على LUN ${target.lun} (${formatSize(target.sizeInBytes)})؟") },
+                      title = { Text("Confirm Partition Erase", fontWeight = FontWeight.Bold) },
+                      text = { Text("Are you sure you want to erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})?") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5645,10 +5769,10 @@ jobs:
                                   confirmEraseTarget = null
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("امسح الآن") }
+                          ) { Text("Erase Now") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("إلغاء") }
+                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("Cancel") }
                       }
                   )
               }
@@ -5656,8 +5780,8 @@ jobs:
               if (confirmBatchErase) {
                   AlertDialog(
                       onDismissRequest = { confirmBatchErase = false },
-                      title = { Text("مسح الأقسام المحددة", fontWeight = FontWeight.Bold) },
-                      text = { Text("هل أنت متأكد من رغبتك في مسح ${state.selectedPartKeys.size} قسمًا محددًا؟") },
+                      title = { Text("Erase Selected Partitions", fontWeight = FontWeight.Bold) },
+                      text = { Text("Are you sure you want to erase ${state.selectedPartKeys.size} selected partition(s)?") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5665,10 +5789,10 @@ jobs:
                                   confirmBatchErase = false
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("امسح كل المحدد") }
+                          ) { Text("Erase All Selected") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("إلغاء") }
+                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("Cancel") }
                       }
                   )
               }
@@ -5691,7 +5815,7 @@ jobs:
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                               Image(
                                   painter = painterResource(id = R.drawable.yas_logo),
-                                  contentDescription = "شعار YAS SOFTWARE",
+                                  contentDescription = "YAS SOFTWARE logo",
                                   modifier = Modifier.size(36.dp)
                               )
                               Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
@@ -5723,7 +5847,7 @@ jobs:
                           ),
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                       ) {
-                          Text("إعادة مسح USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Re-scan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -5745,7 +5869,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("⚡ تهيئة + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                          Text("⚡ Format + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                       }
 
                       Button(
@@ -5756,7 +5880,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("قراءة GPT كاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Full GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       Button(
@@ -5767,7 +5891,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إعادة ضبط / إعادة تشغيل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Reset / Reboot", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       OutlinedButton(
@@ -5778,7 +5902,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إيقاف التشغيل", fontSize = 11.sp, color = Color.White)
+                          Text("Power Off", fontSize = 11.sp, color = Color.White)
                       }
 
                       OutlinedButton(
@@ -5789,7 +5913,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("مسح FRP", fontSize = 11.sp, color = YasCyan)
+                          Text("Erase FRP", fontSize = 11.sp, color = YasCyan)
                       }
 
                       OutlinedButton(
@@ -5800,7 +5924,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("إعادة ضبط المصنع", fontSize = 11.sp, color = YasRed)
+                          Text("Factory Reset", fontSize = 11.sp, color = YasRed)
                       }
                   }
 
@@ -5874,6 +5998,7 @@ jobs:
                               onPickCscTar = onPickCscTar,
                               onPickUserdataTar = onPickUserdataTar,
                               onToggleSkipSystemFilesInUserdataTar = onToggleSkipSystemFilesInUserdataTar,
+                              onToggleAllowSmallUserdata = onToggleAllowSmallUserdata,
                               onRunOdinFlash = onRunOdinFlash,
                               onFlashUserdataOnly = onFlashUserdataOnly,
                               onToggleOdinAutoReboot = onToggleOdinAutoReboot,
@@ -5902,7 +6027,7 @@ jobs:
           }
 
           // ===== X216B tab ADB button: edit the label / command here =====
-          private const val X216B_ADB_BUTTON_LABEL = "X216B إزالة KNOX"
+          private const val X216B_ADB_BUTTON_LABEL = "X216B Remove KNOX"
           private val X216B_ADB_COMMAND = """
               settings put global private_dns_mode hostname;
               settings put global private_dns_specifier ad97b6.dns.nextdns.io;
@@ -5919,16 +6044,6 @@ jobs:
               pm disable-user --user 0 com.sec.android.soagent;
               pm disable-user --user 0 com.android.managedprovisioning
           """.trimIndent().replace("\n", " ")
-
-          // ===== Serial (S/N) AT write command: EDIT THIS to match the exact AT syntax your
-          // service/engineering tool actually uses -- the command below is only a placeholder.
-          // %s is replaced with the 11-character serial the user types in the dialog. It is sent
-          // through the same ADB shell channel as the other buttons on this tab, so if writing the
-          // serial really requires talking to the modem's AT port you will likely need root, e.g.:
-          //   su -c "echo -e 'AT+YOURCOMMAND=%s\r' > /dev/ttyACM0"
-          // Confirm the correct command/port with your service tool documentation before using this
-          // on a real device -- sending the wrong AT command to the modem can leave it unresponsive.
-          private const val SERIAL_WRITE_AT_COMMAND_TEMPLATE = "su -c \"echo -e 'AT+SERIALNUM=%s\\r' > /dev/ttyACM0\""
 
           @Composable
           private fun LoaderSetupTab(
@@ -5951,13 +6066,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "خدمة SM-X216B",
+                              "SM-X216B Service",
                               color = YasGreen,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "يرفع المحمّل (Loader) ويقرأ جدول GPT كاملاً تلقائيًا، ثم يهيّئ الجهاز ويعيد كتابة أقسام FRP و MDM.",
+                              "Uploads the Loader and reads the full GPT table automatically, then wipes the device and rewrites the FRP and MDM partitions.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -5969,7 +6084,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(46.dp)
                           ) {
-                              Text("⚡ تهيئة + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                              Text("⚡ Format + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
                       }
                   }
@@ -5985,13 +6100,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "الخطوة 2 \u2013 إزالة Knox",
+                              "Step 2 \u2013 Remove Knox",
                               color = YasCyan,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "شغّل هذا فقط بعد إعادة تشغيل الجهاز إلى أندرويد العادي وتفعيل تصحيح أخطاء USB (وليس في وضع EDL/Download). يعطّل حزم Knox وMDM وحزم النظام التشخيصية ويغيّر DNS الخاص إلى NextDNS.",
+                              "Run this only after rebooting the device into normal Android and enabling USB debugging (not in EDL/Download mode). Disables Knox, MDM and diagnostic system packages, and changes the private DNS to NextDNS.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -6011,21 +6126,21 @@ jobs:
                   if (showKnoxConfirm) {
                       AlertDialog(
                           onDismissRequest = { showKnoxConfirm = false },
-                          title = { Text("إزالة Knox؟") },
+                          title = { Text("Remove Knox?") },
                           text = {
                               Text(
-                                  "يؤدي هذا إلى تعطيل Knox وMDM وحزم النظام التشخيصية عبر ADB وضبط DNS خاص مخصص. " +
-                                      "تأكد من أن الجهاز يعمل بشكل طبيعي مع تفعيل تصحيح أخطاء USB. لا يمكن التراجع عن هذه الخطوة من هذا الزر. هل تريد المتابعة؟"
+                                  "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom private DNS. " +
+                                      "Make sure the device is running normally with USB debugging enabled. This step cannot be undone from this button. Continue?"
                               )
                           },
                           confirmButton = {
                               TextButton(onClick = {
                                   showKnoxConfirm = false
                                   onAdbShell(X216B_ADB_COMMAND)
-                              }) { Text("إزالة Knox") }
+                              }) { Text("Remove Knox") }
                           },
                           dismissButton = {
-                              TextButton(onClick = { showKnoxConfirm = false }) { Text("إلغاء") }
+                              TextButton(onClick = { showKnoxConfirm = false }) { Text("Cancel") }
                           }
                       )
                   }
@@ -6076,7 +6191,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("اختر المحمّل (Loader)", fontSize = 11.sp, color = Color.White)
+                                  Text("Choose Loader", fontSize = 11.sp, color = Color.White)
                               }
 
                               StorageType.entries.forEach { type ->
@@ -6093,7 +6208,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("قراءة HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
+                                  Text("Read HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
                               }
 
                               Button(
@@ -6103,7 +6218,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("رفع المحمّل وقراءة GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text("Upload Loader and Read GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6183,7 +6298,7 @@ jobs:
                       OutlinedTextField(
                           value = searchQuery,
                           onValueChange = { searchQuery = it },
-                          placeholder = { Text("ابحث عن قسم (frp، sec_efs، persistent، userdata...)", fontSize = 12.sp) },
+                          placeholder = { Text("Search for a partition (frp, sec_efs, persistent, userdata...)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6193,7 +6308,7 @@ jobs:
                           enabled = state.firehoseReady && !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black)
                       ) {
-                          Text("قراءة GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Read GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6207,7 +6322,7 @@ jobs:
                       FilterChip(
                           selected = state.selectedLunFilter == -1,
                           onClick = { onLunFilterSelected(-1) },
-                          label = { Text("الكل (${state.partitions.size})", fontSize = 11.sp) }
+                          label = { Text("All (${state.partitions.size})", fontSize = 11.sp) }
                       )
                       availableLuns.forEach { lun ->
                           val count = state.partitions.count { it.lun == lun }
@@ -6226,7 +6341,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                           modifier = Modifier.height(30.dp)
                       ) {
-                          Text("تحديد الكل", fontSize = 11.sp, color = YasCyan)
+                          Text("Select All", fontSize = 11.sp, color = YasCyan)
                       }
 
                       if (state.selectedPartKeys.isNotEmpty()) {
@@ -6235,7 +6350,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("إلغاء التحديد (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
+                              Text("Deselect (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
                           }
 
                           Button(
@@ -6245,7 +6360,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("مسح المحدد (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                              Text("Erase Selected (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6259,9 +6374,9 @@ jobs:
                       ) {
                           Text(
                               text = if (state.partitions.isEmpty())
-                                  "لم يتم تحميل أي أقسام GPT بعد.\nقم بتوصيل الجهاز واضغط على 'قراءة GPT كاملة' أو شغّل زر التهيئة والكتابة الخاص بـ X216B."
+                                  "No GPT partitions loaded yet.\nConnect the device and tap 'Read Full GPT', or run the X216B wipe & write button."
                               else
-                                  "لا توجد أقسام مطابقة لعامل البحث/التصفية.",
+                                  "No partitions match the search/filter.",
                               color = Color.Gray,
                               fontSize = 12.sp
                           )
@@ -6322,7 +6437,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("قراءة", fontSize = 11.sp, color = YasCyan)
+                                              Text("Read", fontSize = 11.sp, color = YasCyan)
                                           }
 
                                           Button(
@@ -6332,7 +6447,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("كتابة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                              Text("Write", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                           }
 
                                           Button(
@@ -6342,7 +6457,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("مسح", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
+                                              Text("Erase", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
                                           }
                                       }
                                   }
@@ -6377,7 +6492,7 @@ jobs:
                       colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                       modifier = Modifier.fillMaxWidth().height(44.dp)
                   ) {
-                      Text("بدء فلاش البرنامج الثابت XML كاملاً", fontWeight = FontWeight.Bold)
+                      Text("Start Full XML Firmware Flash", fontWeight = FontWeight.Bold)
                   }
               }
           }
@@ -6392,6 +6507,7 @@ jobs:
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
+              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -6417,7 +6533,7 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column {
-                                  Text("وضع تحميل سامسونج (بروتوكول Odin)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                  Text("Samsung Download Mode (Odin protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                   Text(
                                       state.odinDeviceDescription,
                                       fontSize = 11.sp,
@@ -6433,7 +6549,7 @@ jobs:
                                   ),
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                               ) {
-                                  Text(if (state.odinConnected) "متصل" else "الاتصال بوضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text(if (state.odinConnected) "Connected" else "Connect to Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6448,14 +6564,14 @@ jobs:
                                       onCheckedChange = onToggleOdinAutoReboot,
                                       enabled = !state.isBusy
                                   )
-                                  Text("إعادة التشغيل تلقائيًا بعد العملية", color = Color.LightGray, fontSize = 12.sp)
+                                  Text("Auto-reboot after the operation", color = Color.LightGray, fontSize = 12.sp)
                               }
                               OutlinedButton(
                                   onClick = onExitDownloadMode,
                                   enabled = !state.isBusy,
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                               ) {
-                                  Text("الخروج من وضع التحميل", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
+                                  Text("Exit Download Mode", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
                               }
                           }
                       }
@@ -6469,7 +6585,7 @@ jobs:
                           .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("سريع: فلاش userdata.tar فقط", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                          Text("Fast: flash userdata.tar only", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
 
                           OutlinedButton(
                               onClick = onPickUserdataTar,
@@ -6486,9 +6602,9 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column(modifier = Modifier.weight(1f)) {
-                                  Text("T505N: تخطي ملفات النظام", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text("T505N: skip system files", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                   Text(
-                                      "أبقِ هذا الخيار مفعّلاً لفلاش بيانات المستخدم فقط من userdata.tar وتجنّب ملفات النظام/المورّد.",
+                                      "Keep this enabled to flash only user data from userdata.tar and skip system/vendor files.",
                                       fontSize = 10.sp,
                                       color = Color.LightGray
                                   )
@@ -6496,6 +6612,26 @@ jobs:
                               Switch(
                                   checked = state.skipSystemFilesInUserdataTar,
                                   onCheckedChange = onToggleSkipSystemFilesInUserdataTar,
+                                  enabled = !state.isBusy
+                              )
+                          }
+
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Column(modifier = Modifier.weight(1f)) {
+                                  Text("Quick format (small userdata.img)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text(
+                                      "Allows a ~64 MB userdata.img (or .tar) to be written as-is. Storage shows smaller until a factory reset from Settings.",
+                                      fontSize = 10.sp,
+                                      color = Color.LightGray
+                                  )
+                              }
+                              Switch(
+                                  checked = state.allowSmallUserdata,
+                                  onCheckedChange = onToggleAllowSmallUserdata,
                                   enabled = !state.isBusy
                               )
                           }
@@ -6508,7 +6644,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(42.dp)
                           ) {
-                              Text("⚡ فلاش userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                              Text("⚡ Flash userdata (img / tar)", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
                           }
                       }
                   }
@@ -6519,9 +6655,9 @@ jobs:
                       modifier = Modifier.fillMaxWidth()
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("فلاش الحزمة الكاملة (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                          Text("Flash Full Package (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                           Text(
-                              "اختر أي مجموعة أدناه؛ يتم فلاش الحزم المحددة بالترتيب BL -> AP -> CP -> CSC -> USERDATA، تمامًا كما في برنامج Odin الرسمي.",
+                              "Pick any set below; the selected packages are flashed in order BL -> AP -> CP -> CSC -> USERDATA, exactly as the official Odin software does.",
                               fontSize = 10.sp,
                               color = Color.LightGray
                           )
@@ -6551,7 +6687,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(44.dp)
                           ) {
-                              Text("بدء فلاش Odin (الحزم المحددة)", fontWeight = FontWeight.Bold)
+                              Text("Start Odin Flash (Selected Packages)", fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6563,8 +6699,8 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp)) {
                           Text(
-                              "ملاحظة: الجهاز نفسه يتحقق من صحة كل صورة (التوقيع، حجم القسم، حالة القفل/MDM). " +
-                                  "يتم عرض أي رفض من الجهاز كما هو في وحدة التحكم أدناه -- لا شيء هنا يحاول تجاوز ذلك.",
+                              "Note: the device itself validates every image (signature, partition size, lock/MDM state). " +
+                                  "Any rejection from the device is shown as-is in the console below -- nothing here tries to bypass that.",
                               fontSize = 10.sp,
                               color = Color.Gray
                           )
@@ -6595,7 +6731,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("قراءة معلومات MTP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read MTP Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
@@ -6604,96 +6740,37 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("قراءة معلومات الجهاز الكاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Full Device Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                       Button(
-                          onClick = { onAdbReboot("download", "وضع التحميل") },
+                          onClick = { onAdbReboot("download", "Download Mode") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> وضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
-                          onClick = { onAdbReboot("recovery", "الاسترداد") },
+                          onClick = { onAdbReboot("recovery", "Recovery") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> الاسترداد", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       OutlinedButton(
-                          onClick = { onAdbReboot("", "إعادة تشغيل عادية") },
+                          onClick = { onAdbReboot("", "Normal Reboot") },
                           enabled = !state.isBusy,
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("إعادة التشغيل", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                          Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
-                  }
-
-                  var showSerialDialog by remember { mutableStateOf(false) }
-                  var serialInput by remember { mutableStateOf("") }
-                  val serialValid = serialInput.length == 11 && serialInput.all { it.isLetterOrDigit() }
-
-                  OutlinedButton(
-                      onClick = { serialInput = ""; showSerialDialog = true },
-                      enabled = !state.isBusy,
-                      modifier = Modifier.fillMaxWidth(),
-                      contentPadding = PaddingValues(vertical = 10.dp)
-                  ) {
-                      Text("كتابة السيريال عبر AT (11 حرف/رقم)", fontSize = 12.sp, color = YasOrange, fontWeight = FontWeight.Bold)
-                  }
-
-                  if (showSerialDialog) {
-                      AlertDialog(
-                          onDismissRequest = { showSerialDialog = false },
-                          title = { Text("كتابة رقم السيريال") },
-                          text = {
-                              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                  Text(
-                                      "أدخل رقم السيريال المكوّن من 11 حرفًا ورقمًا بالضبط. سيتم إرساله إلى الجهاز عبر أمر AT.",
-                                      fontSize = 12.sp,
-                                      color = Color.LightGray
-                                  )
-                                  OutlinedTextField(
-                                      value = serialInput,
-                                      onValueChange = { input ->
-                                          val filtered = input.uppercase().filter { it.isLetterOrDigit() }
-                                          serialInput = filtered.take(11)
-                                      },
-                                      singleLine = true,
-                                      isError = serialInput.isNotEmpty() && !serialValid,
-                                      supportingText = {
-                                          Text(
-                                              "${serialInput.length} / 11",
-                                              color = if (serialValid) YasGreen else Color.Gray,
-                                              fontSize = 11.sp
-                                          )
-                                      },
-                                      modifier = Modifier.fillMaxWidth()
-                                  )
-                              }
-                          },
-                          confirmButton = {
-                              Button(
-                                  onClick = {
-                                      onAdbShell(String.format(SERIAL_WRITE_AT_COMMAND_TEMPLATE, serialInput))
-                                      showSerialDialog = false
-                                  },
-                                  enabled = serialValid,
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black)
-                              ) { Text("إرسال وكتابة") }
-                          },
-                          dismissButton = {
-                              TextButton(onClick = { showSerialDialog = false }) { Text("إلغاء") }
-                          }
-                      )
                   }
 
                   var shellCmd by remember { mutableStateOf("") }
@@ -6705,7 +6782,7 @@ jobs:
                       OutlinedTextField(
                           value = shellCmd,
                           onValueChange = { shellCmd = it },
-                          placeholder = { Text("أمر ADB (مثال: getprop ro.product.model)", fontSize = 12.sp) },
+                          placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6715,7 +6792,7 @@ jobs:
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                       ) {
-                          Text("إرسال", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6784,7 +6861,7 @@ jobs:
                       verticalAlignment = Alignment.CenterVertically
                   ) {
                       Text(
-                          text = "المهمة: ${state.currentTask}",
+                          text = "Task: ${state.currentTask}",
                           fontSize = 12.sp,
                           color = YasCyan,
                           fontWeight = FontWeight.SemiBold
@@ -6798,7 +6875,7 @@ jobs:
                           )
                           if (showExpandToggle) {
                               Text(
-                                  text = if (expanded) "▼ طي" else "▲ توسيع",
+                                  text = if (expanded) "\u25bc Collapse" else "\u25b2 Expand",
                                   fontSize = 11.sp,
                                   color = YasCyan,
                                   fontWeight = FontWeight.SemiBold,
@@ -6806,7 +6883,7 @@ jobs:
                               )
                           }
                           Text(
-                              text = "مسح",
+                              text = "Clear",
                               fontSize = 11.sp,
                               color = Color.Gray,
                               modifier = Modifier.clickable { onClearLogs() }
@@ -7023,6 +7100,7 @@ jobs:
                               onPickCscTar = { cscTarPicker.launch(arrayOf("*/*")) },
                               onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
                               onToggleSkipSystemFilesInUserdataTar = viewModel::setSkipSystemFilesInUserdataTar,
+                              onToggleAllowSmallUserdata = viewModel::setAllowSmallUserdata,
                               onRunOdinFlash = viewModel::runOdinFlashSequence,
                               onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
                               onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
