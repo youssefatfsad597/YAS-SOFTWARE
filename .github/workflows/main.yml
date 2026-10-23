@@ -127,6 +127,9 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
               <usb-device vendor-id="1478" product-id="36872" />
+              <usb-device vendor-id="1256" product-id="26717" />
+              <usb-device vendor-id="1256" product-id="26113" />
+              <usb-device vendor-id="1256" product-id="26819" />
           </resources>
           EOF
 
@@ -1401,7 +1404,7 @@ jobs:
                   const val QCOM_VID = 0x05C6
                   const val EDL_PID = 0x9008
                   const val SAMSUNG_VID = 0x04E8
-                  val SAMSUNG_DOWNLOAD_MODE_PIDS = listOf(0x6601, 0x685D, 0x68C3, 0x6860, 0x685C)
+                  val SAMSUNG_DOWNLOAD_MODE_PIDS = listOf(0x6601, 0x685D, 0x68C3)
                   const val ACTION_USB_PERMISSION = "com.yas.flashedl.USB_PERMISSION"
                   private const val USB_CHUNK_LIMIT = 16384
               }
@@ -1431,7 +1434,11 @@ jobs:
                       return true
                   }
 
-              fun registerDetachListener(onDetached: () -> Unit, onAttached: (UsbDevice) -> Unit = {}) {
+              fun registerDetachListener(
+                  onDetached: () -> Unit,
+                  onAttached: (UsbDevice) -> Unit = {},
+                  onOtherDetached: () -> Unit = {}
+              ) {
                   if (detachReceiver != null) return
                   val receiver = object : BroadcastReceiver() {
                       override fun onReceive(ctx: Context, intent: Intent) {
@@ -1447,15 +1454,14 @@ jobs:
                               }
                           if (action == UsbManager.ACTION_USB_DEVICE_ATTACHED) {
                               val att = gone ?: return
-                              val isEdl = att.vendorId == QCOM_VID && att.productId == EDL_PID
-                              val isDl = att.vendorId == SAMSUNG_VID && att.productId in SAMSUNG_DOWNLOAD_MODE_PIDS
-                              if (!isEdl && !isDl) return
                               // Same device re-enumerated without us seeing a detach: drop the stale handle.
                               if (att.deviceName == device?.deviceName) close()
                               onAttached(att)
                           } else if (gone == null || gone.deviceName == device?.deviceName) {
                               close()
                               onDetached()
+                          } else {
+                              onOtherDetached()
                           }
                       }
                   }
@@ -1486,6 +1492,16 @@ jobs:
                   return usbManager.deviceList.values.firstOrNull { device ->
                       device.vendorId == SAMSUNG_VID && device.productId in SAMSUNG_DOWNLOAD_MODE_PIDS
                   }
+              }
+
+              fun listDevices(): List<UsbDevice> = usbManager.deviceList.values.toList()
+
+              fun hasPermission(device: UsbDevice): Boolean = usbManager.hasPermission(device)
+
+              /** Asks the user for USB permission once (no-op when it is already granted). */
+              suspend fun ensurePermission(device: UsbDevice): Boolean {
+                  if (usbManager.hasPermission(device)) return true
+                  return requestUsbPermission(device)
               }
 
               suspend fun requestPermissionAndOpen(device: UsbDevice): Boolean {
@@ -3290,6 +3306,7 @@ jobs:
           package com.edl.flasher.ui
 
           import android.app.Application
+          import android.hardware.usb.UsbDevice
           import android.net.Uri
           import androidx.documentfile.provider.DocumentFile
           import androidx.lifecycle.AndroidViewModel
@@ -3310,6 +3327,8 @@ jobs:
           data class EdlUiState(
               val usbConnected: Boolean = false,
               val deviceDescription: String = "No 9008 Device Detected",
+              val usbSummary: String = "No USB device connected",
+              val usbAny: Boolean = false,
               val deviceInfo: SaharaDeviceInfo? = null,
               val firehoseReady: Boolean = false,
               val selectedStorage: StorageType = StorageType.UFS,
@@ -3350,8 +3369,8 @@ jobs:
               // safe default enabled so only userdata is sent from that package.
               val skipSystemFilesInUserdataTar: Boolean = true,
               val adbConnected: Boolean = false,
-              val mtpInfoText: String = "Tap 'Read MTP Info' while the device is connected in File Transfer/MTP mode.",
-              val adbInfoText: String = "Tap 'Read ADB Info' while USB Debugging is enabled on the target device.",
+              val mtpInfoText: String = "",
+              val adbInfoText: String = "",
               val isBusy: Boolean = false,
               val currentTask: String = "Ready",
               val progress: Float = 0f,
@@ -3373,28 +3392,42 @@ jobs:
 
               private val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.US)
 
-              private val connecting = java.util.concurrent.atomic.AtomicBoolean(false)
-              @Volatile private var autoSuppressedFor: String? = null
+              private val scanMutex = kotlinx.coroutines.sync.Mutex()
+              private val knownUsb = mutableSetOf<String>()
 
               init {
                   checkEmbeddedFirmware()
                   transport.registerDetachListener(
-                      onDetached = { onUsbDetached() },
-                      onAttached = { autoSuppressedFor = null; autoConnect() }
+                      onDetached = { onUsbDetached(); scanUsb() },
+                      onAttached = { scanUsb() },
+                      onOtherDetached = { scanUsb() }
                   )
+                  // Watcher: picks up every USB attach / re-enumeration (e.g. after rebooting into EDL)
+                  // so the cable never has to be re-plugged.
+                  viewModelScope.launch(Dispatchers.IO) {
+                      while (true) {
+                          try {
+                              scanUsbNow()
+                          } catch (e: kotlinx.coroutines.CancellationException) {
+                              throw e
+                          } catch (e: Exception) {
+                              // keep watching
+                          }
+                          delay(1000)
+                      }
+                  }
               }
 
-              /** Called on app start/resume and whenever a 9008 / Download-Mode device is plugged in. */
+              /** Called on app start/resume. */
               fun autoConnect() {
-                  if (transport.findEdlDevice() == null && transport.findSamsungDownloadModeDevice() != null) {
-                      if (!_uiState.value.odinConnected && !_uiState.value.isBusy) connectSamsungDownloadMode()
-                      return
-                  }
-                  connectUsbInternal(auto = true)
+                  scanUsb()
+              }
+
+              fun scanUsb() {
+                  viewModelScope.launch(Dispatchers.IO) { scanUsbNow() }
               }
 
               private fun onUsbDetached() {
-                  autoSuppressedFor = null
                   sahara.resetSession()
                   _uiState.update {
                       it.copy(
@@ -3406,7 +3439,7 @@ jobs:
                           odinDeviceDescription = "Device disconnected"
                       )
                   }
-                  appendLog("USB device disconnected (unplugged or rebooted). Reconnect and press Connect again.")
+                  appendLog("USB device disconnected (unplugged or rebooted). Waiting for it to reconnect automatically...")
               }
 
               fun appendLog(msg: String) {
@@ -3546,53 +3579,132 @@ jobs:
                   appendLog("Firmware Directory: $name")
               }
 
+              /** Manual "Rescan": re-processes every attached USB device (asks for permission again). */
               fun connectUsb() {
-                  autoSuppressedFor = null
-                  connectUsbInternal(auto = false)
+                  viewModelScope.launch(Dispatchers.IO) {
+                      scanMutex.lock()
+                      try {
+                          knownUsb.clear()
+                      } finally {
+                          scanMutex.unlock()
+                      }
+                      scanUsbNow()
+                  }
               }
 
-              private fun connectUsbInternal(auto: Boolean) {
-                  if (_uiState.value.isBusy) return
-                  if (!connecting.compareAndSet(false, true)) return
-                  viewModelScope.launch(Dispatchers.IO) {
-                      try {
-                          if (auto && transport.isConnected) return@launch
-                          val device = transport.findEdlDevice()
-                          if (device == null) {
-                              if (!auto) {
-                                  _uiState.update {
-                                      it.copy(
-                                          usbConnected = false,
-                                          firehoseReady = false,
-                                          deviceDescription = "No 9008 Device Detected"
-                                      )
-                                  }
-                                  appendLog("No Qualcomm EDL 9008 device detected on OTG.")
-                              }
-                              return@launch
-                          }
-                          if (auto && device.deviceName == autoSuppressedFor) return@launch
+              private fun isEdlDevice(dev: UsbDevice): Boolean =
+                  dev.vendorId == EdlUsbTransport.QCOM_VID && dev.productId == EdlUsbTransport.EDL_PID
 
-                          appendLog("Detected Qualcomm 9008 device (${device.deviceName})")
-                          val opened = transport.requestPermissionAndOpen(device)
-                          if (opened) {
+              private fun isDownloadDevice(dev: UsbDevice): Boolean =
+                  dev.vendorId == EdlUsbTransport.SAMSUNG_VID && dev.productId in EdlUsbTransport.SAMSUNG_DOWNLOAD_MODE_PIDS
+
+              private fun usbKindLabel(dev: UsbDevice): String {
+                  if (isEdlDevice(dev)) return "Qualcomm EDL 9008"
+                  if (isDownloadDevice(dev)) return "Samsung Download Mode"
+                  var adb = false
+                  var mtp = false
+                  for (i in 0 until dev.interfaceCount) {
+                      val f = dev.getInterface(i)
+                      if (f.interfaceClass == 0xFF && f.interfaceSubclass == 0x42 && f.interfaceProtocol == 0x01) adb = true
+                      if (f.interfaceClass == 6 || (f.interfaceClass == 0xFF && f.interfaceSubclass == 0xFF)) mtp = true
+                  }
+                  return when {
+                      adb && mtp -> "MTP + ADB"
+                      adb -> "ADB"
+                      mtp -> "MTP"
+                      else -> "USB Device"
+                  }
+              }
+
+              private fun describeUsb(dev: UsbDevice): String {
+                  val id = String.format(Locale.US, "%04X:%04X", dev.vendorId, dev.productId)
+                  val name = if (transport.hasPermission(dev)) {
+                      runCatching { dev.productName }.getOrNull()?.takeIf { it.isNotBlank() }
+                  } else null
+                  return buildString {
+                      append(usbKindLabel(dev))
+                      if (name != null) append(" - ").append(name)
+                      append(" [").append(id).append("]")
+                  }
+              }
+
+              private fun publishUsbHeader(devices: List<UsbDevice>) {
+                  val summary = if (devices.isEmpty()) "No USB device connected"
+                  else devices.joinToString("\n") { describeUsb(it) }
+                  val any = devices.isNotEmpty()
+                  _uiState.update {
+                      if (it.usbSummary == summary && it.usbAny == any) it
+                      else it.copy(usbSummary = summary, usbAny = any)
+                  }
+              }
+
+              private suspend fun scanUsbNow() {
+                  if (!scanMutex.tryLock()) return
+                  try {
+                      val devices = transport.listDevices()
+                      val names = devices.map { it.deviceName }.toSet()
+                      // Forget unplugged devices so that plugging them in again counts as a NEW connection.
+                      knownUsb.retainAll(names)
+                      publishUsbHeader(devices)
+
+                      if (_uiState.value.isBusy) return
+                      for (dev in devices) {
+                          if (dev.deviceName in knownUsb) continue
+                          knownUsb.add(dev.deviceName)
+                          handleNewUsbDevice(dev)
+                          publishUsbHeader(transport.listDevices())
+                      }
+                  } finally {
+                      scanMutex.unlock()
+                  }
+              }
+
+              private suspend fun handleNewUsbDevice(dev: UsbDevice) {
+                  appendLog("USB device connected: ${describeUsb(dev)}")
+                  val granted = transport.ensurePermission(dev)
+                  if (!granted) {
+                      appendLog("USB permission denied for ${usbKindLabel(dev)}. Not asking again until a new USB device is connected.")
+                      return
+                  }
+                  when {
+                      isEdlDevice(dev) -> {
+                          if (transport.isConnected) return
+                          if (transport.requestPermissionAndOpen(dev)) {
                               sahara.resetSession()
                               _uiState.update {
                                   it.copy(
                                       usbConnected = true,
+                                      firehoseReady = false,
                                       deviceDescription = "Qualcomm HS-USB QDLoader 9008",
                                       odinConnected = false,
                                       odinSessionReady = false
                                   )
                               }
-                              appendLog("USB Bulk IN/OUT connected successfully.")
+                              appendLog("9008 connected automatically (USB Bulk IN/OUT ready).")
                           } else {
-                              if (auto) autoSuppressedFor = device.deviceName
-                              appendLog("ERROR: USB permission denied or interface busy. Press Connect to retry.")
+                              appendLog("ERROR: could not open the 9008 USB interface (busy).")
                           }
-                      } finally {
-                          connecting.set(false)
                       }
+
+                      isDownloadDevice(dev) -> {
+                          if (transport.isConnected) return
+                          if (transport.requestPermissionAndOpen(dev)) {
+                              _uiState.update {
+                                  it.copy(
+                                      odinConnected = true,
+                                      odinSessionReady = false,
+                                      odinDeviceDescription = "Samsung Download Mode (Odin Protocol)",
+                                      usbConnected = false,
+                                      firehoseReady = false
+                                  )
+                              }
+                              appendLog("Download-Mode device connected automatically.")
+                          } else {
+                              appendLog("ERROR: could not open the Download-Mode USB interface (busy).")
+                          }
+                      }
+
+                      else -> appendLog("Recognized: ${describeUsb(dev)}")
                   }
               }
 
@@ -3629,20 +3741,17 @@ jobs:
               }
 
               fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
-                  val useEmbedded = _uiState.value.useEmbeddedFirmware
                   val loaderUri = _uiState.value.loaderUri
-
-                  if (!useEmbedded && loaderUri == null) {
-                      appendLog("ERROR: Select a custom Firehose loader (.elf / .mbn) first, or enable embedded firmware!")
-                      return
-                  }
-                  if (useEmbedded && !EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
-                      appendLog("ERROR: Embedded ${EmbeddedFirmware.LOADER} loader not found in APK assets!")
+                  if (!_uiState.value.firehoseReady && loaderUri == null) {
+                      appendLog("ERROR: Select a loader (.elf / .mbn) first.")
                       return
                   }
 
                   runTask("Booting Firehose & Reading GPT") {
-                      if (useEmbedded) bootFirehoseFromEmbeddedLoader() else bootFirehoseInternal(loaderUri!!)
+                      if (!_uiState.value.firehoseReady) {
+                          appendLog("Uploading loader (${_uiState.value.loaderName})...")
+                          bootFirehoseInternal(loaderUri!!)
+                      }
                       if (_uiState.value.firehoseReady && autoReadGpt) {
                           scanAllGptInternal()
                       }
@@ -3659,7 +3768,7 @@ jobs:
 
               fun runX216BWipeAndWriteSequence() {
                   runTask("X216B Auto Wipe & Write") {
-                      val useEmbedded = _uiState.value.useEmbeddedFirmware
+                      val useEmbedded = true
 
                       if (useEmbedded && !EmbeddedFirmware.allPresent(context)) {
                           throw IllegalStateException(
@@ -3692,10 +3801,8 @@ jobs:
                           }
                       }
 
-                      if (_uiState.value.partitions.isEmpty()) {
-                          appendLog("Reading Full GPT Partition Table...")
-                          scanAllGptInternal()
-                      }
+                      appendLog("Reading Full GPT Partition Table...")
+                      scanAllGptInternal()
 
                       val currentParts = _uiState.value.partitions
                       if (currentParts.isEmpty()) {
@@ -4267,26 +4374,78 @@ jobs:
                           _uiState.update {
                               it.copy(
                                   adbConnected = false,
-                                  adbInfoText = "ADB connection failed. Enable USB Debugging on the target and accept the on-device authorization prompt."
+                                  adbInfoText = "ADB connection failed. Enable USB Debugging and accept the prompt on the device."
                               )
                           }
                           return@runTask
                       }
-                      val raw = adbClient.shell(
-                          "getprop ro.product.manufacturer; getprop ro.product.model; " +
-                              "getprop ro.build.version.release; getprop ro.build.version.sdk; getprop ro.serialno"
+                      val keys = listOf(
+                          "ro.product.manufacturer", "ro.product.model", "ro.product.name", "ro.product.device",
+                          "ro.board.platform", "ro.build.version.release", "ro.build.version.sdk",
+                          "ro.build.version.security_patch", "ro.serialno",
+                          "ro.boot.verifiedbootstate", "ro.boot.flash.locked", "ro.boot.vbmeta.device_state",
+                          "ro.oem_unlock_supported", "ro.crypto.state", "ro.crypto.type", "ro.boot.warranty_bit",
+                          "ro.build.display.id", "ro.build.PDA", "ro.bootloader", "gsm.version.baseband",
+                          "ro.csc.sales_code", "ro.build.version.incremental", "ro.build.type", "ro.build.tags",
+                          "ro.build.date", "ro.build.fingerprint",
+                          "ril.imei", "persist.radio.imei", "ro.ril.oem.imei"
                       )
-                      val lines = raw.lines().map { it.trim() }.filter { it.isNotEmpty() }
-                      val manufacturer = lines.getOrNull(0) ?: "?"
-                      val model = lines.getOrNull(1) ?: "?"
-                      val androidVer = lines.getOrNull(2) ?: "?"
-                      val sdk = lines.getOrNull(3) ?: "?"
-                      val serial = lines.getOrNull(4) ?: "?"
-                      val summary = "Manufacturer: $manufacturer\nModel: $model\n" +
-                          "Android: $androidVer (SDK $sdk)\nSerial: $serial\nADB Banner: ${adbClient.banner}"
-                      appendLog("ADB info read successfully.")
+                      val raw = adbClient.shell("for p in ${keys.joinToString(" ")}; do echo \"\$p=\$(getprop \$p)\"; done")
+                      val props = raw.lines().mapNotNull { line ->
+                          val i = line.indexOf('=')
+                          if (i <= 0) null else line.substring(0, i).trim() to line.substring(i + 1).trim()
+                      }.toMap()
+                      fun p(k: String): String = props[k]?.takeIf { it.isNotBlank() } ?: "-"
+
+                      var imei: String? = null
+                      for (cmd in listOf("service call iphonesubinfo 1", "service call iphonesubinfo 1 s16 com.android.shell")) {
+                          imei = parseParcelDigits(adbClient.shell(cmd))
+                          if (imei != null) break
+                      }
+                      if (imei == null) {
+                          imei = listOf("ril.imei", "persist.radio.imei", "ro.ril.oem.imei")
+                              .mapNotNull { k -> props[k]?.filter { c -> c.isDigit() }?.takeIf { d -> d.length >= 14 } }
+                              .firstOrNull()
+                      }
+
+                      val summary = buildString {
+                          appendLine("Model: ${p("ro.product.manufacturer")} ${p("ro.product.model")} (${p("ro.product.name")})")
+                          appendLine("Device: ${p("ro.product.device")} | Platform: ${p("ro.board.platform")}")
+                          appendLine("Android: ${p("ro.build.version.release")} (SDK ${p("ro.build.version.sdk")})")
+                          appendLine("Security Patch: ${p("ro.build.version.security_patch")}")
+                          appendLine("IMEI: ${imei ?: "Unavailable (Wi-Fi only or restricted)"}")
+                          appendLine("Serial: ${p("ro.serialno")}")
+                          appendLine("--- Protection ---")
+                          appendLine("Verified Boot: ${p("ro.boot.verifiedbootstate")}")
+                          appendLine("Bootloader Locked: ${p("ro.boot.flash.locked")} (vbmeta: ${p("ro.boot.vbmeta.device_state")})")
+                          appendLine("OEM Unlock Supported: ${p("ro.oem_unlock_supported")}")
+                          appendLine("Encryption: ${p("ro.crypto.state")} / ${p("ro.crypto.type")}")
+                          appendLine("Knox Warranty Bit: ${p("ro.boot.warranty_bit")}")
+                          appendLine("--- Firmware ---")
+                          appendLine("Build ID: ${p("ro.build.display.id")}")
+                          appendLine("AP / PDA: ${p("ro.build.PDA")}")
+                          appendLine("Bootloader: ${p("ro.bootloader")}")
+                          appendLine("Baseband: ${p("gsm.version.baseband")}")
+                          appendLine("CSC: ${p("ro.csc.sales_code")}")
+                          appendLine("Incremental: ${p("ro.build.version.incremental")}")
+                          appendLine("Build Type / Tags: ${p("ro.build.type")} / ${p("ro.build.tags")}")
+                          appendLine("Build Date: ${p("ro.build.date")}")
+                          appendLine("Fingerprint: ${p("ro.build.fingerprint")}")
+                          append("ADB Banner: ${adbClient.banner}")
+                      }
+                      appendLog("ADB device info read successfully.")
                       _uiState.update { it.copy(adbConnected = true, adbInfoText = summary) }
                   }
+              }
+
+              /** Extracts the digits from the quoted ASCII column of a `service call` Parcel dump (IMEI). */
+              private fun parseParcelDigits(out: String): String? {
+                  val sb = StringBuilder()
+                  Regex("'([^']*)'").findAll(out).forEach { m ->
+                      m.groupValues[1].forEach { c -> if (c.isDigit()) sb.append(c) }
+                  }
+                  val d = sb.toString()
+                  return if (d.length >= 14) d.take(15) else null
               }
 
               /** Reboots the connected device into the requested target mode over ADB.
@@ -4423,7 +4582,7 @@ jobs:
               onAdbReboot: (String, String) -> Unit
           ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. X216B Service", "2. GPT Partitions", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
+              val tabs = listOf("1. X216B SERVICE", "2. READ GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
 
@@ -4481,15 +4640,17 @@ jobs:
                       verticalAlignment = Alignment.CenterVertically,
                       horizontalArrangement = Arrangement.SpaceBetween
                   ) {
-                      Column {
+                      Column(modifier = Modifier.weight(1f)) {
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                               Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
                               Text("FLASH EDL", color = YasOrange, fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
                           }
                           Text(
-                              text = state.deviceDescription,
+                              text = state.usbSummary,
                               fontSize = 11.sp,
-                              color = if (state.usbConnected) YasGreen else YasRed
+                              maxLines = 3,
+                              overflow = TextOverflow.Ellipsis,
+                              color = if (state.usbAny) YasGreen else YasRed
                           )
                       }
 
@@ -4502,7 +4663,7 @@ jobs:
                           ),
                           contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                       ) {
-                          Text(if (state.usbConnected) "9008 Connected" else "Connect 9008", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("Rescan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -4522,7 +4683,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
                           modifier = Modifier.height(32.dp)
                       ) {
-                          Text("⚡ X216B Wipe & Write", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                          Text("⚡ FORMAT + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                       }
 
                       Button(
@@ -4603,19 +4764,14 @@ jobs:
                       when (selectedTab) {
                           0 -> LoaderSetupTab(
                               state = state,
+                              onRunX216BWipeAndWrite = onRunX216BWipeAndWrite
+                          )
+                          1 -> ReadGptTab(
+                              state = state,
                               onProbeChipInfo = onProbeChipInfo,
                               onPickLoader = onPickLoader,
-                              onPickFrpFile = onPickFrpFile,
-                              onPickSecEfsFile = onPickSecEfsFile,
-                              onPickPersistentFile = onPickPersistentFile,
-                              onPickX216BFolder = onPickX216BFolder,
-                              onRunX216BWipeAndWrite = onRunX216BWipeAndWrite,
-                              onToggleEmbeddedFirmware = onToggleEmbeddedFirmware,
                               onStorageSelected = onStorageSelected,
-                              onRunSaharaAndFirehose = onRunSaharaAndFirehose
-                          )
-                          1 -> PartitionManagerTab(
-                              state = state,
+                              onRunSaharaAndFirehose = onRunSaharaAndFirehose,
                               onReadGpt = onReadGpt,
                               onLunFilterSelected = onLunFilterSelected,
                               onTogglePartSelection = onTogglePartSelection,
@@ -4626,6 +4782,7 @@ jobs:
                               onFlashPartition = onFlashPartition,
                               onRequestErasePartition = { confirmEraseTarget = it }
                           )
+
                           2 -> XmlFirmwareTab(
                               state = state,
                               onPickRawProgram = onPickRawProgram,
@@ -4667,16 +4824,7 @@ jobs:
           @Composable
           private fun LoaderSetupTab(
               state: EdlUiState,
-              onProbeChipInfo: () -> Unit,
-              onPickLoader: () -> Unit,
-              onPickFrpFile: () -> Unit,
-              onPickSecEfsFile: () -> Unit,
-              onPickPersistentFile: () -> Unit,
-              onPickX216BFolder: () -> Unit,
-              onRunX216BWipeAndWrite: () -> Unit,
-              onToggleEmbeddedFirmware: (Boolean) -> Unit,
-              onStorageSelected: (StorageType) -> Unit,
-              onRunSaharaAndFirehose: () -> Unit
+              onRunX216BWipeAndWrite: () -> Unit
           ) {
               Column(
                   modifier = Modifier
@@ -4689,146 +4837,80 @@ jobs:
                       shape = RoundedCornerShape(8.dp),
                       modifier = Modifier
                           .fillMaxWidth()
-                          .border(1.dp, if (state.embeddedFirmwareReady) YasGreen else YasRed, RoundedCornerShape(8.dp))
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Text(
-                                  "Embedded X216B Firmware (built into APK)",
-                                  color = if (state.embeddedFirmwareReady) YasGreen else YasRed,
-                                  fontWeight = FontWeight.ExtraBold,
-                                  fontSize = 12.sp,
-                                  modifier = Modifier.weight(1f)
-                              )
-                              Switch(
-                                  checked = state.useEmbeddedFirmware,
-                                  onCheckedChange = onToggleEmbeddedFirmware,
-                                  colors = SwitchDefaults.colors(
-                                      checkedThumbColor = YasGreen,
-                                      checkedTrackColor = Color(0xFF1F4068)
-                                  )
-                              )
-                          }
-                          Text(
-                              text = if (state.useEmbeddedFirmware)
-                                  state.embeddedFirmwareStatus
-                              else
-                                  "Custom/manual mode enabled — select your own files below.",
-                              fontSize = 10.sp,
-                              color = Color.LightGray
-                          )
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
                           .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
                   ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "SM-X216B Auto Wipe & Write Service",
+                              "SM-X216B Service",
                               color = YasGreen,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
-
                           Text(
-                              "Erases: [userdata, persistent, metadata, cache, sec_efs, frp] -> Writes: [frp, sec_efs, persistent]",
-                              fontSize = 10.sp,
+                              "Uploads the loader and reads the full GPT automatically, then formats the device and rewrites the FRP + MDM partitions.",
+                              fontSize = 11.sp,
                               color = Color.LightGray
                           )
-
-                          if (!state.useEmbeddedFirmware) {
-                              Row(
-                                  modifier = Modifier.fillMaxWidth(),
-                                  horizontalArrangement = Arrangement.End
-                              ) {
-                                  Button(
-                                      onClick = onPickX216BFolder,
-                                      enabled = !state.isBusy,
-                                      colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F4068)),
-                                      contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                      modifier = Modifier.height(28.dp)
-                                  ) {
-                                      Text("Auto-Load Folder", fontSize = 11.sp, color = YasCyan)
-                                  }
-                              }
-
-                              Row(
-                                  modifier = Modifier.fillMaxWidth(),
-                                  horizontalArrangement = Arrangement.spacedBy(6.dp)
-                              ) {
-                                  OutlinedButton(
-                                      onClick = onPickFrpFile,
-                                      enabled = !state.isBusy,
-                                      modifier = Modifier.weight(1f),
-                                      contentPadding = PaddingValues(4.dp)
-                                  ) {
-                                      Text(state.frpFileName, fontSize = 10.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                  }
-                                  OutlinedButton(
-                                      onClick = onPickSecEfsFile,
-                                      enabled = !state.isBusy,
-                                      modifier = Modifier.weight(1f),
-                                      contentPadding = PaddingValues(4.dp)
-                                  ) {
-                                      Text(state.secEfsFileName, fontSize = 10.sp, color = YasOrange, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                  }
-                                  OutlinedButton(
-                                      onClick = onPickPersistentFile,
-                                      enabled = !state.isBusy,
-                                      modifier = Modifier.weight(1f),
-                                      contentPadding = PaddingValues(4.dp)
-                                  ) {
-                                      Text(state.persistentFileName, fontSize = 10.sp, color = YasGreen, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                  }
-                              }
-                          }
-
                           Button(
                               onClick = onRunX216BWipeAndWrite,
-                              enabled = !state.isBusy && (state.useEmbeddedFirmware ||
-                                  (state.frpFileUri != null && state.secEfsFileUri != null && state.persistentFileUri != null)),
+                              enabled = !state.isBusy,
                               colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
                               modifier = Modifier
                                   .fillMaxWidth()
-                                  .height(42.dp)
+                                  .height(46.dp)
                           ) {
-                              Text("⚡ Execute X216B Wipe (6 Parts) & Write (3 Parts)", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                              Text("⚡ FORMAT + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
                       }
                   }
+              }
+          }
 
+          @Composable
+          private fun ReadGptTab(
+              state: EdlUiState,
+              onProbeChipInfo: () -> Unit,
+              onPickLoader: () -> Unit,
+              onStorageSelected: (StorageType) -> Unit,
+              onRunSaharaAndFirehose: () -> Unit,
+              onReadGpt: () -> Unit,
+              onLunFilterSelected: (Int) -> Unit,
+              onTogglePartSelection: (String) -> Unit,
+              onSelectAllParts: (List<String>) -> Unit,
+              onClearPartSelection: () -> Unit,
+              onRequestBatchErase: () -> Unit,
+              onBackupPartition: (PartitionEntry) -> Unit,
+              onFlashPartition: (PartitionEntry) -> Unit,
+              onRequestErasePartition: (PartitionEntry) -> Unit
+          ) {
+              Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                   Surface(
                       color = YasCardBg,
                       shape = RoundedCornerShape(8.dp),
                       modifier = Modifier.fillMaxWidth()
                   ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Firehose Programmer / Custom Loader Override", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                      Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                           Text(
-                              text = if (state.useEmbeddedFirmware)
-                                  "Embedded Loader: ${com.edl.flasher.protocol.EmbeddedFirmware.LOADER} (bundled in APK)"
-                              else
-                                  state.loaderName,
+                              text = state.loaderName,
                               fontSize = 11.sp,
                               color = YasCyan,
                               maxLines = 1,
                               overflow = TextOverflow.Ellipsis
                           )
-                          Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .horizontalScroll(rememberScrollState()),
+                              horizontalArrangement = Arrangement.spacedBy(6.dp),
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
                               OutlinedButton(
                                   onClick = onPickLoader,
                                   enabled = !state.isBusy,
+                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("Select Custom Loader", fontSize = 12.sp, color = Color.White)
+                                  Text("Select Loader", fontSize = 11.sp, color = Color.White)
                               }
 
                               StorageType.entries.forEach { type ->
@@ -4838,54 +4920,68 @@ jobs:
                                       label = { Text("${type.name} (${type.sectorSize}B)", fontSize = 11.sp) }
                                   )
                               }
-                          }
 
-                          Button(
-                              onClick = onRunSaharaAndFirehose,
-                              enabled = state.usbConnected && !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                              modifier = Modifier.fillMaxWidth().height(38.dp)
-                          ) {
-                              Text("Start Firehose & Read Full GPT Only", fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                          }
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Text("Sahara Chip Identity (Mode 0x03)", color = YasCyan, fontWeight = FontWeight.Bold, fontSize = 12.sp)
                               OutlinedButton(
                                   onClick = onProbeChipInfo,
                                   enabled = state.usbConnected && !state.firehoseReady && !state.isBusy,
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(26.dp)
+                                  modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("Read HWID / PK_HASH", fontSize = 10.sp, color = YasCyan)
+                                  Text("Read HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
+                              }
+
+                              Button(
+                                  onClick = onRunSaharaAndFirehose,
+                                  enabled = state.usbConnected && !state.isBusy,
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(32.dp)
+                              ) {
+                                  Text("Upload Loader & Read GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
                           val info = state.deviceInfo
                           if (info != null) {
-                              Text("SoC / MSM ID : ${info.msmIdHex} (${info.socName})", fontSize = 11.sp, color = Color.White, fontFamily = FontFamily.Monospace)
-                              Text("OEM / Model  : ${info.oemName} | Model 0x${String.format("%04X", info.modelId.toInt())}", fontSize = 11.sp, color = Color.White, fontFamily = FontFamily.Monospace)
-                              Text("Serial Num   : ${info.serialHex}", fontSize = 11.sp, color = Color.White, fontFamily = FontFamily.Monospace)
-                              Text("PK_HASH      : ${info.pkHashHex}", fontSize = 10.sp, color = YasOrange, fontFamily = FontFamily.Monospace, maxLines = 2)
+                              Text(
+                                  "${info.msmIdHex} (${info.socName}) | ${info.oemName} | Serial ${info.serialHex}",
+                                  fontSize = 10.sp,
+                                  color = Color.White,
+                                  fontFamily = FontFamily.Monospace,
+                                  maxLines = 2
+                              )
+                              Text(
+                                  "PK_HASH: ${info.pkHashHex}",
+                                  fontSize = 10.sp,
+                                  color = YasOrange,
+                                  fontFamily = FontFamily.Monospace,
+                                  maxLines = 2
+                              )
                           }
                       }
+                  }
+
+                  Box(modifier = Modifier
+                      .weight(1f)
+                      .fillMaxWidth()) {
+                      PartitionManagerTab(
+                          state = state,
+                          onReadGpt = onReadGpt,
+                          onLunFilterSelected = onLunFilterSelected,
+                          onTogglePartSelection = onTogglePartSelection,
+                          onSelectAllParts = onSelectAllParts,
+                          onClearPartSelection = onClearPartSelection,
+                          onRequestBatchErase = onRequestBatchErase,
+                          onBackupPartition = onBackupPartition,
+                          onFlashPartition = onFlashPartition,
+                          onRequestErasePartition = onRequestErasePartition
+                      )
                   }
               }
           }
 
           @Composable
+
           private fun PartitionManagerTab(
               state: EdlUiState,
               onReadGpt: () -> Unit,
@@ -5300,129 +5396,94 @@ jobs:
                       .verticalScroll(rememberScrollState()),
                   verticalArrangement = Arrangement.spacedBy(8.dp)
               ) {
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("MTP Device Info", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Button(
+                          onClick = onReadMtpInfo,
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("Read MTP Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      Button(
+                          onClick = onReadAdbInfo,
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("Read Full Device Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Button(
+                          onClick = { onAdbReboot("download", "Download Mode") },
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      Button(
+                          onClick = { onAdbReboot("recovery", "Recovery") },
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      OutlinedButton(
+                          onClick = { onAdbReboot("", "Normal Restart") },
+                          enabled = !state.isBusy,
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("Restart", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  if (state.adbInfoText.isNotBlank()) {
+                      Surface(
+                          color = YasCardBg,
+                          shape = RoundedCornerShape(8.dp),
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .border(1.dp, if (state.adbConnected) YasGreen else Color(0xFF2A3A4F), RoundedCornerShape(8.dp))
+                      ) {
                           Text(
-                              "Reads USB descriptor info (Vendor/Product ID, manufacturer, product, serial) while the phone is connected in File Transfer / MTP mode.",
-                              fontSize = 10.sp,
-                              color = Color.LightGray
+                              state.adbInfoText,
+                              fontSize = 11.sp,
+                              color = Color.White,
+                              fontFamily = FontFamily.Monospace,
+                              modifier = Modifier.padding(10.dp)
                           )
-                          OutlinedButton(
-                              onClick = onReadMtpInfo,
-                              enabled = !state.isBusy,
-                              modifier = Modifier.fillMaxWidth(),
-                              contentPadding = PaddingValues(8.dp)
-                          ) {
-                              Text("Read MTP Info", fontSize = 12.sp, color = YasCyan, fontWeight = FontWeight.Bold)
-                          }
+                      }
+                  }
+
+                  if (state.mtpInfoText.isNotBlank()) {
+                      Surface(
+                          color = YasCardBg,
+                          shape = RoundedCornerShape(8.dp),
+                          modifier = Modifier.fillMaxWidth()
+                      ) {
                           Text(
                               state.mtpInfoText,
                               fontSize = 11.sp,
                               color = Color.LightGray,
-                              fontFamily = FontFamily.Monospace
+                              fontFamily = FontFamily.Monospace,
+                              modifier = Modifier.padding(10.dp)
                           )
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .border(1.dp, if (state.adbConnected) YasGreen else Color(0xFF2A3A4F), RoundedCornerShape(8.dp))
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("ADB Device Info", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                          Text(
-                              "Connects over standard ADB (USB Debugging must be enabled; the target device still shows its own 'Allow USB debugging?' prompt on first use, exactly as with a PC).",
-                              fontSize = 10.sp,
-                              color = Color.LightGray
-                          )
-                          OutlinedButton(
-                              onClick = onReadAdbInfo,
-                              enabled = !state.isBusy,
-                              modifier = Modifier.fillMaxWidth(),
-                              contentPadding = PaddingValues(8.dp)
-                          ) {
-                              Text("Read ADB Info", fontSize = 12.sp, color = YasCyan, fontWeight = FontWeight.Bold)
-                          }
-                          Text(
-                              state.adbInfoText,
-                              fontSize = 11.sp,
-                              color = Color.LightGray,
-                              fontFamily = FontFamily.Monospace
-                          )
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Reboot Target (via ADB)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                          Text(
-                              "Each button opens an ADB connection and sends the matching 'adb reboot <target>' command. Support for a given target depends on the connected device/chipset.",
-                              fontSize = 10.sp,
-                              color = Color.LightGray
-                          )
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.spacedBy(6.dp)
-                          ) {
-                              Button(
-                                  onClick = { onAdbReboot("download", "Download Mode") },
-                                  enabled = !state.isBusy,
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                                  modifier = Modifier.weight(1f),
-                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                              ) {
-                                  Text("MTP -> Download", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                              }
-                              Button(
-                                  onClick = { onAdbReboot("recovery", "Recovery") },
-                                  enabled = !state.isBusy,
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                                  modifier = Modifier.weight(1f),
-                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                              ) {
-                                  Text("MTP -> Recovery", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                              }
-                          }
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.spacedBy(6.dp)
-                          ) {
-                              Button(
-                                  onClick = { onAdbReboot("edl", "EDL (9008)") },
-                                  enabled = !state.isBusy,
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                                  modifier = Modifier.weight(1f),
-                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                              ) {
-                                  Text("MTP -> EDL", fontSize = 10.sp, fontWeight = FontWeight.Bold)
-                              }
-                              OutlinedButton(
-                                  onClick = { onAdbReboot("", "Normal Restart") },
-                                  enabled = !state.isBusy,
-                                  modifier = Modifier.weight(1f),
-                                  contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
-                              ) {
-                                  Text("Restart", fontSize = 10.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                              }
-                          }
                       }
                   }
               }
           }
 
           @Composable
+
           private fun TelemetryAndConsolePanel(
               state: EdlUiState,
               onClearLogs: () -> Unit,
@@ -5928,15 +5989,21 @@ jobs:
               }
 
               /** Signs a 20-byte ADB auth token using the ADB-specific PKCS#1 v1.5 padding
-               *  (fixed 0x00 0x01 0xFF...0xFF 0x00 prefix, no DigestInfo/OID wrapper). */
+               *  (0x00 0x01 0xFF...0xFF 0x00 + SHA-1 DigestInfo prefix + 20-byte token). */
               fun sign(keyPair: KeyPair, token: ByteArray): ByteArray {
                   val padded = ByteArray(KEY_LEN_BYTES)
                   padded[0] = 0x00
                   padded[1] = 0x01
-                  val padLen = KEY_LEN_BYTES - 3 - token.size
+                  // ADB signs the token as a pre-hashed SHA-1 digest: PKCS#1 v1.5 padding WITH the SHA-1 DigestInfo prefix.
+                  val digestInfoPrefix = byteArrayOf(
+                      0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2b, 0x0e,
+                      0x03, 0x02, 0x1a, 0x05, 0x00, 0x04, 0x14
+                  )
+                  val padLen = KEY_LEN_BYTES - 3 - digestInfoPrefix.size - token.size
                   for (i in 0 until padLen) padded[2 + i] = 0xFF.toByte()
                   padded[2 + padLen] = 0x00
-                  System.arraycopy(token, 0, padded, 3 + padLen, token.size)
+                  System.arraycopy(digestInfoPrefix, 0, padded, 3 + padLen, digestInfoPrefix.size)
+                  System.arraycopy(token, 0, padded, 3 + padLen + digestInfoPrefix.size, token.size)
 
                   val cipher = Cipher.getInstance("RSA/ECB/NoPadding")
                   cipher.init(Cipher.ENCRYPT_MODE, keyPair.private)
