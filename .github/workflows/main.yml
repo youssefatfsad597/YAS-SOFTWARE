@@ -4349,6 +4349,7 @@ jobs:
               private val firehose = FirehoseProtocol(transport, ::appendLog)
               private val odin = OdinProtocol(transport, ::appendLog)
               private val adbClient = AdbClient(context, ::appendLog)
+              private val atSerial = SamsungAtSerial(context, ::appendLog)
 
               private val _uiState = MutableStateFlow(EdlUiState())
               val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -5496,6 +5497,18 @@ jobs:
                   }
               }
 
+              /** Writes an 11-character serial to a Samsung phone over its modem port using AT
+               *  commands (no ADB), then verifies it by reading it back. */
+              fun writeSerialViaAt(serial: String) {
+                  val sn = serial.trim().uppercase()
+                  runTask("AT Write Serial") {
+                      appendLog("Writing serial via AT commands...")
+                      val result = atSerial.writeSerial(sn)
+                      appendLog(result)
+                      _uiState.update { it.copy(adbInfoText = "AT Serial: $result") }
+                  }
+              }
+
               private fun updateProgress(doneBytes: Long, totalBytes: Long, startTimeNs: Long) {
                   if (totalBytes <= 0L) return
                   val elapsedSec = ((System.nanoTime() - startTimeNs) / 1_000_000_000.0).coerceAtLeast(0.001)
@@ -5624,7 +5637,8 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit
+              onAdbShell: (String) -> Unit,
+              onWriteSerialAt: (String) -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
               val tabs = listOf("1. خدمة X216B", "2. قراءة GPT", "3. فلاشر XML", "4. سامسونج أودين", "5. MTP / ADB")
@@ -5884,7 +5898,8 @@ jobs:
                               onReadMtpInfo = onReadMtpInfo,
                               onReadAdbInfo = onReadAdbInfo,
                               onAdbReboot = onAdbReboot,
-                              onAdbShell = onAdbShell
+                              onAdbShell = onAdbShell,
+                              onWriteSerialAt = onWriteSerialAt
                           )
                       }
                   }
@@ -6569,7 +6584,8 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit
+              onAdbShell: (String) -> Unit,
+              onWriteSerialAt: (String) -> Unit
               ) {
               Column(
                   modifier = Modifier
@@ -6625,6 +6641,54 @@ jobs:
                       ) {
                           Text("إعادة التشغيل", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
+                  }
+
+                  var showSerialDialog by remember { mutableStateOf(false) }
+                  var serialInput by remember { mutableStateOf("") }
+
+                  if (showSerialDialog) {
+                      AlertDialog(
+                          onDismissRequest = { showSerialDialog = false },
+                          title = { Text("كتابة السيريال عبر AT", fontWeight = FontWeight.Bold) },
+                          text = {
+                              Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  Text("أدخل السيريال (11 حرفاً/رقماً). يجب أن يكون الهاتف متصلاً بوضع المودم (AT).", fontSize = 12.sp)
+                                  OutlinedTextField(
+                                      value = serialInput,
+                                      onValueChange = { v ->
+                                          serialInput = v.uppercase().filter { it in 'A'..'Z' || it in '0'..'9' }.take(11)
+                                      },
+                                      singleLine = true,
+                                      placeholder = { Text("مثال: R58M12ABCDE", fontSize = 12.sp) },
+                                      supportingText = { Text("${serialInput.length}/11", fontSize = 11.sp) },
+                                      modifier = Modifier.fillMaxWidth()
+                                  )
+                              }
+                          },
+                          confirmButton = {
+                              Button(
+                                  onClick = {
+                                      onWriteSerialAt(serialInput)
+                                      showSerialDialog = false
+                                  },
+                                  enabled = serialInput.length == 11,
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasRed)
+                              ) { Text("اكتب الآن") }
+                          },
+                          dismissButton = {
+                              OutlinedButton(onClick = { showSerialDialog = false }) { Text("إلغاء") }
+                          }
+                      )
+                  }
+
+                  Button(
+                      onClick = { showSerialDialog = true },
+                      enabled = !state.isBusy,
+                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                      modifier = Modifier.fillMaxWidth(),
+                      contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                  ) {
+                      Text("كتابة السيريال (AT Commands)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                   }
 
                   var shellCmd by remember { mutableStateOf("") }
@@ -6961,7 +7025,8 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
-                              onAdbShell = viewModel::runAdbShell
+                              onAdbShell = viewModel::runAdbShell,
+                              onWriteSerialAt = viewModel::writeSerialViaAt
                           )
                       }
                   }
@@ -7519,6 +7584,205 @@ jobs:
                   }
                   sb.appendLine("Interfaces: ${dev.interfaceCount}")
                   return sb.toString()
+              }
+          }
+          EOF
+
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/SamsungAtSerial.kt
+          package com.edl.flasher.protocol
+
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.hardware.usb.UsbConstants
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+          import android.hardware.usb.UsbEndpoint
+          import android.hardware.usb.UsbInterface
+          import android.hardware.usb.UsbManager
+          import android.os.Build
+          import kotlinx.coroutines.delay
+          import kotlinx.coroutines.suspendCancellableCoroutine
+          import kotlin.coroutines.resume
+
+          /** Talks to a Samsung phone's modem port (USB CDC-ACM serial, the "MODEM" USB
+           *  mode) with plain AT commands -- no ADB involved. Used to write the 11-character
+           *  serial number and then read it back to verify. */
+          class SamsungAtSerial(private val context: Context, private val log: (String) -> Unit) {
+
+              companion object {
+                  const val SAMSUNG_VID = 0x04E8
+                  const val ACTION_AT_USB_PERMISSION = "com.yas.flashedl.AT_USB_PERMISSION"
+
+                  /** Samsung's AT command used to store the serial number. The exact syntax can
+                   *  differ between models / firmware generations -- if the device answers ERROR,
+                   *  adjust only this template. %s is replaced by the 11-character serial. */
+                  const val WRITE_CMD_TEMPLATE = "AT+SERIALNO=1,%s"
+
+                  /** Standard Samsung info query; its reply contains SN(...). */
+                  const val READ_CMD = "AT+DEVCONINFO"
+
+                  private const val CDC_COMM_CLASS = 0x02
+                  private const val CDC_DATA_CLASS = 0x0A
+
+                  fun isValidSerial(s: String): Boolean = Regex("^[A-Z0-9]{11}$").matches(s)
+              }
+
+              private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+
+              private var conn: UsbDeviceConnection? = null
+              private var claimed = mutableListOf<UsbInterface>()
+              private var epIn: UsbEndpoint? = null
+              private var epOut: UsbEndpoint? = null
+
+              private fun findModemDevice(): UsbDevice? =
+                  usbManager.deviceList.values
+                      .filter { it.vendorId == SAMSUNG_VID }
+                      .firstOrNull { dev ->
+                          (0 until dev.interfaceCount).any { dev.getInterface(it).interfaceClass == CDC_DATA_CLASS }
+                      }
+
+              private suspend fun requestPermission(dev: UsbDevice): Boolean = suspendCancellableCoroutine { cont ->
+                  val receiver = object : BroadcastReceiver() {
+                      override fun onReceive(ctx: Context, intent: Intent) {
+                          if (intent.action == ACTION_AT_USB_PERMISSION) {
+                              runCatching { context.unregisterReceiver(this) }
+                              if (cont.isActive) cont.resume(intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false))
+                          }
+                      }
+                  }
+                  val filter = IntentFilter(ACTION_AT_USB_PERMISSION)
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                      context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                  } else {
+                      context.registerReceiver(receiver, filter)
+                  }
+                  val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                      PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+                  } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                      PendingIntent.FLAG_MUTABLE
+                  } else 0
+                  val pi = PendingIntent.getBroadcast(context, 0, Intent(ACTION_AT_USB_PERMISSION), flags)
+                  usbManager.requestPermission(dev, pi)
+                  cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+              }
+
+              private fun open(dev: UsbDevice): Boolean {
+                  close()
+                  val c = usbManager.openDevice(dev) ?: return false
+                  var ctrlId = 0
+                  for (i in 0 until dev.interfaceCount) {
+                      val intf = dev.getInterface(i)
+                      if (intf.interfaceClass == CDC_COMM_CLASS) {
+                          ctrlId = intf.id
+                          if (c.claimInterface(intf, true)) claimed.add(intf)
+                      }
+                  }
+                  for (i in 0 until dev.interfaceCount) {
+                      val intf = dev.getInterface(i)
+                      if (intf.interfaceClass != CDC_DATA_CLASS) continue
+                      var inEp: UsbEndpoint? = null
+                      var outEp: UsbEndpoint? = null
+                      for (j in 0 until intf.endpointCount) {
+                          val ep = intf.getEndpoint(j)
+                          if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                          if (ep.direction == UsbConstants.USB_DIR_IN) inEp = ep else outEp = ep
+                      }
+                      if (inEp != null && outEp != null && c.claimInterface(intf, true)) {
+                          claimed.add(intf)
+                          epIn = inEp
+                          epOut = outEp
+                          break
+                      }
+                  }
+                  if (epIn == null || epOut == null) {
+                      c.close()
+                      claimed.clear()
+                      return false
+                  }
+                  // CDC SET_LINE_CODING (115200 8N1) + SET_CONTROL_LINE_STATE (DTR|RTS)
+                  val lc = byteArrayOf(0x00, 0xC2.toByte(), 0x01, 0x00, 0x00, 0x00, 0x08)
+                  c.controlTransfer(0x21, 0x20, 0, ctrlId, lc, lc.size, 1000)
+                  c.controlTransfer(0x21, 0x22, 0x03, ctrlId, null, 0, 1000)
+                  conn = c
+                  return true
+              }
+
+              private fun close() {
+                  runCatching {
+                      claimed.forEach { conn?.releaseInterface(it) }
+                      conn?.close()
+                  }
+                  claimed = mutableListOf()
+                  conn = null
+                  epIn = null
+                  epOut = null
+              }
+
+              private fun drainInput() {
+                  val c = conn ?: return
+                  val ep = epIn ?: return
+                  val tmp = ByteArray(1024)
+                  while (c.bulkTransfer(ep, tmp, tmp.size, 80) > 0) { /* discard stale bytes */ }
+              }
+
+              /** Sends one AT command and collects the reply until OK / ERROR or timeout. */
+              private fun sendAt(cmd: String, timeoutMs: Int = 4000): String {
+                  val c = conn ?: return ""
+                  val out = epOut ?: return ""
+                  val inEp = epIn ?: return ""
+                  drainInput()
+                  val data = "$cmd\r\n".toByteArray(Charsets.US_ASCII)
+                  if (c.bulkTransfer(out, data, data.size, 3000) < 0) return ""
+                  val sb = StringBuilder()
+                  val tmp = ByteArray(1024)
+                  val deadline = System.currentTimeMillis() + timeoutMs
+                  while (System.currentTimeMillis() < deadline) {
+                      val n = c.bulkTransfer(inEp, tmp, tmp.size, 300)
+                      if (n > 0) {
+                          sb.append(String(tmp, 0, n, Charsets.US_ASCII))
+                          val t = sb.toString()
+                          if (t.contains("OK") || t.contains("ERROR")) break
+                      }
+                  }
+                  return sb.toString().trim()
+              }
+
+              /** Writes [serial] (must already be 11 chars A-Z/0-9) and verifies by reading back.
+               *  Returns a human-readable result; the device itself accepts or rejects the command. */
+              suspend fun writeSerial(serial: String): String {
+                  if (!isValidSerial(serial)) return "Invalid serial: it must be exactly 11 characters (A-Z, 0-9)."
+                  val dev = findModemDevice()
+                      ?: return "No Samsung modem (AT) port found. Switch the phone to a USB mode that exposes MODEM/ACM (e.g. via *#0808# or *#0*#) and reconnect."
+                  if (!usbManager.hasPermission(dev)) {
+                      log("Requesting USB permission for the modem port...")
+                      if (!requestPermission(dev)) return "USB permission denied."
+                  }
+                  if (!open(dev)) return "Could not open the modem port (CDC-ACM interface busy or missing)."
+                  try {
+                      val ping = sendAt("AT", 2000)
+                      log("AT -> ${ping.replace("\r", " ").replace("\n", " ")}")
+                      if (!ping.contains("OK")) return "Device did not answer AT. Check the USB mode."
+
+                      val cmd = String.format(WRITE_CMD_TEMPLATE, serial)
+                      log("TX: $cmd")
+                      val resp = sendAt(cmd, 6000)
+                      log("RX: ${resp.replace("\r", " ").replace("\n", " ")}")
+                      if (!resp.contains("OK")) return "Device rejected the write command (${resp.ifBlank { "no reply" }}). The AT syntax may differ for this model."
+
+                      delay(800)
+                      val info = sendAt(READ_CMD, 5000)
+                      val sn = Regex("SN\\(([^)]*)\\)").find(info)?.groupValues?.get(1)
+                      return when {
+                          sn == null -> "Write accepted (OK). Could not read the serial back to verify."
+                          sn.equals(serial, ignoreCase = true) -> "Serial written and verified: $sn"
+                          else -> "Write accepted (OK) but the device still reports SN=$sn. A reboot may be needed."
+                      }
+                  } finally {
+                      close()
+                  }
               }
           }
           EOF
