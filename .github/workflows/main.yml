@@ -4834,8 +4834,8 @@ jobs:
                       contentColor = YasCyan,
                       divider = { HorizontalDivider(color = YasBorder, thickness = 1.dp) },
                       indicator = { positions ->
-                          TabRowDefaults.SecondaryIndicator(
-                              Modifier.tabIndicatorOffset(positions[selectedTab]),
+                          TabRowDefaults.Indicator(
+                              modifier = Modifier.tabIndicatorOffset(positions[selectedTab]),
                               height = 2.5.dp,
                               color = YasCyan
                           )
