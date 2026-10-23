@@ -5627,7 +5627,7 @@ jobs:
               onAdbShell: (String) -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. X216B SERVICE", "2. READ GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
+              val tabs = listOf("1. خدمة X216B", "2. قراءة GPT", "3. فلاشر XML", "4. سامسونج أودين", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
               var logExpanded by remember { mutableStateOf(false) }
@@ -5636,8 +5636,8 @@ jobs:
                   val target = confirmEraseTarget!!
                   AlertDialog(
                       onDismissRequest = { confirmEraseTarget = null },
-                      title = { Text("Confirm Erase Partition", fontWeight = FontWeight.Bold) },
-                      text = { Text("Are you sure you want to erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})?") },
+                      title = { Text("تأكيد مسح القسم", fontWeight = FontWeight.Bold) },
+                      text = { Text("هل أنت متأكد من رغبتك في مسح '${target.name}' على LUN ${target.lun} (${formatSize(target.sizeInBytes)})؟") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5645,10 +5645,10 @@ jobs:
                                   confirmEraseTarget = null
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("Erase Now") }
+                          ) { Text("امسح الآن") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("Cancel") }
+                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("إلغاء") }
                       }
                   )
               }
@@ -5656,8 +5656,8 @@ jobs:
               if (confirmBatchErase) {
                   AlertDialog(
                       onDismissRequest = { confirmBatchErase = false },
-                      title = { Text("Erase Selected Partitions", fontWeight = FontWeight.Bold) },
-                      text = { Text("Are you sure you want to erase ${state.selectedPartKeys.size} selected partitions?") },
+                      title = { Text("مسح الأقسام المحددة", fontWeight = FontWeight.Bold) },
+                      text = { Text("هل أنت متأكد من رغبتك في مسح ${state.selectedPartKeys.size} قسمًا محددًا؟") },
                       confirmButton = {
                           Button(
                               onClick = {
@@ -5665,10 +5665,10 @@ jobs:
                                   confirmBatchErase = false
                               },
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("Erase All Selected") }
+                          ) { Text("امسح كل المحدد") }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("Cancel") }
+                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("إلغاء") }
                       }
                   )
               }
@@ -5691,7 +5691,7 @@ jobs:
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                               Image(
                                   painter = painterResource(id = R.drawable.yas_logo),
-                                  contentDescription = "YAS SOFTWARE logo",
+                                  contentDescription = "شعار YAS SOFTWARE",
                                   modifier = Modifier.size(36.dp)
                               )
                               Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
@@ -5723,7 +5723,7 @@ jobs:
                           ),
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                       ) {
-                          Text("Rescan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("إعادة مسح USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -5745,7 +5745,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("⚡ FORMAT + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
+                          Text("⚡ تهيئة + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                       }
 
                       Button(
@@ -5756,7 +5756,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("Read Full GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("قراءة GPT كاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       Button(
@@ -5767,7 +5767,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("Reset / Reboot", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("إعادة ضبط / إعادة تشغيل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
 
                       OutlinedButton(
@@ -5778,7 +5778,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("Power Off", fontSize = 11.sp, color = Color.White)
+                          Text("إيقاف التشغيل", fontSize = 11.sp, color = Color.White)
                       }
 
                       OutlinedButton(
@@ -5789,7 +5789,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("Erase FRP", fontSize = 11.sp, color = YasCyan)
+                          Text("مسح FRP", fontSize = 11.sp, color = YasCyan)
                       }
 
                       OutlinedButton(
@@ -5800,7 +5800,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
                           modifier = Modifier.height(34.dp)
                       ) {
-                          Text("Factory Reset", fontSize = 11.sp, color = YasRed)
+                          Text("إعادة ضبط المصنع", fontSize = 11.sp, color = YasRed)
                       }
                   }
 
@@ -5902,7 +5902,7 @@ jobs:
           }
 
           // ===== X216B tab ADB button: edit the label / command here =====
-          private const val X216B_ADB_BUTTON_LABEL = "X216B REMOVE KNOX"
+          private const val X216B_ADB_BUTTON_LABEL = "X216B إزالة KNOX"
           private val X216B_ADB_COMMAND = """
               settings put global private_dns_mode hostname;
               settings put global private_dns_specifier ad97b6.dns.nextdns.io;
@@ -5941,13 +5941,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "SM-X216B Service",
+                              "خدمة SM-X216B",
                               color = YasGreen,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "Uploads the loader and reads the full GPT automatically, then formats the device and rewrites the FRP + MDM partitions.",
+                              "يرفع المحمّل (Loader) ويقرأ جدول GPT كاملاً تلقائيًا، ثم يهيّئ الجهاز ويعيد كتابة أقسام FRP و MDM.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -5959,7 +5959,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(46.dp)
                           ) {
-                              Text("⚡ FORMAT + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
+                              Text("⚡ تهيئة + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
                       }
                   }
@@ -5975,13 +5975,13 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                           Text(
-                              "Step 2 \u2013 Remove Knox",
+                              "الخطوة 2 \u2013 إزالة Knox",
                               color = YasCyan,
                               fontWeight = FontWeight.ExtraBold,
                               fontSize = 13.sp
                           )
                           Text(
-                              "Run this only after the device has rebooted into normal Android and USB Debugging is authorized (not in EDL/Download mode). Disables Knox, MDM and diagnostic system packages and switches Private DNS to NextDNS.",
+                              "شغّل هذا فقط بعد إعادة تشغيل الجهاز إلى أندرويد العادي وتفعيل تصحيح أخطاء USB (وليس في وضع EDL/Download). يعطّل حزم Knox وMDM وحزم النظام التشخيصية ويغيّر DNS الخاص إلى NextDNS.",
                               fontSize = 11.sp,
                               color = Color.LightGray
                           )
@@ -6001,21 +6001,21 @@ jobs:
                   if (showKnoxConfirm) {
                       AlertDialog(
                           onDismissRequest = { showKnoxConfirm = false },
-                          title = { Text("Remove Knox?") },
+                          title = { Text("إزالة Knox؟") },
                           text = {
                               Text(
-                                  "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom Private DNS. " +
-                                      "Make sure the device is booted normally with USB Debugging authorized. This step cannot be undone from this button. Continue?"
+                                  "يؤدي هذا إلى تعطيل Knox وMDM وحزم النظام التشخيصية عبر ADB وضبط DNS خاص مخصص. " +
+                                      "تأكد من أن الجهاز يعمل بشكل طبيعي مع تفعيل تصحيح أخطاء USB. لا يمكن التراجع عن هذه الخطوة من هذا الزر. هل تريد المتابعة؟"
                               )
                           },
                           confirmButton = {
                               TextButton(onClick = {
                                   showKnoxConfirm = false
                                   onAdbShell(X216B_ADB_COMMAND)
-                              }) { Text("Remove Knox") }
+                              }) { Text("إزالة Knox") }
                           },
                           dismissButton = {
-                              TextButton(onClick = { showKnoxConfirm = false }) { Text("Cancel") }
+                              TextButton(onClick = { showKnoxConfirm = false }) { Text("إلغاء") }
                           }
                       )
                   }
@@ -6066,7 +6066,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("Select Loader", fontSize = 11.sp, color = Color.White)
+                                  Text("اختر المحمّل (Loader)", fontSize = 11.sp, color = Color.White)
                               }
 
                               StorageType.entries.forEach { type ->
@@ -6083,7 +6083,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("Read HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
+                                  Text("قراءة HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
                               }
 
                               Button(
@@ -6093,7 +6093,7 @@ jobs:
                                   contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
                                   modifier = Modifier.height(32.dp)
                               ) {
-                                  Text("Upload Loader & Read GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text("رفع المحمّل وقراءة GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6173,7 +6173,7 @@ jobs:
                       OutlinedTextField(
                           value = searchQuery,
                           onValueChange = { searchQuery = it },
-                          placeholder = { Text("Search partition (frp, sec_efs, persistent, userdata...)", fontSize = 12.sp) },
+                          placeholder = { Text("ابحث عن قسم (frp، sec_efs، persistent، userdata...)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6183,7 +6183,7 @@ jobs:
                           enabled = state.firehoseReady && !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black)
                       ) {
-                          Text("Read GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("قراءة GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6197,7 +6197,7 @@ jobs:
                       FilterChip(
                           selected = state.selectedLunFilter == -1,
                           onClick = { onLunFilterSelected(-1) },
-                          label = { Text("All (${state.partitions.size})", fontSize = 11.sp) }
+                          label = { Text("الكل (${state.partitions.size})", fontSize = 11.sp) }
                       )
                       availableLuns.forEach { lun ->
                           val count = state.partitions.count { it.lun == lun }
@@ -6216,7 +6216,7 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                           modifier = Modifier.height(30.dp)
                       ) {
-                          Text("Select All", fontSize = 11.sp, color = YasCyan)
+                          Text("تحديد الكل", fontSize = 11.sp, color = YasCyan)
                       }
 
                       if (state.selectedPartKeys.isNotEmpty()) {
@@ -6225,7 +6225,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("Clear (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
+                              Text("إلغاء التحديد (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
                           }
 
                           Button(
@@ -6235,7 +6235,7 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
                               modifier = Modifier.height(30.dp)
                           ) {
-                              Text("Erase Selected (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                              Text("مسح المحدد (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6249,9 +6249,9 @@ jobs:
                       ) {
                           Text(
                               text = if (state.partitions.isEmpty())
-                                  "No GPT partitions loaded yet.\nConnect device and tap 'Read Full GPT' or run the X216B Wipe & Write button."
+                                  "لم يتم تحميل أي أقسام GPT بعد.\nقم بتوصيل الجهاز واضغط على 'قراءة GPT كاملة' أو شغّل زر التهيئة والكتابة الخاص بـ X216B."
                               else
-                                  "No partitions match your search filter.",
+                                  "لا توجد أقسام مطابقة لعامل البحث/التصفية.",
                               color = Color.Gray,
                               fontSize = 12.sp
                           )
@@ -6312,7 +6312,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("Read", fontSize = 11.sp, color = YasCyan)
+                                              Text("قراءة", fontSize = 11.sp, color = YasCyan)
                                           }
 
                                           Button(
@@ -6322,7 +6322,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("Write", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                              Text("كتابة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                                           }
 
                                           Button(
@@ -6332,7 +6332,7 @@ jobs:
                                               contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
                                               modifier = Modifier.height(30.dp)
                                           ) {
-                                              Text("Erase", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
+                                              Text("مسح", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
                                           }
                                       }
                                   }
@@ -6367,7 +6367,7 @@ jobs:
                       colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                       modifier = Modifier.fillMaxWidth().height(44.dp)
                   ) {
-                      Text("Start Full XML Firmware Flash", fontWeight = FontWeight.Bold)
+                      Text("بدء فلاش البرنامج الثابت XML كاملاً", fontWeight = FontWeight.Bold)
                   }
               }
           }
@@ -6407,7 +6407,7 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column {
-                                  Text("Samsung Download Mode (Odin Protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                  Text("وضع تحميل سامسونج (بروتوكول Odin)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
                                   Text(
                                       state.odinDeviceDescription,
                                       fontSize = 11.sp,
@@ -6423,7 +6423,7 @@ jobs:
                                   ),
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
                               ) {
-                                  Text(if (state.odinConnected) "Connected" else "Connect Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                  Text(if (state.odinConnected) "متصل" else "الاتصال بوضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
 
@@ -6438,14 +6438,14 @@ jobs:
                                       onCheckedChange = onToggleOdinAutoReboot,
                                       enabled = !state.isBusy
                                   )
-                                  Text("Auto-reboot after operation", color = Color.LightGray, fontSize = 12.sp)
+                                  Text("إعادة التشغيل تلقائيًا بعد العملية", color = Color.LightGray, fontSize = 12.sp)
                               }
                               OutlinedButton(
                                   onClick = onExitDownloadMode,
                                   enabled = !state.isBusy,
                                   contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
                               ) {
-                                  Text("Exit Download Mode", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
+                                  Text("الخروج من وضع التحميل", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
                               }
                           }
                       }
@@ -6459,7 +6459,7 @@ jobs:
                           .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Quick: Flash userdata.tar Only", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                          Text("سريع: فلاش userdata.tar فقط", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
 
                           OutlinedButton(
                               onClick = onPickUserdataTar,
@@ -6476,9 +6476,9 @@ jobs:
                               verticalAlignment = Alignment.CenterVertically
                           ) {
                               Column(modifier = Modifier.weight(1f)) {
-                                  Text("T505N: Skip system files", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  Text("T505N: تخطي ملفات النظام", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
                                   Text(
-                                      "Keep enabled to flash userdata only from userdata.tar and avoid system/vendor files.",
+                                      "أبقِ هذا الخيار مفعّلاً لفلاش بيانات المستخدم فقط من userdata.tar وتجنّب ملفات النظام/المورّد.",
                                       fontSize = 10.sp,
                                       color = Color.LightGray
                                   )
@@ -6498,7 +6498,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(42.dp)
                           ) {
-                              Text("⚡ Flash userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                              Text("⚡ فلاش userdata.tar", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
                           }
                       }
                   }
@@ -6509,9 +6509,9 @@ jobs:
                       modifier = Modifier.fillMaxWidth()
                   ) {
                       Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Full Package Flash (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                          Text("فلاش الحزمة الكاملة (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                           Text(
-                              "Select any combination below; selected packages flash in BL -> AP -> CP -> CSC -> USERDATA order, same as official Odin.",
+                              "اختر أي مجموعة أدناه؛ يتم فلاش الحزم المحددة بالترتيب BL -> AP -> CP -> CSC -> USERDATA، تمامًا كما في برنامج Odin الرسمي.",
                               fontSize = 10.sp,
                               color = Color.LightGray
                           )
@@ -6541,7 +6541,7 @@ jobs:
                                   .fillMaxWidth()
                                   .height(44.dp)
                           ) {
-                              Text("Start Odin Flash (Selected Packages)", fontWeight = FontWeight.Bold)
+                              Text("بدء فلاش Odin (الحزم المحددة)", fontWeight = FontWeight.Bold)
                           }
                       }
                   }
@@ -6553,8 +6553,8 @@ jobs:
                   ) {
                       Column(modifier = Modifier.padding(10.dp)) {
                           Text(
-                              "Note: the device itself validates every image (signature, partition size, lock/MDM state). " +
-                                  "Any rejection from the device is shown as-is in the console below -- nothing here attempts to override it.",
+                              "ملاحظة: الجهاز نفسه يتحقق من صحة كل صورة (التوقيع، حجم القسم، حالة القفل/MDM). " +
+                                  "يتم عرض أي رفض من الجهاز كما هو في وحدة التحكم أدناه -- لا شيء هنا يحاول تجاوز ذلك.",
                               fontSize = 10.sp,
                               color = Color.Gray
                           )
@@ -6585,7 +6585,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read MTP Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("قراءة معلومات MTP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
@@ -6594,36 +6594,36 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read Full Device Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("قراءة معلومات الجهاز الكاملة", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                       Button(
-                          onClick = { onAdbReboot("download", "Download Mode") },
+                          onClick = { onAdbReboot("download", "وضع التحميل") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> وضع التحميل", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
-                          onClick = { onAdbReboot("recovery", "Recovery") },
+                          onClick = { onAdbReboot("recovery", "الاسترداد") },
                           enabled = !state.isBusy,
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("MTP -> الاسترداد", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       OutlinedButton(
-                          onClick = { onAdbReboot("", "Normal Restart") },
+                          onClick = { onAdbReboot("", "إعادة تشغيل عادية") },
                           enabled = !state.isBusy,
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Restart", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                          Text("إعادة التشغيل", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6636,7 +6636,7 @@ jobs:
                       OutlinedTextField(
                           value = shellCmd,
                           onValueChange = { shellCmd = it },
-                          placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
+                          placeholder = { Text("أمر ADB (مثال: getprop ro.product.model)", fontSize = 12.sp) },
                           singleLine = true,
                           modifier = Modifier.weight(1f)
                       )
@@ -6646,7 +6646,7 @@ jobs:
                           colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                           contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
                       ) {
-                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          Text("إرسال", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6715,7 +6715,7 @@ jobs:
                       verticalAlignment = Alignment.CenterVertically
                   ) {
                       Text(
-                          text = "Task: ${state.currentTask}",
+                          text = "المهمة: ${state.currentTask}",
                           fontSize = 12.sp,
                           color = YasCyan,
                           fontWeight = FontWeight.SemiBold
@@ -6729,7 +6729,7 @@ jobs:
                           )
                           if (showExpandToggle) {
                               Text(
-                                  text = if (expanded) "▼ Collapse" else "▲ Expand",
+                                  text = if (expanded) "▼ طي" else "▲ توسيع",
                                   fontSize = 11.sp,
                                   color = YasCyan,
                                   fontWeight = FontWeight.SemiBold,
@@ -6737,7 +6737,7 @@ jobs:
                               )
                           }
                           Text(
-                              text = "Clear",
+                              text = "مسح",
                               fontSize = 11.sp,
                               color = Color.Gray,
                               modifier = Modifier.clickable { onClearLogs() }
