@@ -5915,8 +5915,32 @@ jobs:
                           ) {
                               Text("⚡ FORMAT + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
+                      }
+                  }
+
+                  var showKnoxConfirm by remember { mutableStateOf(false) }
+
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .border(1.dp, YasCyan, RoundedCornerShape(8.dp))
+                  ) {
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Text(
+                              "Step 2 \u2013 Remove Knox",
+                              color = YasCyan,
+                              fontWeight = FontWeight.ExtraBold,
+                              fontSize = 13.sp
+                          )
+                          Text(
+                              "Run this only after the device has rebooted into normal Android and USB Debugging is authorized (not in EDL/Download mode). Disables Knox, MDM and diagnostic system packages and switches Private DNS to NextDNS.",
+                              fontSize = 11.sp,
+                              color = Color.LightGray
+                          )
                           Button(
-                              onClick = { onAdbShell(X216B_ADB_COMMAND) },
+                              onClick = { showKnoxConfirm = true },
                               enabled = !state.isBusy,
                               colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
                               modifier = Modifier
@@ -5925,15 +5949,29 @@ jobs:
                           ) {
                               Text(X216B_ADB_BUTTON_LABEL, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
                           }
-                          if (state.adbShellOutput.isNotBlank()) {
-                              Text(
-                                  state.adbShellOutput,
-                                  fontSize = 11.sp,
-                                  color = Color.White,
-                                  fontFamily = FontFamily.Monospace
-                              )
-                          }
                       }
+                  }
+
+                  if (showKnoxConfirm) {
+                      AlertDialog(
+                          onDismissRequest = { showKnoxConfirm = false },
+                          title = { Text("Remove Knox?") },
+                          text = {
+                              Text(
+                                  "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom Private DNS. " +
+                                      "Make sure the device is booted normally with USB Debugging authorized. This step cannot be undone from this button. Continue?"
+                              )
+                          },
+                          confirmButton = {
+                              TextButton(onClick = {
+                                  showKnoxConfirm = false
+                                  onAdbShell(X216B_ADB_COMMAND)
+                              }) { Text("Remove Knox") }
+                          },
+                          dismissButton = {
+                              TextButton(onClick = { showKnoxConfirm = false }) { Text("Cancel") }
+                          }
+                      )
                   }
               }
           }
