@@ -2297,13 +2297,9 @@ jobs:
                           <category android:name="android.intent.category.LAUNCHER" />
                       </intent-filter>
 
-                      <intent-filter>
-                          <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
-                      </intent-filter>
-
-                      <meta-data
-                          android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
-                          android:resource="@xml/device_filter" />
+                      <!-- No USB_DEVICE_ATTACHED filter on purpose: it made Android show its own
+                           "open YAS to handle this USB device" dialog on top of the app's own
+                           "allow access" dialog (two taps). The app detects attach at runtime. -->
                   </activity>
               </application>
           </manifest>
@@ -4024,11 +4020,18 @@ jobs:
                   part: OdinPitPartition,
                   input: InputStream,
                   totalSize: Long,
+                  singleSequence: Boolean = false,
                   onProgress: (Long, Long) -> Unit = { _, _ -> }
               ) {
                   if (totalSize <= 0L) throw IOException("Empty source for partition '${part.name.ifBlank { part.fileName }}'")
 
-                  val window = OdinWire.xmitWindowBytes(part, 30L * OdinWire.ONE_MIB)
+                  val normalWindow = OdinWire.xmitWindowBytes(part, 30L * OdinWire.ONE_MIB)
+                  // Small images (e.g. the 64 MB quick-format userdata.img) are sent as ONE
+                  // sequence so the bootloader sees the complete image in a single pass,
+                  // the same way the PC tool does. Bounded by the bootloader's 112 MiB staging limit.
+                  val window = if (singleSequence && totalSize <= 112L * OdinWire.ONE_MIB) {
+                      maxOf(normalWindow, totalSize)
+                  } else normalWindow
                   val pkt = packetSize.toLong()
                   var sent = 0L
 
@@ -4042,21 +4045,21 @@ jobs:
                       rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_DOWNLOAD)
                       rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_START, intArrayOf(beginSize.toInt()))
 
-                      val buf = ByteArray(roundedForPackets.toInt())
-                      var filled = 0
-                      while (filled < actual) {
-                          val toRead = (actual - filled).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
-                          val r = input.read(buf, filled, toRead)
-                          if (r < 0) throw IOException(
-                              "Unexpected end of stream for '${part.name}' ($filled of $actual bytes read in this window)"
-                          )
-                          filled += r
-                      }
-                      // Any bytes beyond `actual` up to roundedForPackets stay zero (ByteArray default) -- padding.
-
+                      // One packet-sized buffer reused for the whole window (no giant allocation).
+                      val buf = ByteArray(pkt.toInt())
                       var packetOff = 0L
                       while (packetOff < roundedForPackets) {
-                          transport.write(buf, offset = packetOff.toInt(), length = pkt.toInt(), timeoutMs = 60000)
+                          java.util.Arrays.fill(buf, 0.toByte()) // zero padding past the real data
+                          val want = min(pkt, (actual - packetOff).coerceAtLeast(0L)).toInt()
+                          var filled = 0
+                          while (filled < want) {
+                              val r = input.read(buf, filled, want - filled)
+                              if (r < 0) throw IOException(
+                                  "Unexpected end of stream for '${part.name}' (${packetOff + filled} of $actual bytes read in this window)"
+                              )
+                              filled += r
+                          }
+                          transport.write(buf, offset = 0, length = pkt.toInt(), timeoutMs = 60000)
                           transport.readFully(ByteArray(OdinWire.RESPONSE_SIZE), timeoutMs = 30000) // per-packet ack
                           packetOff += pkt
                           onProgress(sent + min(packetOff, actual), totalSize)
@@ -4218,7 +4221,8 @@ jobs:
 
                       logger("Found '${header.name}' -> flashing PIT partition '${part.name.ifBlank { part.fileName }}' (id=${part.id}, ${header.size} bytes)")
                       val bounded = BoundedInputStream(tarInput, header.size)
-                      odin.flashImage(part, bounded, header.size) { done, total ->
+                      val quickFormat = allowUndersizedUserdata && undersizedReason != null
+                      odin.flashImage(part, bounded, header.size, singleSequence = quickFormat) { done, total ->
                           onPartitionProgress(label, done, total)
                       }
                       bounded.drainRemaining()
@@ -5123,7 +5127,7 @@ jobs:
                   appendLog("Flashing raw userdata.img -> PIT '${part.name}' (id=${part.id}, $size bytes)")
                   val start = System.nanoTime()
                   context.contentResolver.openInputStream(uri)?.use { ins ->
-                      odin.flashImage(part, ins, size) { done, total -> updateProgress(done, total, start) }
+                      odin.flashImage(part, ins, size, singleSequence = (reason != null)) { done, total -> updateProgress(done, total, start) }
                   } ?: throw IllegalStateException("Cannot open userdata image.")
               }
 
