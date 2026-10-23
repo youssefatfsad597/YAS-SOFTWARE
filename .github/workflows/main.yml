@@ -2320,6 +2320,8 @@ jobs:
           import android.hardware.usb.*
           import android.os.Build
           import kotlinx.coroutines.suspendCancellableCoroutine
+          import kotlinx.coroutines.sync.Mutex
+          import kotlinx.coroutines.sync.withLock
           import java.io.Closeable
           import java.io.IOException
           import kotlin.coroutines.resume
@@ -2439,15 +2441,42 @@ jobs:
                   return openDevice(device)
               }
 
+              // Only ONE permission dialog may be in flight at a time. Every caller (auto-scan, watcher,
+              // Rescan, EDL buttons) goes through this lock and re-checks hasPermission once it gets in,
+              // so a second caller never stacks a second dialog on top of the first one.
+              private val permissionMutex = Mutex()
+              private val deniedAtMs = mutableMapOf<String, Long>()
+
               private suspend fun requestUsbPermission(device: UsbDevice): Boolean =
+                  permissionMutex.withLock {
+                      if (usbManager.hasPermission(device)) return@withLock true
+                      if (!usbManager.deviceList.containsKey(device.deviceName)) return@withLock false
+                      val deniedAt = deniedAtMs[device.deviceName]
+                      if (deniedAt != null && System.currentTimeMillis() - deniedAt < 3000L) return@withLock false
+                      val granted = askUsbPermission(device)
+                      if (granted) deniedAtMs.remove(device.deviceName)
+                      else deniedAtMs[device.deviceName] = System.currentTimeMillis()
+                      granted
+                  }
+
+              private suspend fun askUsbPermission(device: UsbDevice): Boolean =
                   suspendCancellableCoroutine { cont ->
                       val receiver = object : BroadcastReceiver() {
                           override fun onReceive(ctx: Context, intent: Intent) {
-                              if (intent.action == ACTION_USB_PERMISSION) {
-                                  context.unregisterReceiver(this)
-                                  val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false)
-                                  if (cont.isActive) cont.resume(granted)
-                              }
+                              if (intent.action != ACTION_USB_PERMISSION) return
+                              val answeredFor: UsbDevice? =
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                                      intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+                                  } else {
+                                      @Suppress("DEPRECATION")
+                                      intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
+                                  }
+                              // Ignore answers that belong to a different device.
+                              if (answeredFor != null && answeredFor.deviceName != device.deviceName) return
+                              runCatching { context.unregisterReceiver(this) }
+                              val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) ||
+                                  usbManager.hasPermission(device)
+                              if (cont.isActive) cont.resume(granted)
                           }
                       }
                       val filter = IntentFilter(ACTION_USB_PERMISSION)
@@ -2464,7 +2493,12 @@ jobs:
                       } else {
                           0
                       }
-                      val pendingIntent = PendingIntent.getBroadcast(context, 0, Intent(ACTION_USB_PERMISSION), flags)
+                      val pendingIntent = PendingIntent.getBroadcast(
+                          context,
+                          device.deviceName.hashCode(),
+                          Intent(ACTION_USB_PERMISSION).setPackage(context.packageName),
+                          flags or PendingIntent.FLAG_UPDATE_CURRENT
+                      )
                       usbManager.requestPermission(device, pendingIntent)
 
                       cont.invokeOnCancellation {
@@ -4602,6 +4636,12 @@ jobs:
 
               private suspend fun handleNewUsbDevice(dev: UsbDevice) {
                   appendLog("USB device connected: ${describeUsb(dev)}")
+                  if (!transport.hasPermission(dev)) {
+                      // Android may be showing its own "open with this app" dialog (or auto-granting the
+                      // permission) right now. Wait a moment so our request never stacks on top of it.
+                      delay(800)
+                      if (transport.listDevices().none { it.deviceName == dev.deviceName }) return
+                  }
                   val granted = transport.ensurePermission(dev)
                   if (!granted) {
                       appendLog("USB permission denied for ${usbKindLabel(dev)}. Not asking again until a new USB device is connected.")
@@ -5590,6 +5630,7 @@ jobs:
               val tabs = listOf("1. X216B SERVICE", "2. READ GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
               var confirmBatchErase by remember { mutableStateOf(false) }
+              var logExpanded by remember { mutableStateOf(false) }
 
               if (confirmEraseTarget != null) {
                   val target = confirmEraseTarget!!
@@ -5785,9 +5826,12 @@ jobs:
                       }
                   }
 
+                  // READ GPT tab: keep the console small by default so the partition list is fully visible
+                  val gptCompact = selectedTab == 1 && !logExpanded
+
                   Box(
                       modifier = Modifier
-                          .weight(0.62f)
+                          .weight(if (gptCompact) 1f else 0.62f)
                           .fillMaxWidth()
                           .padding(8.dp)
                   ) {
@@ -5848,8 +5892,10 @@ jobs:
                   TelemetryAndConsolePanel(
                       state = state,
                       onClearLogs = onClearLogs,
-                      modifier = Modifier
-                          .weight(0.38f)
+                      showExpandToggle = selectedTab == 1,
+                      expanded = logExpanded,
+                      onToggleExpanded = { logExpanded = !logExpanded },
+                      modifier = (if (gptCompact) Modifier.height(130.dp) else Modifier.weight(0.38f))
                           .fillMaxWidth()
                   )
               }
@@ -6645,6 +6691,9 @@ jobs:
           private fun TelemetryAndConsolePanel(
               state: EdlUiState,
               onClearLogs: () -> Unit,
+              showExpandToggle: Boolean = false,
+              expanded: Boolean = false,
+              onToggleExpanded: () -> Unit = {},
               modifier: Modifier = Modifier
           ) {
               val listState = rememberLazyListState()
@@ -6678,6 +6727,15 @@ jobs:
                               color = YasOrange,
                               fontFamily = FontFamily.Monospace
                           )
+                          if (showExpandToggle) {
+                              Text(
+                                  text = if (expanded) "▼ Collapse" else "▲ Expand",
+                                  fontSize = 11.sp,
+                                  color = YasCyan,
+                                  fontWeight = FontWeight.SemiBold,
+                                  modifier = Modifier.clickable { onToggleExpanded() }
+                              )
+                          }
                           Text(
                               text = "Clear",
                               fontSize = 11.sp,
@@ -6764,6 +6822,14 @@ jobs:
 
               override fun onResume() {
                   super.onResume()
+                  viewModel.autoConnect()
+              }
+
+              override fun onNewIntent(intent: android.content.Intent) {
+                  super.onNewIntent(intent)
+                  setIntent(intent)
+                  // USB_DEVICE_ATTACHED delivered while the app is open: permission may already be
+                  // granted by the system, so just rescan instead of asking again.
                   viewModel.autoConnect()
               }
 
