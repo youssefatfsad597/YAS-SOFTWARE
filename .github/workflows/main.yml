@@ -3371,6 +3371,7 @@ jobs:
               val adbConnected: Boolean = false,
               val mtpInfoText: String = "",
               val adbInfoText: String = "",
+              val adbShellOutput: String = "",
               val isBusy: Boolean = false,
               val currentTask: String = "Ready",
               val progress: Float = 0f,
@@ -4448,6 +4449,33 @@ jobs:
                   return if (d.length >= 14) d.take(15) else null
               }
 
+              /** Sends a manually typed command to the device's ADB shell and appends the output. */
+              fun runAdbShell(command: String) {
+                  var cmd = command.trim()
+                  if (cmd.isEmpty()) return
+                  // Accept pasted PC-style commands such as "adb shell getprop".
+                  cmd = cmd.removePrefix("adb ").trim().removePrefix("shell ").trim()
+                  if (cmd.isEmpty()) return
+                  runTask("ADB Shell") {
+                      if (!adbClient.connect()) {
+                          _uiState.update {
+                              it.copy(
+                                  adbConnected = false,
+                                  adbShellOutput = (it.adbShellOutput + "\n\$ " + cmd + "\nADB connection failed. Enable USB Debugging and accept the prompt on the device.").takeLast(8000)
+                              )
+                          }
+                          return@runTask
+                      }
+                      val out = adbClient.shell(cmd, timeoutMs = 30000).trimEnd()
+                      _uiState.update {
+                          it.copy(
+                              adbConnected = true,
+                              adbShellOutput = (it.adbShellOutput + "\n\$ " + cmd + "\n" + out.ifEmpty { "(no output)" }).trim().takeLast(8000)
+                          )
+                      }
+                  }
+              }
+
               /** Reboots the connected device into the requested target mode over ADB.
                *  'target' follows the standard adb reboot targets: "" (normal), "recovery",
                *  "download" (Samsung Odin/Download mode), "edl" (Qualcomm chips that expose it).
@@ -4579,8 +4607,9 @@ jobs:
               onFlashUserdataOnly: () -> Unit,
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
-              onAdbReboot: (String, String) -> Unit
-          ) {
+              onAdbReboot: (String, String) -> Unit,
+              onAdbShell: (String) -> Unit
+              ) {
               var selectedTab by remember { mutableIntStateOf(0) }
               val tabs = listOf("1. X216B SERVICE", "2. READ GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
               var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
@@ -4806,7 +4835,8 @@ jobs:
                               state = state,
                               onReadMtpInfo = onReadMtpInfo,
                               onReadAdbInfo = onReadAdbInfo,
-                              onAdbReboot = onAdbReboot
+                              onAdbReboot = onAdbReboot,
+                              onAdbShell = onAdbShell
                           )
                       }
                   }
@@ -5388,8 +5418,9 @@ jobs:
               state: EdlUiState,
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
-              onAdbReboot: (String, String) -> Unit
-          ) {
+              onAdbReboot: (String, String) -> Unit,
+              onAdbShell: (String) -> Unit
+              ) {
               Column(
                   modifier = Modifier
                       .fillMaxSize()
@@ -5443,6 +5474,47 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
                           Text("Restart", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  var shellCmd by remember { mutableStateOf("") }
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(6.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      OutlinedTextField(
+                          value = shellCmd,
+                          onValueChange = { shellCmd = it },
+                          placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
+                          singleLine = true,
+                          modifier = Modifier.weight(1f)
+                      )
+                      Button(
+                          onClick = { onAdbShell(shellCmd) },
+                          enabled = !state.isBusy && shellCmd.isNotBlank(),
+                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                      ) {
+                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  if (state.adbShellOutput.isNotBlank()) {
+                      Surface(
+                          color = Color(0xFF05080D),
+                          shape = RoundedCornerShape(8.dp),
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .border(1.dp, Color(0xFF162436), RoundedCornerShape(8.dp))
+                      ) {
+                          Text(
+                              state.adbShellOutput,
+                              fontSize = 11.sp,
+                              color = Color(0xFFD0E1F9),
+                              fontFamily = FontFamily.Monospace,
+                              modifier = Modifier.padding(10.dp)
+                          )
                       }
                   }
 
@@ -5727,7 +5799,8 @@ jobs:
                               onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onReadAdbInfo = viewModel::readAdbInfo,
-                              onAdbReboot = viewModel::adbRebootTo
+                              onAdbReboot = viewModel::adbRebootTo,
+                              onAdbShell = viewModel::runAdbShell
                           )
                       }
                   }
