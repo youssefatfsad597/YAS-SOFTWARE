@@ -3365,6 +3365,7 @@ jobs:
               val cscTarName: String = "CSC .tar/.md5: Not Selected",
               val userdataTarUri: Uri? = null,
               val userdataTarName: String = "userdata.tar: Not Selected",
+              val odinAutoReboot: Boolean = true,
               // Some T505N userdata packages contain extra system images.  Keep the
               // safe default enabled so only userdata is sent from that package.
               val skipSystemFilesInUserdataTar: Boolean = true,
@@ -3430,6 +3431,18 @@ jobs:
 
               private fun onUsbDetached() {
                   sahara.resetSession()
+                  // Forget every previously-seen device so the next scan treats any
+                  // currently attached device (including the one that was just
+                  // unplugged, if it immediately re-enumerates) as a brand-new
+                  // connection and asks for USB permission again.
+                  viewModelScope.launch(Dispatchers.IO) {
+                      scanMutex.lock()
+                      try {
+                          knownUsb.clear()
+                      } finally {
+                          scanMutex.unlock()
+                      }
+                  }
                   _uiState.update {
                       it.copy(
                           usbConnected = false,
@@ -3440,7 +3453,7 @@ jobs:
                           odinDeviceDescription = "Device disconnected"
                       )
                   }
-                  appendLog("USB device disconnected (unplugged or rebooted). Waiting for it to reconnect automatically...")
+                  appendLog("USB device disconnected. Scanning for the newly connected device...")
               }
 
               fun appendLog(msg: String) {
@@ -3819,13 +3832,14 @@ jobs:
                           "frp" to setOf("frp")
                       )
 
-                      appendLog("=== STEP 1: ERASING 6 PARTITIONS (USERDATA, PERSISTENT, METADATA, CACHE, SEC_EFS, FRP) ===")
+                      appendLog("=== STEP 1: Erasing partitions (${eraseTargets.size} items) ===")
                       eraseTargets.forEachIndexed { idx, (label, aliases) ->
+                          appendLog("Erasing ${idx + 1}/${eraseTargets.size}...")
                           val matched = currentParts.filter { part ->
                               aliases.any { alias -> part.name.equals(alias, ignoreCase = true) }
                           }
                           if (matched.isEmpty()) {
-                              appendLog("WARN: Partition '$label' not found in GPT, skipping.")
+                              appendLog("WARN: '$label' not found in GPT, skipping.")
                           } else {
                               matched.forEach { part ->
                                   val sectorsToErase = if (part.name.equals("userdata", ignoreCase = true) && part.numSectors > 16384L) {
@@ -3833,13 +3847,12 @@ jobs:
                                   } else {
                                       part.numSectors
                                   }
-                                  appendLog("[Erase ${idx + 1}/6] Erasing '${part.name}' (LUN ${part.lun}, LBA ${part.firstLba}, $sectorsToErase sectors)...")
                                   firehose.eraseSectors(part.lun, part.firstLba, sectorsToErase)
-                                  appendLog("Successfully erased '${part.name}'.")
                               }
                           }
                           _uiState.update { it.copy(progress = (idx + 1).toFloat() / 9f) }
                       }
+                      appendLog("Erase step completed successfully.")
 
                       appendLog("=== STEP 2: WRITING PARTITIONS (FRP, SEC_EFS, PERSISTENT) ===")
 
@@ -3894,7 +3907,7 @@ jobs:
                               appendLog("ERROR: Partition '${job.label}' not found in GPT! Cannot write.")
                           } else {
                               val startNs = System.nanoTime()
-                              appendLog("[Write ${idx + 1}/${writeQueue.size}] Writing '${job.displayName}' -> '${targetPart.name}' (LUN ${targetPart.lun})...")
+                              appendLog("Writing ${idx + 1}/${writeQueue.size}...")
                               job.open().use { input ->
                                   firehose.writePartitionStream(
                                       lun = targetPart.lun,
@@ -3906,11 +3919,10 @@ jobs:
                                       updateProgress(done, total, startNs)
                                   }
                               }
-                              appendLog("Successfully wrote '${targetPart.name}'.")
                           }
                       }
 
-                      appendLog("=== X216B WIPE & WRITE SEQUENCE FINISHED SUCCESSFULLY! ===")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -3953,6 +3965,29 @@ jobs:
                           "USERDATA package filter disabled: every recognized image will be sent."
                       }
                   )
+              }
+
+              fun setOdinAutoReboot(enabled: Boolean) {
+                  _uiState.update { it.copy(odinAutoReboot = enabled) }
+              }
+
+              /** Sends the ODIN session-close + reboot command, exiting Download Mode
+               *  without flashing anything. Connects first if not already connected. */
+              fun exitDownloadMode() {
+                  runTask("Exit Download Mode") {
+                      openOdinConnectionIfNeeded()
+                      appendLog("Exiting Download Mode...")
+                      odin.shutdown(reboot = true)
+                      transport.close()
+                      _uiState.update {
+                          it.copy(
+                              odinConnected = false,
+                              odinSessionReady = false,
+                              odinDeviceDescription = "No Download-Mode Device Detected"
+                          )
+                      }
+                      appendLog("Operation completed successfully.")
+                  }
               }
 
               fun connectSamsungDownloadMode() {
@@ -4101,8 +4136,8 @@ jobs:
                       appendLog("=== STARTING ODIN FLASH SEQUENCE (${slots.size} package(s)) ===")
                       flashTarsWithOdin(slots)
 
-                      appendLog("=== ODIN FLASH SEQUENCE FINISHED SUCCESSFULLY! ===")
-                      odin.shutdown(reboot = true)
+                      appendLog("Operation completed successfully.")
+                      odin.shutdown(reboot = _uiState.value.odinAutoReboot)
                       transport.close()
                       _uiState.update {
                           it.copy(
@@ -4122,8 +4157,8 @@ jobs:
                       appendLog("=== FLASHING ${_uiState.value.userdataTarName} ===")
                       flashTarsWithOdin(listOf("USERDATA" to uri))
 
-                      odin.shutdown(reboot = false)
-                      appendLog("=== USERDATA FLASH FINISHED SUCCESSFULLY! ===")
+                      odin.shutdown(reboot = _uiState.value.odinAutoReboot)
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4171,7 +4206,7 @@ jobs:
                               updateProgress(done, total, startNs)
                           }
                       }
-                      appendLog("Saved '${partition.name}' successfully.")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4193,7 +4228,7 @@ jobs:
                               updateProgress(done, total, startNs)
                           }
                       }
-                      appendLog("Write '${partition.name}' completed successfully.")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4201,7 +4236,7 @@ jobs:
                   runTask("Erasing '${partition.name}'") {
                       appendLog("Erasing '${partition.name}' (LUN ${partition.lun}, ${partition.numSectors} sectors)...")
                       firehose.eraseSectors(partition.lun, partition.firstLba, partition.numSectors)
-                      appendLog("Partition '${partition.name}' erased.")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4220,7 +4255,7 @@ jobs:
                           _uiState.update { it.copy(progress = (idx + 1).toFloat() / targets.size.toFloat()) }
                       }
                       _uiState.update { it.copy(selectedPartKeys = emptySet()) }
-                      appendLog("Successfully erased ${targets.size} selected partitions.")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4239,7 +4274,7 @@ jobs:
                           appendLog("Erasing FRP partition '${part.name}' on LUN ${part.lun}...")
                           firehose.eraseSectors(part.lun, part.firstLba, part.numSectors)
                       }
-                      appendLog("FRP Reset Completed Successfully!")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4259,7 +4294,7 @@ jobs:
                           appendLog("Formatting '${part.name}' (LUN ${part.lun})...")
                           firehose.eraseSectors(part.lun, part.firstLba, sectorsToWipe)
                       }
-                      appendLog("Factory Reset (Userdata/Metadata wipe) Completed!")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4316,7 +4351,7 @@ jobs:
                           appendLog("Patches applied.")
                       }
 
-                      appendLog("Full Firmware Flash Completed Successfully!")
+                      appendLog("Operation completed successfully.")
                   }
               }
 
@@ -4549,6 +4584,7 @@ jobs:
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
           import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
@@ -4558,12 +4594,20 @@ jobs:
           import com.edl.flasher.protocol.PartitionEntry
           import com.edl.flasher.protocol.StorageType
 
-          private val YasDarkBg = Color(0xFF0A0F18)
-          private val YasCardBg = Color(0xFF121C2B)
-          private val YasCyan = Color(0xFF00E5FF)
-          private val YasOrange = Color(0xFFFF9100)
-          private val YasGreen = Color(0xFF00E676)
-          private val YasRed = Color(0xFFFF5252)
+          // --- Modern dark palette: softer, higher-contrast accents on a deep slate base. ---
+          private val YasDarkBg = Color(0xFF0B0E14)
+          private val YasCardBg = Color(0xFF161B26)
+          private val YasCardBgAlt = Color(0xFF1C2330)
+          private val YasBorder = Color(0xFF262E3D)
+          private val YasMuted = Color(0xFF8A94A6)
+          private val YasCyan = Color(0xFF38BDF8)
+          private val YasOrange = Color(0xFFFBA94C)
+          private val YasGreen = Color(0xFF34D399)
+          private val YasRed = Color(0xFFF87171)
+          private val YasHeaderGradient = Brush.horizontalGradient(
+              listOf(Color(0xFF161B26), Color(0xFF1B2333))
+          )
+          private val YasAccentShape = RoundedCornerShape(10.dp)
 
           @Composable
           fun EdlMainScreen(
@@ -4605,6 +4649,8 @@ jobs:
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
+              onToggleOdinAutoReboot: (Boolean) -> Unit,
+              onExitDownloadMode: () -> Unit,
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
@@ -4664,33 +4710,42 @@ jobs:
                   Row(
                       modifier = Modifier
                           .fillMaxWidth()
-                          .background(YasCardBg)
-                          .padding(horizontal = 12.dp, vertical = 8.dp),
+                          .background(YasHeaderGradient)
+                          .border(width = 1.dp, color = YasBorder)
+                          .padding(horizontal = 14.dp, vertical = 10.dp),
                       verticalAlignment = Alignment.CenterVertically,
                       horizontalArrangement = Arrangement.SpaceBetween
                   ) {
                       Column(modifier = Modifier.weight(1f)) {
                           Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                              Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
-                              Text("FLASH EDL", color = YasOrange, fontWeight = FontWeight.ExtraBold, fontSize = 19.sp)
+                              Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
+                              Text("FLASH EDL", color = YasOrange, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
                           }
-                          Text(
-                              text = state.usbSummary,
-                              fontSize = 11.sp,
-                              maxLines = 3,
-                              overflow = TextOverflow.Ellipsis,
-                              color = if (state.usbAny) YasGreen else YasRed
-                          )
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Box(
+                                  modifier = Modifier
+                                      .size(7.dp)
+                                      .background(if (state.usbAny) YasGreen else YasMuted, RoundedCornerShape(50))
+                              )
+                              Text(
+                                  text = state.usbSummary,
+                                  fontSize = 11.sp,
+                                  maxLines = 3,
+                                  overflow = TextOverflow.Ellipsis,
+                                  color = if (state.usbAny) YasGreen else YasMuted
+                              )
+                          }
                       }
 
                       Button(
                           onClick = onConnectUsb,
                           enabled = !state.isBusy,
+                          shape = YasAccentShape,
                           colors = ButtonDefaults.buttonColors(
-                              containerColor = if (state.usbConnected) Color(0xFF1E3A5F) else YasCyan,
-                              contentColor = if (state.usbConnected) Color.White else Color.Black
+                              containerColor = if (state.usbConnected) YasCardBgAlt else YasCyan,
+                              contentColor = if (state.usbConnected) Color.White else Color(0xFF07131C)
                           ),
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
                       ) {
                           Text("Rescan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                       }
@@ -4699,18 +4754,20 @@ jobs:
                   Row(
                       modifier = Modifier
                           .fillMaxWidth()
-                          .background(Color(0xFF0E1624))
+                          .background(YasDarkBg)
+                          .border(width = 1.dp, color = YasBorder)
                           .horizontalScroll(rememberScrollState())
-                          .padding(horizontal = 10.dp, vertical = 6.dp),
-                      horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          .padding(horizontal = 10.dp, vertical = 8.dp),
+                      horizontalArrangement = Arrangement.spacedBy(8.dp),
                       verticalAlignment = Alignment.CenterVertically
                   ) {
                       Button(
                           onClick = onRunX216BWipeAndWrite,
                           enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color(0xFF062A1C)),
+                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("⚡ FORMAT + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
                       }
@@ -4718,9 +4775,10 @@ jobs:
                       Button(
                           onClick = onReadGpt,
                           enabled = state.firehoseReady && !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color(0xFF07131C)),
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("Read Full GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
@@ -4728,9 +4786,10 @@ jobs:
                       Button(
                           onClick = { onResetDevice("reset") },
                           enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color(0xFF2B1402)),
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("Reset / Reboot", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
@@ -4738,8 +4797,10 @@ jobs:
                       OutlinedButton(
                           onClick = { onResetDevice("off") },
                           enabled = !state.isBusy,
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("Power Off", fontSize = 11.sp, color = Color.White)
                       }
@@ -4747,8 +4808,10 @@ jobs:
                       OutlinedButton(
                           onClick = onResetFrp,
                           enabled = state.firehoseReady && !state.isBusy,
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("Erase FRP", fontSize = 11.sp, color = YasCyan)
                       }
@@ -4756,8 +4819,10 @@ jobs:
                       OutlinedButton(
                           onClick = onFactoryReset,
                           enabled = state.firehoseReady && !state.isBusy,
-                          contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
-                          modifier = Modifier.height(32.dp)
+                          shape = YasAccentShape,
+                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
+                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                          modifier = Modifier.height(34.dp)
                       ) {
                           Text("Factory Reset", fontSize = 11.sp, color = YasRed)
                       }
@@ -4766,7 +4831,15 @@ jobs:
                   TabRow(
                       selectedTabIndex = selectedTab,
                       containerColor = YasCardBg,
-                      contentColor = YasCyan
+                      contentColor = YasCyan,
+                      divider = { HorizontalDivider(color = YasBorder, thickness = 1.dp) },
+                      indicator = { positions ->
+                          TabRowDefaults.SecondaryIndicator(
+                              Modifier.tabIndicatorOffset(positions[selectedTab]),
+                              height = 2.5.dp,
+                              color = YasCyan
+                          )
+                      }
                   ) {
                       tabs.forEachIndexed { index, title ->
                           Tab(
@@ -4777,7 +4850,7 @@ jobs:
                                       title,
                                       fontSize = 12.sp,
                                       fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
-                                      color = if (selectedTab == index) YasCyan else Color.LightGray
+                                      color = if (selectedTab == index) YasCyan else YasMuted
                                   )
                               }
                           )
@@ -4829,7 +4902,9 @@ jobs:
                               onPickUserdataTar = onPickUserdataTar,
                               onToggleSkipSystemFilesInUserdataTar = onToggleSkipSystemFilesInUserdataTar,
                               onRunOdinFlash = onRunOdinFlash,
-                              onFlashUserdataOnly = onFlashUserdataOnly
+                              onFlashUserdataOnly = onFlashUserdataOnly,
+                              onToggleOdinAutoReboot = onToggleOdinAutoReboot,
+                              onExitDownloadMode = onExitDownloadMode
                           )
                           4 -> AdbMtpTab(
                               state = state,
@@ -5257,7 +5332,9 @@ jobs:
               onPickUserdataTar: () -> Unit,
               onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
-              onFlashUserdataOnly: () -> Unit
+              onFlashUserdataOnly: () -> Unit,
+              onToggleOdinAutoReboot: (Boolean) -> Unit,
+              onExitDownloadMode: () -> Unit
           ) {
               Column(
                   modifier = Modifier
@@ -5272,31 +5349,53 @@ jobs:
                           .fillMaxWidth()
                           .border(1.dp, if (state.odinConnected) YasGreen else YasRed, RoundedCornerShape(8.dp))
                   ) {
-                      Row(
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .padding(10.dp),
-                          horizontalArrangement = Arrangement.SpaceBetween,
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          Column {
-                              Text("Samsung Download Mode (Odin Protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                              Text(
-                                  state.odinDeviceDescription,
-                                  fontSize = 11.sp,
-                                  color = if (state.odinConnected) YasGreen else YasRed
-                              )
-                          }
-                          Button(
-                              onClick = onConnectOdinDevice,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(
-                                  containerColor = if (state.odinConnected) Color(0xFF1E3A5F) else YasCyan,
-                                  contentColor = if (state.odinConnected) Color.White else Color.Black
-                              ),
-                              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
                           ) {
-                              Text(if (state.odinConnected) "Connected" else "Connect Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                              Column {
+                                  Text("Samsung Download Mode (Odin Protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
+                                  Text(
+                                      state.odinDeviceDescription,
+                                      fontSize = 11.sp,
+                                      color = if (state.odinConnected) YasGreen else YasRed
+                                  )
+                              }
+                              Button(
+                                  onClick = onConnectOdinDevice,
+                                  enabled = !state.isBusy,
+                                  colors = ButtonDefaults.buttonColors(
+                                      containerColor = if (state.odinConnected) Color(0xFF1E3A5F) else YasCyan,
+                                      contentColor = if (state.odinConnected) Color.White else Color.Black
+                                  ),
+                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
+                              ) {
+                                  Text(if (state.odinConnected) "Connected" else "Connect Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                              }
+                          }
+
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                          ) {
+                              Row(verticalAlignment = Alignment.CenterVertically) {
+                                  Checkbox(
+                                      checked = state.odinAutoReboot,
+                                      onCheckedChange = onToggleOdinAutoReboot,
+                                      enabled = !state.isBusy
+                                  )
+                                  Text("Auto-reboot after operation", color = Color.LightGray, fontSize = 12.sp)
+                              }
+                              OutlinedButton(
+                                  onClick = onExitDownloadMode,
+                                  enabled = !state.isBusy,
+                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                              ) {
+                                  Text("Exit Download Mode", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
+                              }
                           }
                       }
                   }
@@ -5500,31 +5599,13 @@ jobs:
                       }
                   }
 
-                  if (state.adbShellOutput.isNotBlank()) {
-                      Surface(
-                          color = Color(0xFF05080D),
-                          shape = RoundedCornerShape(8.dp),
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .border(1.dp, Color(0xFF162436), RoundedCornerShape(8.dp))
-                      ) {
-                          Text(
-                              state.adbShellOutput,
-                              fontSize = 11.sp,
-                              color = Color(0xFFD0E1F9),
-                              fontFamily = FontFamily.Monospace,
-                              modifier = Modifier.padding(10.dp)
-                          )
-                      }
-                  }
-
                   if (state.adbInfoText.isNotBlank()) {
                       Surface(
                           color = YasCardBg,
                           shape = RoundedCornerShape(8.dp),
                           modifier = Modifier
                               .fillMaxWidth()
-                              .border(1.dp, if (state.adbConnected) YasGreen else Color(0xFF2A3A4F), RoundedCornerShape(8.dp))
+                              .border(1.dp, if (state.adbConnected) YasGreen else YasBorder, RoundedCornerShape(8.dp))
                       ) {
                           Text(
                               state.adbInfoText,
@@ -5570,7 +5651,7 @@ jobs:
 
               Column(
                   modifier = modifier
-                      .background(Color(0xFF070B12))
+                      .background(YasDarkBg)
                       .padding(8.dp),
                   verticalArrangement = Arrangement.spacedBy(4.dp)
               ) {
@@ -5604,7 +5685,7 @@ jobs:
                   LinearProgressIndicator(
                       progress = { state.progress },
                       color = YasCyan,
-                      trackColor = Color(0xFF1B263B),
+                      trackColor = YasBorder,
                       modifier = Modifier
                           .fillMaxWidth()
                           .height(6.dp)
@@ -5614,14 +5695,20 @@ jobs:
                       state = listState,
                       modifier = Modifier
                           .fillMaxSize()
-                          .background(Color(0xFF05080D), RoundedCornerShape(6.dp))
-                          .border(1.dp, Color(0xFF162436), RoundedCornerShape(6.dp))
+                          .background(YasCardBg, RoundedCornerShape(10.dp))
+                          .border(1.dp, YasBorder, RoundedCornerShape(10.dp))
                           .padding(6.dp)
                   ) {
                       items(state.logs) { line ->
+                          val isOperationLine = line.contains("Operation completed successfully") ||
+                              line.contains("Successfully") || line.contains("FINISHED") ||
+                              line.contains("Writing") || line.contains("Erasing") || line.contains("Reading") ||
+                              line.contains("Flashing") || line.contains("Connected") || line.contains("connected") ||
+                              line.contains("Ready")
                           val color = when {
+                              line.contains("WARN") -> YasOrange
                               line.contains("ERROR") -> YasRed
-                              line.contains("Successfully") || line.contains("FINISHED") || line.contains("Ready") -> YasGreen
+                              isOperationLine -> YasGreen
                               line.contains("STEP") || line.contains("LUN") || line.contains("GPT") -> YasCyan
                               else -> Color(0xFFD0E1F9)
                           }
@@ -5630,6 +5717,7 @@ jobs:
                               color = color,
                               fontFamily = FontFamily.Monospace,
                               fontSize = 11.sp,
+                              fontWeight = if (isOperationLine) FontWeight.Bold else FontWeight.Normal,
                               lineHeight = 14.sp
                           )
                       }
@@ -5797,6 +5885,8 @@ jobs:
                               onToggleSkipSystemFilesInUserdataTar = viewModel::setSkipSystemFilesInUserdataTar,
                               onRunOdinFlash = viewModel::runOdinFlashSequence,
                               onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
+                              onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
+                              onExitDownloadMode = viewModel::exitDownloadMode,
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
