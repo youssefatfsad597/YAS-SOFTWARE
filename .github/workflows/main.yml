@@ -5654,6 +5654,18 @@ jobs:
           cat << 'EOF' > app/src/main/java/com/edl/flasher/ui/EdlMainScreen.kt
           package com.edl.flasher.ui
 
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.net.Uri
+          import android.provider.OpenableColumns
+          import android.widget.Toast
+          import androidx.compose.animation.core.RepeatMode
+          import androidx.compose.animation.core.animateFloat
+          import androidx.compose.animation.core.infiniteRepeatable
+          import androidx.compose.animation.core.rememberInfiniteTransition
+          import androidx.compose.animation.core.tween
+          import androidx.compose.foundation.BorderStroke
           import androidx.compose.foundation.Image
           import androidx.compose.foundation.background
           import androidx.compose.foundation.border
@@ -5664,46 +5676,119 @@ jobs:
           import androidx.compose.foundation.lazy.items
           import androidx.compose.foundation.lazy.rememberLazyListState
           import androidx.compose.foundation.rememberScrollState
+          import androidx.compose.foundation.shape.CircleShape
           import androidx.compose.foundation.shape.RoundedCornerShape
-          import androidx.compose.foundation.verticalScroll
+          import androidx.compose.foundation.text.KeyboardActions
+          import androidx.compose.foundation.text.KeyboardOptions
           import androidx.compose.foundation.text.selection.SelectionContainer
-          import android.content.ClipData
-          import android.content.ClipboardManager
-          import android.content.Context
-          import android.widget.Toast
-          import androidx.compose.ui.platform.LocalContext
-          import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.foundation.verticalScroll
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
           import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.alpha
           import androidx.compose.ui.graphics.Brush
           import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalConfiguration
+          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.ui.res.painterResource
+          import androidx.compose.ui.text.TextStyle
           import androidx.compose.ui.text.font.FontFamily
           import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.ImeAction
+          import androidx.compose.ui.text.style.TextAlign
           import androidx.compose.ui.text.style.TextOverflow
+          import androidx.compose.ui.unit.Dp
+          import androidx.compose.ui.unit.TextUnit
           import androidx.compose.ui.unit.dp
           import androidx.compose.ui.unit.sp
           import com.edl.flasher.R
           import com.edl.flasher.protocol.PartitionEntry
           import com.edl.flasher.protocol.StorageType
+          import kotlinx.coroutines.Dispatchers
+          import kotlinx.coroutines.withContext
 
-          // --- Modern dark palette: softer, higher-contrast accents on a deep slate base. ---
-          private val YasDarkBg = Color(0xFF0B0E14)
-          private val YasCardBg = Color(0xFF161B26)
-          private val YasCardBgAlt = Color(0xFF1C2330)
-          private val YasBorder = Color(0xFF262E3D)
-          private val YasMuted = Color(0xFF8A94A6)
-          private val YasCyan = Color(0xFF38BDF8)
-          private val YasOrange = Color(0xFFFBA94C)
-          private val YasGreen = Color(0xFF34D399)
+          // =====================================================================================
+          //  YAS SOFTWARE - main screen
+          //  Layout: header (status pill + quick power actions) | tabs + tab content | right-hand
+          //  inspector (device identity) + console terminal.  Phones fall back to a stacked layout.
+          // =====================================================================================
+
+          // ---------- Palette: Obsidian & Deep Slate ----------
+          private val YasDarkBg = Color(0xFF0A0D14)
+          private val YasCardBg = Color(0xFF121722)
+          private val YasCardBgAlt = Color(0xFF182030)
+          private val YasConsoleBg = Color(0xFF080B10)
+          private val YasBorder = Color(0xFF232D3F)
+          private val YasText = Color(0xFFF1F5F9)
+          private val YasTextSoft = Color(0xFFCBD5E1)
+          private val YasMuted = Color(0xFF64748B)
+          // Solid fills for buttons / destructive actions
+          private val YasBlue = Color(0xFF2563EB)
+          private val YasCrimson = Color(0xFFDC2626)
+          private val YasAmber = Color(0xFFD97706)
+          private val YasEmerald = Color(0xFF10B981)
+          // Lighter tints used only for small text / indicators on dark surfaces
+          private val YasCyan = Color(0xFF60A5FA)
+          private val YasOrange = Color(0xFFF59E0B)
+          private val YasGreen = Color(0xFF10B981)
           private val YasRed = Color(0xFFF87171)
-          private val YasHeaderGradient = Brush.horizontalGradient(
-              listOf(Color(0xFF161B26), Color(0xFF1B2333))
-          )
-          private val YasAccentShape = RoundedCornerShape(10.dp)
+          private val YasPurple = Color(0xFFA5B4FC)
+          private val YasHeaderGradient = Brush.horizontalGradient(listOf(YasCardBg, YasCardBg))
+          private val YasAccentShape = RoundedCornerShape(6.dp)
+          private val YasCardShape = RoundedCornerShape(8.dp)
+          private val YasChipShape = RoundedCornerShape(4.dp)
 
+          // ---------- Connection mode ----------
+          private enum class ConnMode(val label: String, val color: Color) {
+              EDL("9008 EDL", YasOrange),
+              ODIN("Samsung Odin", YasCyan),
+              MTP_ADB("MTP + ADB", YasGreen),
+              NONE("Disconnected", YasMuted)
+          }
+
+          private fun detectMode(state: EdlUiState): ConnMode {
+              val summary = state.usbSummary
+              val mtpHasData = state.mtpInfoText.isNotBlank() &&
+                  !state.mtpInfoText.startsWith("No MTP", ignoreCase = true) &&
+                  !state.mtpInfoText.startsWith("Could not read", ignoreCase = true)
+              return when {
+                  state.usbConnected || summary.contains("EDL 9008", ignoreCase = true) -> ConnMode.EDL
+                  state.odinConnected || summary.contains("Download Mode", ignoreCase = true) -> ConnMode.ODIN
+                  state.usbAny && (
+                      state.adbConnected || mtpHasData ||
+                          summary.contains("MTP", ignoreCase = true) ||
+                          summary.contains("ADB", ignoreCase = true) ||
+                          state.infoSerial.isNotBlank() || state.infoImei.isNotBlank()
+                      ) -> ConnMode.MTP_ADB
+                  else -> ConnMode.NONE
+              }
+          }
+
+          /** A destructive action waiting for the user's confirmation. */
+          private class PendingAction(
+              val title: String,
+              val message: String,
+              val confirmLabel: String,
+              val onConfirm: () -> Unit
+          )
+
+          /** Optional "clear selection" hooks (X button). The X is only drawn when a hook is supplied. */
+          private class ClearActions(
+              val rawProgram: (() -> Unit)?,
+              val patchXml: (() -> Unit)?,
+              val firmwareDir: (() -> Unit)?,
+              val blTar: (() -> Unit)?,
+              val apTar: (() -> Unit)?,
+              val cpTar: (() -> Unit)?,
+              val cscTar: (() -> Unit)?,
+              val userdataTar: (() -> Unit)?
+          )
+
+          // =====================================================================================
+          //  Entry point  (all original parameters kept, in the original order)
+          //  New parameters are OPTIONAL and appended at the end, so existing call sites compile unchanged.
+          // =====================================================================================
           @Composable
           fun EdlMainScreen(
               state: EdlUiState,
@@ -5750,53 +5835,119 @@ jobs:
               onMtpDownloadAt: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit
-              ) {
+              onAdbShell: (String) -> Unit,
+              // ---- optional additions (defaults keep old call sites valid) ----
+              onClearRawProgram: (() -> Unit)? = null,
+              onClearPatchXml: (() -> Unit)? = null,
+              onClearFirmwareDir: (() -> Unit)? = null,
+              onClearBlTar: (() -> Unit)? = null,
+              onClearApTar: (() -> Unit)? = null,
+              onClearCpTar: (() -> Unit)? = null,
+              onClearCscTar: (() -> Unit)? = null,
+              onClearUserdataTar: (() -> Unit)? = null
+          ) {
+              val tabs = listOf("X216B Service", "Read GPT", "XML Flasher", "Samsung Odin", "MTP / ADB")
               var selectedTab by remember { mutableIntStateOf(0) }
-              val tabs = listOf("1. X216B Service", "2. Read GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
-              var confirmEraseTarget by remember { mutableStateOf<PartitionEntry?>(null) }
-              var confirmBatchErase by remember { mutableStateOf(false) }
+              var pending by remember { mutableStateOf<PendingAction?>(null) }
               var logExpanded by remember { mutableStateOf(false) }
+              var inspectorOpen by remember { mutableStateOf(false) }
 
-              if (confirmEraseTarget != null) {
-                  val target = confirmEraseTarget!!
+              val mode = detectMode(state)
+              val wide = LocalConfiguration.current.screenWidthDp >= 720
+              val clears = remember(
+                  onClearRawProgram, onClearPatchXml, onClearFirmwareDir, onClearBlTar,
+                  onClearApTar, onClearCpTar, onClearCscTar, onClearUserdataTar
+              ) {
+                  ClearActions(
+                      onClearRawProgram, onClearPatchXml, onClearFirmwareDir, onClearBlTar,
+                      onClearApTar, onClearCpTar, onClearCscTar, onClearUserdataTar
+                  )
+              }
+
+              val requestConfirm: (PendingAction) -> Unit = { pending = it }
+
+              val current = pending
+              if (current != null) {
                   AlertDialog(
-                      onDismissRequest = { confirmEraseTarget = null },
-                      title = { Text("Confirm Partition Erase", fontWeight = FontWeight.Bold) },
-                      text = { Text("Are you sure you want to erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})?") },
+                      onDismissRequest = { pending = null },
+                      containerColor = YasCardBg,
+                      title = { Text(current.title, fontWeight = FontWeight.Bold, color = YasText) },
+                      text = { Text(current.message, color = YasTextSoft) },
                       confirmButton = {
                           Button(
                               onClick = {
-                                  onErasePartition(target)
-                                  confirmEraseTarget = null
+                                  current.onConfirm()
+                                  pending = null
                               },
-                              colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("Erase Now") }
+                              colors = ButtonDefaults.buttonColors(containerColor = YasRed, contentColor = Color(0xFF2B0A0A))
+                          ) { Text(current.confirmLabel, fontWeight = FontWeight.Bold) }
                       },
                       dismissButton = {
-                          OutlinedButton(onClick = { confirmEraseTarget = null }) { Text("Cancel") }
+                          OutlinedButton(onClick = { pending = null }) { Text("Cancel", color = YasText) }
                       }
                   )
               }
 
-              if (confirmBatchErase) {
-                  AlertDialog(
-                      onDismissRequest = { confirmBatchErase = false },
-                      title = { Text("Erase Selected Partitions", fontWeight = FontWeight.Bold) },
-                      text = { Text("Are you sure you want to erase ${state.selectedPartKeys.size} selected partition(s)?") },
-                      confirmButton = {
-                          Button(
-                              onClick = {
-                                  onEraseSelectedParts()
-                                  confirmBatchErase = false
-                              },
-                              colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                          ) { Text("Erase All Selected") }
-                      },
-                      dismissButton = {
-                          OutlinedButton(onClick = { confirmBatchErase = false }) { Text("Cancel") }
-                      }
-                  )
+              val tabContent: @Composable () -> Unit = {
+                  when (selectedTab) {
+                      0 -> X216BServiceTab(
+                          state = state,
+                          onRunX216BWipeAndWrite = onRunX216BWipeAndWrite,
+                          onAdbShell = onAdbShell,
+                          requestConfirm = requestConfirm
+                      )
+                      1 -> ReadGptTab(
+                          state = state,
+                          onProbeChipInfo = onProbeChipInfo,
+                          onPickLoader = onPickLoader,
+                          onStorageSelected = onStorageSelected,
+                          onRunSaharaAndFirehose = onRunSaharaAndFirehose,
+                          onReadGpt = onReadGpt,
+                          onLunFilterSelected = onLunFilterSelected,
+                          onTogglePartSelection = onTogglePartSelection,
+                          onSelectAllParts = onSelectAllParts,
+                          onClearPartSelection = onClearPartSelection,
+                          onBackupPartition = onBackupPartition,
+                          onFlashPartition = onFlashPartition,
+                          onResetFrp = onResetFrp,
+                          onFactoryReset = onFactoryReset,
+                          requestConfirm = requestConfirm,
+                          onEraseSelectedParts = onEraseSelectedParts,
+                          onErasePartition = onErasePartition
+                      )
+                      2 -> XmlFlasherTab(
+                          state = state,
+                          clears = clears,
+                          onPickRawProgram = onPickRawProgram,
+                          onPickPatchXml = onPickPatchXml,
+                          onPickFirmwareDir = onPickFirmwareDir,
+                          onFlashFirmwareXml = onFlashFirmwareXml
+                      )
+                      3 -> SamsungOdinTab(
+                          state = state,
+                          clears = clears,
+                          onConnectOdinDevice = onConnectOdinDevice,
+                          onPickBlTar = onPickBlTar,
+                          onPickApTar = onPickApTar,
+                          onPickCpTar = onPickCpTar,
+                          onPickCscTar = onPickCscTar,
+                          onPickUserdataTar = onPickUserdataTar,
+                          onRunOdinFlash = onRunOdinFlash,
+                          onFlashUserdataOnly = onFlashUserdataOnly,
+                          onToggleOdinAutoReboot = onToggleOdinAutoReboot,
+                          onExitDownloadMode = onExitDownloadMode,
+                          onMtpDownloadAt = onMtpDownloadAt
+                      )
+                      else -> MtpAdbTab(
+                          state = state,
+                          onReadMtpInfo = onReadMtpInfo,
+                          onMtpRebootAt = onMtpRebootAt,
+                          onMtpDownloadAt = onMtpDownloadAt,
+                          onReadAdbInfo = onReadAdbInfo,
+                          onAdbReboot = onAdbReboot,
+                          onAdbShell = onAdbShell
+                      )
+                  }
               }
 
               Column(
@@ -5804,254 +5955,475 @@ jobs:
                       .fillMaxSize()
                       .background(YasDarkBg)
               ) {
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .background(YasHeaderGradient)
-                          .border(width = 1.dp, color = YasBorder)
-                          .padding(horizontal = 14.dp, vertical = 10.dp),
-                      verticalAlignment = Alignment.CenterVertically,
-                      horizontalArrangement = Arrangement.SpaceBetween
-                  ) {
-                      Column(modifier = Modifier.weight(1f)) {
-                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                              Image(
-                                  painter = painterResource(id = R.drawable.yas_logo),
-                                  contentDescription = "YAS SOFTWARE logo",
-                                  modifier = Modifier.size(36.dp)
-                              )
-                              Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
-                              Text("SOFTWARE", color = YasOrange, fontWeight = FontWeight.ExtraBold, fontSize = 20.sp)
-                          }
-                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                              Box(
-                                  modifier = Modifier
-                                      .size(7.dp)
-                                      .background(if (state.usbAny) YasGreen else YasMuted, RoundedCornerShape(50))
-                              )
-                              Text(
-                                  text = state.usbSummary,
-                                  fontSize = 11.sp,
-                                  maxLines = 3,
-                                  overflow = TextOverflow.Ellipsis,
-                                  color = if (state.usbAny) YasGreen else YasMuted
-                              )
-                          }
-                      }
+                  YasHeader(
+                      state = state,
+                      mode = mode,
+                      onConnectUsb = onConnectUsb,
+                      onResetDevice = onResetDevice
+                  )
 
-                      Button(
-                          onClick = onConnectUsb,
-                          enabled = !state.isBusy,
-                          shape = YasAccentShape,
-                          colors = ButtonDefaults.buttonColors(
-                              containerColor = if (state.usbConnected) YasCardBgAlt else YasCyan,
-                              contentColor = if (state.usbConnected) Color.White else Color(0xFF07131C)
-                          ),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
-                      ) {
-                          Text("Re-scan USB", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                      }
-                  }
-
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .background(YasDarkBg)
-                          .border(width = 1.dp, color = YasBorder)
-                          .horizontalScroll(rememberScrollState())
-                          .padding(horizontal = 10.dp, vertical = 8.dp),
-                      horizontalArrangement = Arrangement.spacedBy(8.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      Button(
-                          onClick = onRunX216BWipeAndWrite,
-                          enabled = !state.isBusy,
-                          shape = YasAccentShape,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color(0xFF062A1C)),
-                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("⚡ Format + FRP + MDM", fontSize = 11.sp, fontWeight = FontWeight.ExtraBold)
-                      }
-
-                      Button(
-                          onClick = onReadGpt,
-                          enabled = state.firehoseReady && !state.isBusy,
-                          shape = YasAccentShape,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color(0xFF07131C)),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("Read Full GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-
-                      Button(
-                          onClick = { onResetDevice("reset") },
-                          enabled = !state.isBusy,
-                          shape = YasAccentShape,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color(0xFF2B1402)),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("Reset / Reboot", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-
-                      OutlinedButton(
-                          onClick = { onResetDevice("off") },
-                          enabled = !state.isBusy,
-                          shape = YasAccentShape,
-                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("Power Off", fontSize = 11.sp, color = Color.White)
-                      }
-
-                      OutlinedButton(
-                          onClick = onResetFrp,
-                          enabled = state.firehoseReady && !state.isBusy,
-                          shape = YasAccentShape,
-                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("Erase FRP", fontSize = 11.sp, color = YasCyan)
-                      }
-
-                      OutlinedButton(
-                          onClick = onFactoryReset,
-                          enabled = state.firehoseReady && !state.isBusy,
-                          shape = YasAccentShape,
-                          border = androidx.compose.foundation.BorderStroke(1.dp, YasBorder),
-                          contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                          modifier = Modifier.height(34.dp)
-                      ) {
-                          Text("Factory Reset", fontSize = 11.sp, color = YasRed)
-                      }
-                  }
-
-                  TabRow(
-                      selectedTabIndex = selectedTab,
-                      containerColor = YasCardBg,
-                      contentColor = YasCyan,
-                      divider = { HorizontalDivider(color = YasBorder, thickness = 1.dp) }
-                  ) {
-                      tabs.forEachIndexed { index, title ->
-                          Tab(
-                              selected = selectedTab == index,
-                              onClick = { selectedTab = index },
-                              text = {
-                                  Text(
-                                      title,
-                                      fontSize = 12.sp,
-                                      fontWeight = if (selectedTab == index) FontWeight.Bold else FontWeight.Normal,
-                                      color = if (selectedTab == index) YasCyan else YasMuted
-                                  )
-                              }
-                          )
-                      }
-                  }
-
-                  // READ GPT tab: on wide screens (tablet / landscape) the console sits in a side panel so it never
-                  // covers the partition list; on narrow screens it shrinks to a thin strip that can be expanded.
-                  val wideScreen = LocalConfiguration.current.screenWidthDp >= 720
-                  val gptSideLog = (selectedTab == 1 || selectedTab == 2) && wideScreen
-                  val gptCompact = (selectedTab == 1 || selectedTab == 2) && !wideScreen && !logExpanded
-                  val tabContent: @Composable () -> Unit = {
-                          when (selectedTab) {
-                              0 -> LoaderSetupTab(
-                                  state = state,
-                                  onRunX216BWipeAndWrite = onRunX216BWipeAndWrite,
-                                  onAdbShell = onAdbShell
-                              )
-                              1 -> ReadGptTab(
-                                  state = state,
-                                  onProbeChipInfo = onProbeChipInfo,
-                                  onPickLoader = onPickLoader,
-                                  onStorageSelected = onStorageSelected,
-                                  onRunSaharaAndFirehose = onRunSaharaAndFirehose,
-                                  onReadGpt = onReadGpt,
-                                  onLunFilterSelected = onLunFilterSelected,
-                                  onTogglePartSelection = onTogglePartSelection,
-                                  onSelectAllParts = onSelectAllParts,
-                                  onClearPartSelection = onClearPartSelection,
-                                  onRequestBatchErase = { confirmBatchErase = true },
-                                  onBackupPartition = onBackupPartition,
-                                  onFlashPartition = onFlashPartition,
-                                  onRequestErasePartition = { confirmEraseTarget = it }
-                              )
-
-                              2 -> XmlFirmwareTab(
-                                  state = state,
-                                  onPickRawProgram = onPickRawProgram,
-                                  onPickPatchXml = onPickPatchXml,
-                                  onPickFirmwareDir = onPickFirmwareDir,
-                                  onFlashFirmwareXml = onFlashFirmwareXml
-                              )
-                              3 -> SamsungOdinTab(
-                                  state = state,
-                                  onConnectOdinDevice = onConnectOdinDevice,
-                                  onPickBlTar = onPickBlTar,
-                                  onPickApTar = onPickApTar,
-                                  onPickCpTar = onPickCpTar,
-                                  onPickCscTar = onPickCscTar,
-                                  onPickUserdataTar = onPickUserdataTar,
-                                  onRunOdinFlash = onRunOdinFlash,
-                                  onFlashUserdataOnly = onFlashUserdataOnly,
-                                  onToggleOdinAutoReboot = onToggleOdinAutoReboot,
-                                  onExitDownloadMode = onExitDownloadMode,
-                                  onMtpDownloadAt = onMtpDownloadAt
-                              )
-                              4 -> AdbMtpTab(
-                                  state = state,
-                                  onReadMtpInfo = onReadMtpInfo,
-                                  onMtpRebootAt = onMtpRebootAt,
-                                  onMtpDownloadAt = onMtpDownloadAt,
-                                  onReadAdbInfo = onReadAdbInfo,
-                                  onAdbReboot = onAdbReboot,
-                                  onAdbShell = onAdbShell
-                              )
-                          }
-                  }
-
-                  if (gptSideLog) {
-                      Row(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                          Box(
+                  if (wide) {
+                      Row(modifier = Modifier
+                          .weight(1f)
+                          .fillMaxWidth()) {
+                          Column(
                               modifier = Modifier
                                   .weight(0.62f)
                                   .fillMaxHeight()
-                                  .padding(8.dp)
-                          ) { tabContent() }
-                          TelemetryAndConsolePanel(
-                              state = state,
-                              onClearLogs = onClearLogs,
+                          ) {
+                              YasTabBar(tabs, selectedTab) { selectedTab = it }
+                              Box(
+                                  modifier = Modifier
+                                      .weight(1f)
+                                      .fillMaxWidth()
+                                      .padding(8.dp)
+                              ) { tabContent() }
+                          }
+                          Column(
                               modifier = Modifier
                                   .weight(0.38f)
                                   .fillMaxHeight()
-                          )
+                                  .padding(top = 8.dp, end = 8.dp, bottom = 8.dp),
+                              verticalArrangement = Arrangement.spacedBy(8.dp)
+                          ) {
+                              DeviceInspector(
+                                  state = state,
+                                  mode = mode,
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .weight(0.42f)
+                              )
+                              ConsolePanel(
+                                  state = state,
+                                  onClearLogs = onClearLogs,
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .weight(0.58f)
+                              )
+                          }
                       }
                   } else {
+                      YasTabBar(tabs, selectedTab) { selectedTab = it }
                       Box(
                           modifier = Modifier
-                              .weight(if (gptCompact) 1f else 0.62f)
+                              .weight(1f)
                               .fillMaxWidth()
                               .padding(8.dp)
                       ) { tabContent() }
 
-                      TelemetryAndConsolePanel(
-                          state = state,
-                          onClearLogs = onClearLogs,
-                          showExpandToggle = selectedTab == 1 || selectedTab == 2,
-                          expanded = logExpanded,
-                          onToggleExpanded = { logExpanded = !logExpanded },
-                          modifier = (if (gptCompact) Modifier.height(100.dp) else Modifier.weight(0.38f))
+                      Column(
+                          modifier = Modifier
                               .fillMaxWidth()
+                              .padding(start = 8.dp, end = 8.dp, bottom = 8.dp),
+                          verticalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .background(YasCardBg, YasAccentShape)
+                                  .clickable { inspectorOpen = !inspectorOpen }
+                                  .padding(horizontal = 12.dp, vertical = 8.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.SpaceBetween
+                          ) {
+                              Text("DEVICE IDENTITY", fontSize = 11.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                              Text(
+                                  if (inspectorOpen) "\u25BC Hide" else "\u25B2 Show",
+                                  fontSize = 11.sp,
+                                  color = YasCyan,
+                                  fontWeight = FontWeight.SemiBold
+                              )
+                          }
+                          if (inspectorOpen) {
+                              DeviceInspector(
+                                  state = state,
+                                  mode = mode,
+                                  modifier = Modifier
+                                      .fillMaxWidth()
+                                      .heightIn(max = 190.dp),
+                                  showTitle = false
+                              )
+                          }
+                          ConsolePanel(
+                              state = state,
+                              onClearLogs = onClearLogs,
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .height(if (logExpanded) 300.dp else 150.dp),
+                              expanded = logExpanded,
+                              onToggleExpanded = { logExpanded = !logExpanded }
+                          )
+                      }
+                  }
+              }
+          }
+
+          // =====================================================================================
+          //  Header + tab bar
+          // =====================================================================================
+          @Composable
+          private fun YasHeader(
+              state: EdlUiState,
+              mode: ConnMode,
+              onConnectUsb: () -> Unit,
+              onResetDevice: (String) -> Unit
+          ) {
+              Column(modifier = Modifier.background(YasHeaderGradient)) {
+                  Row(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(horizontal = 12.dp, vertical = 8.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.spacedBy(10.dp)
+                  ) {
+                      Image(
+                          painter = painterResource(id = R.drawable.yas_logo),
+                          contentDescription = "YAS SOFTWARE logo",
+                          modifier = Modifier.size(36.dp)
+                      )
+                      Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
+                          Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                              Text("YAS", color = YasCyan, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                              Text("SOFTWARE", color = YasOrange, fontWeight = FontWeight.ExtraBold, fontSize = 18.sp)
+                          }
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                              StatusBadge(text = mode.label, color = mode.color, pulse = mode != ConnMode.NONE)
+                              Text(
+                                  text = state.usbSummary,
+                                  fontSize = 10.sp,
+                                  color = YasMuted,
+                                  maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis,
+                                  modifier = Modifier.weight(1f, fill = false)
+                              )
+                          }
+                      }
+                      Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                          YASButton(
+                              text = "Re-scan",
+                              onClick = onConnectUsb,
+                              enabled = !state.isBusy,
+                              kind = if (state.usbConnected) BtnKind.Tonal else BtnKind.Primary,
+                              height = 32.dp,
+                              fontSize = 11.sp,
+                              horizontalPad = 10.dp
+                          )
+                          YASButton(
+                              text = "Reboot",
+                              onClick = { onResetDevice("reset") },
+                              enabled = !state.isBusy,
+                              kind = BtnKind.Warning,
+                              height = 32.dp,
+                              fontSize = 11.sp,
+                              horizontalPad = 10.dp
+                          )
+                          YASButton(
+                              text = "Power Off",
+                              onClick = { onResetDevice("off") },
+                              enabled = !state.isBusy,
+                              kind = BtnKind.Danger,
+                              height = 32.dp,
+                              fontSize = 11.sp,
+                              horizontalPad = 10.dp
+                          )
+                      }
+                  }
+                  HorizontalDivider(color = YasBorder, thickness = 1.dp)
+              }
+          }
+
+          @Composable
+          private fun YasTabBar(tabs: List<String>, selected: Int, onSelect: (Int) -> Unit) {
+              ScrollableTabRow(
+                  selectedTabIndex = selected,
+                  containerColor = YasCardBg,
+                  contentColor = YasCyan,
+                  edgePadding = 4.dp,
+                  divider = { HorizontalDivider(color = YasBorder, thickness = 1.dp) }
+              ) {
+                  tabs.forEachIndexed { index, title ->
+                      Tab(
+                          selected = selected == index,
+                          onClick = { onSelect(index) },
+                          text = {
+                              Text(
+                                  "${index + 1}. $title",
+                                  fontSize = 12.sp,
+                                  maxLines = 1,
+                                  fontWeight = if (selected == index) FontWeight.Bold else FontWeight.Normal,
+                                  color = if (selected == index) YasCyan else YasMuted
+                              )
+                          }
                       )
                   }
               }
           }
 
-          // ===== X216B tab ADB button: edit the label / command here =====
+          // =====================================================================================
+          //  Reusable components
+          // =====================================================================================
+          private enum class BtnKind { Primary, Success, Warning, Danger, Tonal, Outline }
+
+          @Composable
+          private fun YASButton(
+              text: String,
+              onClick: () -> Unit,
+              modifier: Modifier = Modifier,
+              enabled: Boolean = true,
+              kind: BtnKind = BtnKind.Primary,
+              height: Dp = 36.dp,
+              fontSize: TextUnit = 12.sp,
+              horizontalPad: Dp = 14.dp
+          ) {
+              val pad = PaddingValues(horizontal = horizontalPad, vertical = 0.dp)
+              val label: @Composable (Color) -> Unit = { color ->
+                  Text(
+                      text,
+                      fontSize = fontSize,
+                      fontWeight = FontWeight.Bold,
+                      color = color,
+                      maxLines = 1,
+                      overflow = TextOverflow.Ellipsis
+                  )
+              }
+              if (kind == BtnKind.Outline) {
+                  OutlinedButton(
+                      onClick = onClick,
+                      enabled = enabled,
+                      shape = YasAccentShape,
+                      border = BorderStroke(1.dp, YasBorder),
+                      contentPadding = pad,
+                      modifier = modifier.height(height)
+                  ) { label(if (enabled) YasText else YasMuted) }
+                  return
+              }
+              val (container, content) = when (kind) {
+                  BtnKind.Primary -> YasBlue to Color.White
+                  BtnKind.Success -> YasEmerald to Color(0xFF03281D)
+                  BtnKind.Warning -> YasAmber to Color.White
+                  BtnKind.Danger -> YasCrimson to Color.White
+                  else -> YasCardBgAlt to YasText
+              }
+              Button(
+                  onClick = onClick,
+                  enabled = enabled,
+                  shape = YasAccentShape,
+                  colors = ButtonDefaults.buttonColors(
+                      containerColor = container,
+                      contentColor = content,
+                      disabledContainerColor = container.copy(alpha = 0.25f),
+                      disabledContentColor = content.copy(alpha = 0.5f)
+                  ),
+                  border = if (kind == BtnKind.Tonal) BorderStroke(1.dp, YasBorder) else null,
+                  contentPadding = pad,
+                  modifier = modifier.height(height)
+              ) { label(if (enabled) content else content.copy(alpha = 0.5f)) }
+          }
+
+          @Composable
+          private fun PulseDot(color: Color, pulse: Boolean) {
+              val transition = rememberInfiniteTransition(label = "pulse")
+              val a by transition.animateFloat(
+                  initialValue = 1f,
+                  targetValue = 0.2f,
+                  animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+                  label = "pulseAlpha"
+              )
+              Box(
+                  modifier = Modifier
+                      .size(8.dp)
+                      .alpha(if (pulse) a else 1f)
+                      .background(color, CircleShape)
+              )
+          }
+
+          @Composable
+          private fun StatusBadge(text: String, color: Color, modifier: Modifier = Modifier, pulse: Boolean = false, dot: Boolean = true) {
+              val shape = YasChipShape
+              Row(
+                  modifier = modifier
+                      .background(color.copy(alpha = 0.12f), shape)
+                      .border(1.dp, color.copy(alpha = 0.5f), shape)
+                      .padding(horizontal = 10.dp, vertical = 4.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(6.dp)
+              ) {
+                  if (dot) PulseDot(color, pulse)
+                  Text(text, fontSize = 11.sp, color = color, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+              }
+          }
+
+          @Composable
+          private fun YASCard(
+              title: String,
+              modifier: Modifier = Modifier,
+              accent: Color = YasCyan,
+              subtitle: String? = null,
+              trailing: (@Composable () -> Unit)? = null,
+              content: @Composable ColumnScope.() -> Unit
+          ) {
+              Surface(
+                  color = YasCardBg,
+                  shape = YasCardShape,
+                  modifier = modifier
+                      .fillMaxWidth()
+                      .border(1.dp, YasBorder, YasCardShape)
+              ) {
+                  Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          Box(
+                              modifier = Modifier
+                                  .width(2.dp)
+                                  .height(if (subtitle != null) 28.dp else 14.dp)
+                                  .background(accent, RoundedCornerShape(1.dp))
+                          )
+                          Column(modifier = Modifier.weight(1f)) {
+                              Text(title, color = YasText, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 0.6.sp)
+                              if (subtitle != null) Text(subtitle, color = YasMuted, fontSize = 10.sp)
+                          }
+                          trailing?.invoke()
+                      }
+                      content()
+                  }
+              }
+          }
+
+          /** File "drop target" card: tag chip, folder glyph, name + size, Browse and optional clear (X). */
+          @Composable
+          private fun FileSelectorField(
+              tag: String,
+              displayName: String,
+              placeholder: String,
+              uri: Uri?,
+              accent: Color,
+              enabled: Boolean,
+              onBrowse: () -> Unit,
+              modifier: Modifier = Modifier,
+              onClear: (() -> Unit)? = null,
+              showSize: Boolean = false
+          ) {
+              val selected = uri != null
+              val sizeText = if (showSize) rememberUriSize(uri) else null
+              val shape = YasCardShape
+              Row(
+                  modifier = modifier
+                      .fillMaxWidth()
+                      .background(YasCardBgAlt, shape)
+                      .border(1.dp, if (selected) YasMuted else YasBorder, shape)
+                      .clickable(enabled = enabled, onClick = onBrowse)
+                      .padding(horizontal = 10.dp, vertical = 8.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  if (tag.isNotEmpty()) {
+                      Text(
+                          tag,
+                          modifier = Modifier
+                              .widthIn(min = 54.dp)
+                              .background(accent.copy(alpha = 0.14f), YasChipShape)
+                              .padding(horizontal = 6.dp, vertical = 4.dp),
+                          color = accent,
+                          fontSize = 10.sp,
+                          fontWeight = FontWeight.ExtraBold,
+                          textAlign = TextAlign.Center,
+                          maxLines = 1
+                      )
+                  }
+                  Text("\uD83D\uDCC1", fontSize = 16.sp)
+                  Column(modifier = Modifier.weight(1f)) {
+                      Text(
+                          text = if (selected) displayName else placeholder,
+                          fontSize = 12.sp,
+                          color = if (selected) YasText else YasMuted,
+                          fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                          maxLines = 1,
+                          overflow = TextOverflow.Ellipsis
+                      )
+                      if (selected && sizeText != null) {
+                          Text(sizeText, fontSize = 10.sp, color = accent, fontFamily = FontFamily.Monospace)
+                      }
+                  }
+                  YASButton(
+                      text = if (selected) "Change" else "Browse",
+                      onClick = onBrowse,
+                      enabled = enabled,
+                      kind = BtnKind.Tonal,
+                      height = 28.dp,
+                      fontSize = 11.sp,
+                      horizontalPad = 10.dp
+                  )
+                  if (selected && onClear != null) {
+                      Text(
+                          "\u2715",
+                          color = YasRed,
+                          fontSize = 15.sp,
+                          fontWeight = FontWeight.Bold,
+                          modifier = Modifier
+                              .clickable(enabled = enabled, onClick = onClear)
+                              .padding(horizontal = 6.dp, vertical = 4.dp)
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun rememberUriSize(uri: Uri?): String? {
+              val context = LocalContext.current
+              val result = produceState<String?>(initialValue = null, uri) {
+                  value = if (uri == null) null else withContext(Dispatchers.IO) {
+                      runCatching {
+                          context.contentResolver.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { c ->
+                              if (c.moveToFirst() && !c.isNull(0)) formatSize(c.getLong(0)) else null
+                          }
+                      }.getOrNull()
+                  }
+              }
+              return result.value
+          }
+
+          @Composable
+          private fun YasTextField(
+              value: String,
+              onValueChange: (String) -> Unit,
+              placeholder: String,
+              modifier: Modifier = Modifier,
+              isError: Boolean = false,
+              imeAction: ImeAction = ImeAction.Default,
+              onImeAction: () -> Unit = {}
+          ) {
+              OutlinedTextField(
+                  value = value,
+                  onValueChange = onValueChange,
+                  placeholder = { Text(placeholder, fontSize = 12.sp, color = YasMuted) },
+                  singleLine = true,
+                  isError = isError,
+                  textStyle = TextStyle(fontSize = 13.sp, fontFamily = FontFamily.Monospace, color = YasText),
+                  keyboardOptions = KeyboardOptions(imeAction = imeAction),
+                  keyboardActions = KeyboardActions(onAny = { onImeAction() }),
+                  shape = YasAccentShape,
+                  colors = OutlinedTextFieldDefaults.colors(
+                      focusedTextColor = YasText,
+                      unfocusedTextColor = YasText,
+                      focusedBorderColor = YasCyan,
+                      unfocusedBorderColor = YasBorder,
+                      errorBorderColor = YasRed,
+                      cursorColor = YasCyan,
+                      focusedContainerColor = YasCardBgAlt,
+                      unfocusedContainerColor = YasCardBgAlt
+                  ),
+                  modifier = modifier
+              )
+          }
+
+          private fun stripSlotPrefix(name: String): String = name.substringAfter(": ", name)
+
+          // =====================================================================================
+          //  Tab 1 - X216B Service
+          // =====================================================================================
           private const val X216B_ADB_BUTTON_LABEL = "X216B Remove KNOX"
           private val X216B_ADB_COMMAND = """
               settings put global private_dns_mode hostname;
@@ -6071,107 +6443,132 @@ jobs:
           """.trimIndent().replace("\n", " ")
 
           @Composable
-          private fun LoaderSetupTab(
+          private fun X216BServiceTab(
               state: EdlUiState,
               onRunX216BWipeAndWrite: () -> Unit,
-              onAdbShell: (String) -> Unit
+              onAdbShell: (String) -> Unit,
+              requestConfirm: (PendingAction) -> Unit
           ) {
               Column(
                   modifier = Modifier
                       .fillMaxSize()
                       .verticalScroll(rememberScrollState()),
-                  verticalArrangement = Arrangement.spacedBy(8.dp)
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
               ) {
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                          Text(
-                              "SM-X216B Service",
-                              color = YasGreen,
-                              fontWeight = FontWeight.ExtraBold,
-                              fontSize = 13.sp
+                  YASCard(
+                      title = "STEP 1  \u2022  Wipe & Write",
+                      subtitle = "Automated EDL workflow for SM-X216B",
+                      accent = YasGreen,
+                      trailing = {
+                          StatusBadge(
+                              text = when {
+                                  state.firehoseReady -> "Firehose ready"
+                                  state.usbConnected -> "9008 detected"
+                                  else -> "Waiting for 9008"
+                              },
+                              color = when {
+                                  state.firehoseReady -> YasGreen
+                                  state.usbConnected -> YasOrange
+                                  else -> YasMuted
+                              },
+                              pulse = state.usbConnected && !state.firehoseReady
                           )
-                          Text(
-                              "Uploads the Loader and reads the full GPT table automatically, then wipes the device and rewrites the FRP and MDM partitions.",
-                              fontSize = 11.sp,
-                              color = Color.LightGray
-                          )
-                          Button(
-                              onClick = onRunX216BWipeAndWrite,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .height(46.dp)
-                          ) {
-                              Text("⚡ Format + FRP + MDM", fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
-                          }
                       }
+                  ) {
+                      Text(
+                          "Uploads the loader, reads the full GPT, erases the user data, FRP and MDM partitions, then writes the embedded firmware.",
+                          fontSize = 11.sp,
+                          color = YasTextSoft
+                      )
+                      WorkflowStrip(
+                          steps = listOf("Sahara", "Firehose", "GPT scan", "Erase user / frp / mdm", "Flash embedded firmware"),
+                          accent = YasGreen
+                      )
+                      Text(
+                          state.embeddedFirmwareStatus,
+                          fontSize = 10.sp,
+                          color = if (state.embeddedFirmwareReady) YasGreen else YasOrange
+                      )
+                      YASButton(
+                          text = "\u26A1  Format + FRP + MDM",
+                          onClick = onRunX216BWipeAndWrite,
+                          enabled = !state.isBusy,
+                          kind = BtnKind.Success,
+                          height = 50.dp,
+                          fontSize = 15.sp,
+                          modifier = Modifier.fillMaxWidth()
+                      )
                   }
 
-                  var showKnoxConfirm by remember { mutableStateOf(false) }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .border(1.dp, YasCyan, RoundedCornerShape(8.dp))
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                          Text(
-                              "Step 2 \u2013 Remove Knox",
-                              color = YasCyan,
-                              fontWeight = FontWeight.ExtraBold,
-                              fontSize = 13.sp
+                  YASCard(
+                      title = "STEP 2  \u2022  Remove Knox",
+                      subtitle = "ADB \u2013 run after the device boots into normal Android",
+                      accent = YasCyan,
+                      trailing = {
+                          StatusBadge(
+                              text = if (state.adbConnected) "ADB connected" else "ADB not connected",
+                              color = if (state.adbConnected) YasGreen else YasMuted
                           )
-                          Text(
-                              "Run this only after rebooting the device into normal Android and enabling USB debugging (not in EDL/Download mode). Disables Knox, MDM and diagnostic system packages, and changes the private DNS to NextDNS.",
-                              fontSize = 11.sp,
-                              color = Color.LightGray
-                          )
-                          Button(
-                              onClick = { showKnoxConfirm = true },
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .height(46.dp)
-                          ) {
-                              Text(X216B_ADB_BUTTON_LABEL, fontWeight = FontWeight.ExtraBold, fontSize = 14.sp)
-                          }
                       }
-                  }
-
-                  if (showKnoxConfirm) {
-                      AlertDialog(
-                          onDismissRequest = { showKnoxConfirm = false },
-                          title = { Text("Remove Knox?") },
-                          text = {
-                              Text(
-                                  "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom private DNS. " +
-                                      "Make sure the device is running normally with USB debugging enabled. This step cannot be undone from this button. Continue?"
+                  ) {
+                      Text(
+                          "Reboot into normal Android and enable USB debugging first (not EDL / Download mode). " +
+                              "This disables Knox, MDM and diagnostic system packages and switches private DNS to NextDNS.",
+                          fontSize = 11.sp,
+                          color = YasTextSoft
+                      )
+                      YASButton(
+                          text = X216B_ADB_BUTTON_LABEL,
+                          onClick = {
+                              requestConfirm(
+                                  PendingAction(
+                                      title = "Remove Knox?",
+                                      message = "This disables Knox, MDM and diagnostic system packages over ADB and sets a custom private DNS. " +
+                                          "Make sure the device is running normally with USB debugging enabled. " +
+                                          "This step cannot be undone from this button. Continue?",
+                                      confirmLabel = "Remove Knox",
+                                      onConfirm = { onAdbShell(X216B_ADB_COMMAND) }
+                                  )
                               )
                           },
-                          confirmButton = {
-                              TextButton(onClick = {
-                                  showKnoxConfirm = false
-                                  onAdbShell(X216B_ADB_COMMAND)
-                              }) { Text("Remove Knox") }
-                          },
-                          dismissButton = {
-                              TextButton(onClick = { showKnoxConfirm = false }) { Text("Cancel") }
-                          }
+                          enabled = !state.isBusy,
+                          kind = BtnKind.Primary,
+                          height = 50.dp,
+                          fontSize = 15.sp,
+                          modifier = Modifier.fillMaxWidth()
                       )
                   }
               }
           }
 
+          @Composable
+          private fun WorkflowStrip(steps: List<String>, accent: Color) {
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .horizontalScroll(rememberScrollState()),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(6.dp)
+              ) {
+                  steps.forEachIndexed { i, label ->
+                      Row(
+                          modifier = Modifier
+                              .background(YasCardBgAlt, YasChipShape)
+                              .padding(horizontal = 10.dp, vertical = 5.dp),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.spacedBy(6.dp)
+                      ) {
+                          Text("${i + 1}", fontSize = 10.sp, color = accent, fontWeight = FontWeight.ExtraBold)
+                          Text(label, fontSize = 11.sp, color = YasText, maxLines = 1)
+                      }
+                      if (i < steps.lastIndex) Text("\u203A", color = YasMuted, fontSize = 14.sp)
+                  }
+              }
+          }
+
+          // =====================================================================================
+          //  Tab 2 - Read GPT (Partition Manager)
+          // =====================================================================================
           @Composable
           private fun ReadGptTab(
               state: EdlUiState,
@@ -6184,128 +6581,167 @@ jobs:
               onTogglePartSelection: (String) -> Unit,
               onSelectAllParts: (List<String>) -> Unit,
               onClearPartSelection: () -> Unit,
-              onRequestBatchErase: () -> Unit,
               onBackupPartition: (PartitionEntry) -> Unit,
               onFlashPartition: (PartitionEntry) -> Unit,
-              onRequestErasePartition: (PartitionEntry) -> Unit
+              onResetFrp: () -> Unit,
+              onFactoryReset: () -> Unit,
+              requestConfirm: (PendingAction) -> Unit,
+              onEraseSelectedParts: () -> Unit,
+              onErasePartition: (PartitionEntry) -> Unit
           ) {
-              Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                          Text(
-                              text = state.loaderName,
-                              fontSize = 11.sp,
-                              color = YasCyan,
-                              maxLines = 1,
-                              overflow = TextOverflow.Ellipsis
+              Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                  YASCard(
+                      title = "LOADER & STORAGE",
+                      accent = YasCyan,
+                      trailing = {
+                          StatusBadge(
+                              text = if (state.loaderUri != null) "Loader selected" else "Built-in / none",
+                              color = if (state.loaderUri != null) YasGreen else YasMuted,
+                              dot = false
                           )
-                          Row(
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .horizontalScroll(rememberScrollState()),
-                              horizontalArrangement = Arrangement.spacedBy(6.dp),
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              OutlinedButton(
-                                  onClick = onPickLoader,
-                                  enabled = !state.isBusy,
-                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(32.dp)
-                              ) {
-                                  Text("Choose Loader", fontSize = 11.sp, color = Color.White)
-                              }
-
-                              StorageType.entries.forEach { type ->
-                                  FilterChip(
-                                      selected = state.selectedStorage == type,
-                                      onClick = { onStorageSelected(type) },
-                                      label = { Text("${type.name} (${type.sectorSize}B)", fontSize = 11.sp) }
+                      }
+                  ) {
+                      FileSelectorField(
+                          tag = "LOADER",
+                          displayName = state.loaderName,
+                          placeholder = state.loaderName,
+                          uri = state.loaderUri,
+                          accent = YasCyan,
+                          enabled = !state.isBusy,
+                          onBrowse = onPickLoader
+                      )
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .horizontalScroll(rememberScrollState()),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          StorageType.entries.forEach { type ->
+                              FilterChip(
+                                  selected = state.selectedStorage == type,
+                                  onClick = { onStorageSelected(type) },
+                                  label = { Text("${type.name} (${type.sectorSize}B)", fontSize = 11.sp) }
+                              )
+                          }
+                          YASButton(
+                              text = "HWID / PK_HASH",
+                              onClick = onProbeChipInfo,
+                              enabled = state.usbConnected && !state.firehoseReady && !state.isBusy,
+                              kind = BtnKind.Tonal,
+                              height = 32.dp,
+                              fontSize = 11.sp
+                          )
+                          YASButton(
+                              text = "Upload Loader + Read GPT",
+                              onClick = onRunSaharaAndFirehose,
+                              enabled = state.usbConnected && !state.isBusy,
+                              kind = BtnKind.Warning,
+                              height = 32.dp,
+                              fontSize = 11.sp
+                          )
+                          YASButton(
+                              text = "Read GPT (${state.partitions.size})",
+                              onClick = onReadGpt,
+                              enabled = state.firehoseReady && !state.isBusy,
+                              kind = BtnKind.Primary,
+                              height = 32.dp,
+                              fontSize = 11.sp
+                          )
+                          YASButton(
+                              text = "Erase FRP",
+                              onClick = {
+                                  requestConfirm(
+                                      PendingAction(
+                                          title = "Erase FRP?",
+                                          message = "This resets the Factory Reset Protection lock on the connected device.",
+                                          confirmLabel = "Erase FRP",
+                                          onConfirm = onResetFrp
+                                      )
                                   )
-                              }
-
-                              OutlinedButton(
-                                  onClick = onProbeChipInfo,
-                                  enabled = state.usbConnected && !state.firehoseReady && !state.isBusy,
-                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(32.dp)
-                              ) {
-                                  Text("Read HWID / PK_HASH", fontSize = 11.sp, color = YasCyan)
-                              }
-
-                              Button(
-                                  onClick = onRunSaharaAndFirehose,
-                                  enabled = state.usbConnected && !state.isBusy,
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(32.dp)
-                              ) {
-                                  Text("Upload Loader and Read GPT", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                              }
-                          }
-
-                          val info = state.deviceInfo
-                          if (info != null) {
-                              Text(
-                                  "${info.msmIdHex} (${info.socName}) | ${info.oemName} | Serial ${info.serialHex}",
-                                  fontSize = 10.sp,
-                                  color = Color.White,
-                                  fontFamily = FontFamily.Monospace,
-                                  maxLines = 2
-                              )
-                              Text(
-                                  "PK_HASH: ${info.pkHashHex}",
-                                  fontSize = 10.sp,
-                                  color = YasOrange,
-                                  fontFamily = FontFamily.Monospace,
-                                  maxLines = 2
-                              )
-                          }
+                              },
+                              enabled = state.firehoseReady && !state.isBusy,
+                              kind = BtnKind.Outline,
+                              height = 32.dp,
+                              fontSize = 11.sp
+                          )
+                          YASButton(
+                              text = "Factory Reset",
+                              onClick = {
+                                  requestConfirm(
+                                      PendingAction(
+                                          title = "Factory Reset?",
+                                          message = "This wipes the userdata partition. All user data on the device will be lost.",
+                                          confirmLabel = "Wipe userdata",
+                                          onConfirm = onFactoryReset
+                                      )
+                                  )
+                              },
+                              enabled = state.firehoseReady && !state.isBusy,
+                              kind = BtnKind.Danger,
+                              height = 32.dp,
+                              fontSize = 11.sp
+                          )
                       }
                   }
 
-                  Box(modifier = Modifier
-                      .weight(1f)
-                      .fillMaxWidth()) {
-                      PartitionManagerTab(
+                  Box(
+                      modifier = Modifier
+                          .weight(1f)
+                          .fillMaxWidth()
+                  ) {
+                      PartitionTable(
                           state = state,
-                          onReadGpt = onReadGpt,
                           onLunFilterSelected = onLunFilterSelected,
                           onTogglePartSelection = onTogglePartSelection,
                           onSelectAllParts = onSelectAllParts,
                           onClearPartSelection = onClearPartSelection,
-                          onRequestBatchErase = onRequestBatchErase,
                           onBackupPartition = onBackupPartition,
                           onFlashPartition = onFlashPartition,
-                          onRequestErasePartition = onRequestErasePartition
+                          onRequestErasePartition = { part ->
+                              requestConfirm(
+                                  PendingAction(
+                                      title = "Confirm Partition Erase",
+                                      message = "Are you sure you want to erase '${part.name}' on LUN ${part.lun} (${formatSize(part.sizeInBytes)})?",
+                                      confirmLabel = "Erase Now",
+                                      onConfirm = { onErasePartition(part) }
+                                  )
+                              )
+                          },
+                          onRequestBatchErase = {
+                              requestConfirm(
+                                  PendingAction(
+                                      title = "Erase Selected Partitions",
+                                      message = "Are you sure you want to erase ${state.selectedPartKeys.size} selected partition(s)?",
+                                      confirmLabel = "Erase All Selected",
+                                      onConfirm = onEraseSelectedParts
+                                  )
+                              )
+                          }
                       )
                   }
               }
           }
 
-          @Composable
+          private val ActionsWidth = 176.dp
 
-          private fun PartitionManagerTab(
+          @Composable
+          private fun PartitionTable(
               state: EdlUiState,
-              onReadGpt: () -> Unit,
               onLunFilterSelected: (Int) -> Unit,
               onTogglePartSelection: (String) -> Unit,
               onSelectAllParts: (List<String>) -> Unit,
               onClearPartSelection: () -> Unit,
-              onRequestBatchErase: () -> Unit,
               onBackupPartition: (PartitionEntry) -> Unit,
               onFlashPartition: (PartitionEntry) -> Unit,
-              onRequestErasePartition: (PartitionEntry) -> Unit
+              onRequestErasePartition: (PartitionEntry) -> Unit,
+              onRequestBatchErase: () -> Unit
           ) {
               var searchQuery by remember { mutableStateOf("") }
 
               val availableLuns = remember(state.partitions) {
                   state.partitions.map { it.lun }.distinct().sorted()
               }
-
               val filtered = remember(state.partitions, state.selectedLunFilter, searchQuery) {
                   state.partitions.filter { part ->
                       val matchesLun = state.selectedLunFilter == -1 || part.lun == state.selectedLunFilter
@@ -6314,176 +6750,146 @@ jobs:
                   }
               }
 
-              Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                  Row(
-                      modifier = Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.spacedBy(6.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      OutlinedTextField(
+              BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                  val compact = maxWidth < 640.dp
+                  val hasSelection = state.selectedPartKeys.isNotEmpty()
+
+                  Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                      YasTextField(
                           value = searchQuery,
                           onValueChange = { searchQuery = it },
-                          placeholder = { Text("Search for a partition (frp, sec_efs, persistent, userdata...)", fontSize = 12.sp) },
-                          singleLine = true,
-                          modifier = Modifier.weight(1f)
+                          placeholder = "Search partition (frp, sec_efs, persistent, userdata...)",
+                          modifier = Modifier.fillMaxWidth()
                       )
 
-                      Button(
-                          onClick = onReadGpt,
-                          enabled = state.firehoseReady && !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black)
-                      ) {
-                          Text("Read GPT (${state.partitions.size})", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                      }
-                  }
-
-                  Row(
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .horizontalScroll(rememberScrollState()),
-                      horizontalArrangement = Arrangement.spacedBy(6.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      FilterChip(
-                          selected = state.selectedLunFilter == -1,
-                          onClick = { onLunFilterSelected(-1) },
-                          label = { Text("All (${state.partitions.size})", fontSize = 11.sp) }
-                      )
-                      availableLuns.forEach { lun ->
-                          val count = state.partitions.count { it.lun == lun }
-                          FilterChip(
-                              selected = state.selectedLunFilter == lun,
-                              onClick = { onLunFilterSelected(lun) },
-                              label = { Text("LUN $lun ($count)", fontSize = 11.sp) }
-                          )
-                      }
-
-                      Spacer(modifier = Modifier.width(6.dp))
-
-                      OutlinedButton(
-                          onClick = { onSelectAllParts(filtered.map { it.idKey }) },
-                          enabled = filtered.isNotEmpty() && !state.isBusy,
-                          contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                          modifier = Modifier.height(30.dp)
-                      ) {
-                          Text("Select All", fontSize = 11.sp, color = YasCyan)
-                      }
-
-                      if (state.selectedPartKeys.isNotEmpty()) {
-                          OutlinedButton(
-                              onClick = onClearPartSelection,
-                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                              modifier = Modifier.height(30.dp)
-                          ) {
-                              Text("Deselect (${state.selectedPartKeys.size})", fontSize = 11.sp, color = Color.LightGray)
-                          }
-
-                          Button(
-                              onClick = onRequestBatchErase,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasRed),
-                              contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                              modifier = Modifier.height(30.dp)
-                          ) {
-                              Text("Erase Selected (${state.selectedPartKeys.size})", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                          }
-                      }
-                  }
-
-                  if (filtered.isEmpty()) {
-                      Box(
+                      Row(
                           modifier = Modifier
-                              .fillMaxSize()
-                              .background(YasCardBg, RoundedCornerShape(8.dp)),
-                          contentAlignment = Alignment.Center
+                              .fillMaxWidth()
+                              .horizontalScroll(rememberScrollState()),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          verticalAlignment = Alignment.CenterVertically
                       ) {
-                          Text(
-                              text = if (state.partitions.isEmpty())
-                                  "No GPT partitions loaded yet.\nConnect the device and tap 'Read Full GPT', or run the X216B wipe & write button."
-                              else
-                                  "No partitions match the search/filter.",
-                              color = Color.Gray,
-                              fontSize = 12.sp
+                          FilterChip(
+                              selected = state.selectedLunFilter == -1,
+                              onClick = { onLunFilterSelected(-1) },
+                              label = { Text("All (${state.partitions.size})", fontSize = 11.sp) }
+                          )
+                          availableLuns.forEach { lun ->
+                              val count = state.partitions.count { it.lun == lun }
+                              FilterChip(
+                                  selected = state.selectedLunFilter == lun,
+                                  onClick = { onLunFilterSelected(lun) },
+                                  label = { Text("LUN $lun ($count)", fontSize = 11.sp) }
+                              )
+                          }
+                          YASButton(
+                              text = "Select All",
+                              onClick = { onSelectAllParts(filtered.map { it.idKey }) },
+                              enabled = filtered.isNotEmpty() && !state.isBusy,
+                              kind = BtnKind.Tonal,
+                              height = 30.dp,
+                              fontSize = 11.sp,
+                              horizontalPad = 10.dp
                           )
                       }
-                  } else {
-                      LazyColumn(
-                          modifier = Modifier.fillMaxSize(),
-                          verticalArrangement = Arrangement.spacedBy(4.dp)
-                      ) {
-                          items(filtered, key = { it.idKey }) { part ->
-                              val isChecked = part.idKey in state.selectedPartKeys
-                              Surface(
-                                  color = if (isChecked) Color(0xFF1B2E46) else YasCardBg,
-                                  shape = RoundedCornerShape(6.dp),
-                                  modifier = Modifier
-                                      .fillMaxWidth()
-                                      .clickable { onTogglePartSelection(part.idKey) }
-                              ) {
-                                  Row(
+
+                      if (filtered.isEmpty()) {
+                          Box(
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .fillMaxWidth()
+                                  .background(YasCardBg, YasCardShape),
+                              contentAlignment = Alignment.Center
+                          ) {
+                              Text(
+                                  text = if (state.partitions.isEmpty())
+                                      "No GPT partitions loaded yet.\nConnect the 9008 device and tap 'Upload Loader + Read GPT',\nor run the X216B Format + FRP + MDM step."
+                                  else
+                                      "No partitions match the search / filter.",
+                                  color = YasMuted,
+                                  fontSize = 12.sp,
+                                  textAlign = TextAlign.Center,
+                                  modifier = Modifier.padding(16.dp)
+                              )
+                          }
+                      } else {
+                          Box(
+                              modifier = Modifier
+                                  .weight(1f)
+                                  .fillMaxWidth()
+                          ) {
+                              Column(modifier = Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                  if (!compact) PartitionHeaderRow()
+                                  LazyColumn(
+                                      modifier = Modifier.weight(1f),
+                                      verticalArrangement = Arrangement.spacedBy(4.dp),
+                                      contentPadding = PaddingValues(bottom = if (hasSelection) 56.dp else 0.dp)
+                                  ) {
+                                      items(filtered, key = { it.idKey }) { part ->
+                                          PartitionRow(
+                                              part = part,
+                                              checked = part.idKey in state.selectedPartKeys,
+                                              enabled = !state.isBusy,
+                                              compact = compact,
+                                              onToggle = { onTogglePartSelection(part.idKey) },
+                                              onRead = { onBackupPartition(part) },
+                                              onWrite = { onFlashPartition(part) },
+                                              onErase = { onRequestErasePartition(part) }
+                                          )
+                                      }
+                                  }
+                              }
+
+                              if (hasSelection) {
+                                  Surface(
+                                      color = Color(0xFF1A2640),
+                                      shape = YasAccentShape,
+                                      shadowElevation = 6.dp,
                                       modifier = Modifier
+                                          .align(Alignment.BottomCenter)
                                           .fillMaxWidth()
-                                          .padding(horizontal = 6.dp, vertical = 6.dp),
-                                      verticalAlignment = Alignment.CenterVertically,
-                                      horizontalArrangement = Arrangement.SpaceBetween
+                                          .border(1.dp, YasBorder, YasAccentShape)
                                   ) {
                                       Row(
+                                          modifier = Modifier
+                                              .fillMaxWidth()
+                                              .padding(horizontal = 10.dp, vertical = 8.dp),
                                           verticalAlignment = Alignment.CenterVertically,
-                                          modifier = Modifier.weight(1f)
+                                          horizontalArrangement = Arrangement.spacedBy(6.dp)
                                       ) {
-                                          Checkbox(
-                                              checked = isChecked,
-                                              onCheckedChange = { onTogglePartSelection(part.idKey) },
-                                              modifier = Modifier.size(32.dp)
+                                          Text(
+                                              "${state.selectedPartKeys.size} selected",
+                                              color = YasText,
+                                              fontWeight = FontWeight.Bold,
+                                              fontSize = 12.sp,
+                                              modifier = Modifier.weight(1f)
                                           )
-                                          Column(modifier = Modifier.padding(start = 4.dp)) {
-                                              Row(
-                                                  verticalAlignment = Alignment.CenterVertically,
-                                                  horizontalArrangement = Arrangement.spacedBy(6.dp)
-                                              ) {
-                                                  Text(text = part.name, color = Color.White, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                                  Text(text = "LUN ${part.lun}", color = YasCyan, fontSize = 10.sp, fontWeight = FontWeight.SemiBold)
-                                                  Text(text = formatSize(part.sizeInBytes), color = YasOrange, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
-                                              }
-                                              Text(
-                                                  text = "LBA: ${part.firstLba} .. ${part.lastLba} (${part.numSectors} sec)",
-                                                  color = Color.Gray,
-                                                  fontSize = 10.sp,
-                                                  fontFamily = FontFamily.Monospace
-                                              )
-                                          }
-                                      }
-
-                                      Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                          Button(
-                                              onClick = { onBackupPartition(part) },
+                                          YASButton(
+                                              text = "Select All",
+                                              onClick = { onSelectAllParts(filtered.map { it.idKey }) },
                                               enabled = !state.isBusy,
-                                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1F4068)),
-                                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                              modifier = Modifier.height(30.dp)
-                                          ) {
-                                              Text("Read", fontSize = 11.sp, color = YasCyan)
-                                          }
-
-                                          Button(
-                                              onClick = { onFlashPartition(part) },
+                                              kind = BtnKind.Tonal,
+                                              height = 30.dp,
+                                              fontSize = 11.sp,
+                                              horizontalPad = 10.dp
+                                          )
+                                          YASButton(
+                                              text = "Deselect",
+                                              onClick = onClearPartSelection,
+                                              kind = BtnKind.Outline,
+                                              height = 30.dp,
+                                              fontSize = 11.sp,
+                                              horizontalPad = 10.dp
+                                          )
+                                          YASButton(
+                                              text = "Erase Selected",
+                                              onClick = onRequestBatchErase,
                                               enabled = !state.isBusy,
-                                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                              modifier = Modifier.height(30.dp)
-                                          ) {
-                                              Text("Write", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                                          }
-
-                                          Button(
-                                              onClick = { onRequestErasePartition(part) },
-                                              enabled = !state.isBusy,
-                                              colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4A1C1C)),
-                                              contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
-                                              modifier = Modifier.height(30.dp)
-                                          ) {
-                                              Text("Erase", fontSize = 11.sp, color = YasRed, fontWeight = FontWeight.Bold)
-                                          }
+                                              kind = BtnKind.Danger,
+                                              height = 30.dp,
+                                              fontSize = 11.sp,
+                                              horizontalPad = 10.dp
+                                          )
                                       }
                                   }
                               }
@@ -6494,8 +6900,154 @@ jobs:
           }
 
           @Composable
-          private fun XmlFirmwareTab(
+          private fun PartitionHeaderRow() {
+              val h: @Composable (String, Modifier) -> Unit = { t, m ->
+                  Text(t, modifier = m, fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold, maxLines = 1)
+              }
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .background(YasCardBgAlt, YasCardShape)
+                      .padding(horizontal = 8.dp, vertical = 6.dp),
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Spacer(Modifier.width(36.dp))
+                  h("NAME", Modifier.weight(1.2f))
+                  h("LUN", Modifier.width(54.dp))
+                  h("SIZE", Modifier.width(80.dp))
+                  h("SECTOR RANGE (LBA)", Modifier.weight(1.6f))
+                  h("ACTIONS", Modifier.width(ActionsWidth))
+              }
+          }
+
+          @Composable
+          private fun LunChip(lun: Int) {
+              Text(
+                  "LUN $lun",
+                  color = YasCyan,
+                  fontSize = 10.sp,
+                  fontWeight = FontWeight.SemiBold,
+                  maxLines = 1,
+                  modifier = Modifier
+                      .background(YasCyan.copy(alpha = 0.14f), YasChipShape)
+                      .padding(horizontal = 6.dp, vertical = 2.dp)
+              )
+          }
+
+          @Composable
+          private fun PartitionActions(enabled: Boolean, onRead: () -> Unit, onWrite: () -> Unit, onErase: () -> Unit) {
+              Row(modifier = Modifier.width(ActionsWidth), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                  YASButton("Read", onRead, Modifier.weight(1f), enabled, BtnKind.Tonal, 28.dp, 11.sp, 4.dp)
+                  YASButton("Write", onWrite, Modifier.weight(1f), enabled, BtnKind.Primary, 28.dp, 11.sp, 4.dp)
+                  YASButton("Erase", onErase, Modifier.weight(1f), enabled, BtnKind.Danger, 28.dp, 11.sp, 4.dp)
+              }
+          }
+
+          @Composable
+          private fun PartitionRow(
+              part: PartitionEntry,
+              checked: Boolean,
+              enabled: Boolean,
+              compact: Boolean,
+              onToggle: () -> Unit,
+              onRead: () -> Unit,
+              onWrite: () -> Unit,
+              onErase: () -> Unit
+          ) {
+              val lba = "${part.firstLba} \u2013 ${part.lastLba}"
+              Surface(
+                  color = if (checked) Color(0xFF1A2640) else YasCardBg,
+                  shape = YasCardShape,
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .clickable(onClick = onToggle)
+              ) {
+                  if (compact) {
+                      Column(
+                          modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                          verticalArrangement = Arrangement.spacedBy(4.dp)
+                      ) {
+                          Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                              Checkbox(checked = checked, onCheckedChange = { onToggle() }, modifier = Modifier.size(32.dp))
+                              Text(
+                                  part.name,
+                                  color = YasText,
+                                  fontWeight = FontWeight.Bold,
+                                  fontSize = 14.sp,
+                                  maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis,
+                                  modifier = Modifier.weight(1f)
+                              )
+                              LunChip(part.lun)
+                              Text(formatSize(part.sizeInBytes), color = YasOrange, fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                          }
+                          Row(
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .padding(start = 38.dp),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.spacedBy(6.dp)
+                          ) {
+                              Text(
+                                  lba,
+                                  color = YasMuted,
+                                  fontSize = 10.sp,
+                                  fontFamily = FontFamily.Monospace,
+                                  maxLines = 1,
+                                  overflow = TextOverflow.Ellipsis,
+                                  modifier = Modifier.weight(1f)
+                              )
+                              PartitionActions(enabled, onRead, onWrite, onErase)
+                          }
+                      }
+                  } else {
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .padding(horizontal = 8.dp, vertical = 6.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Checkbox(checked = checked, onCheckedChange = { onToggle() }, modifier = Modifier.size(36.dp))
+                          Text(
+                              part.name,
+                              color = YasText,
+                              fontWeight = FontWeight.Bold,
+                              fontSize = 13.sp,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier.weight(1.2f)
+                          )
+                          Box(modifier = Modifier.width(54.dp)) { LunChip(part.lun) }
+                          Text(
+                              formatSize(part.sizeInBytes),
+                              color = YasOrange,
+                              fontSize = 11.sp,
+                              fontWeight = FontWeight.SemiBold,
+                              maxLines = 1,
+                              modifier = Modifier.width(80.dp)
+                          )
+                          Text(
+                              lba,
+                              color = YasMuted,
+                              fontSize = 10.sp,
+                              fontFamily = FontFamily.Monospace,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier.weight(1.6f)
+                          )
+                          PartitionActions(enabled, onRead, onWrite, onErase)
+                      }
+                  }
+              }
+          }
+
+          // =====================================================================================
+          //  Tab 3 - XML Flasher
+          // =====================================================================================
+          @Composable
+          private fun XmlFlasherTab(
               state: EdlUiState,
+              clears: ClearActions,
               onPickRawProgram: () -> Unit,
               onPickPatchXml: () -> Unit,
               onPickFirmwareDir: () -> Unit,
@@ -6505,38 +7057,79 @@ jobs:
                   modifier = Modifier
                       .fillMaxSize()
                       .verticalScroll(rememberScrollState()),
-                  verticalArrangement = Arrangement.spacedBy(8.dp)
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
               ) {
-                  Text(
-                      if (state.firehoseReady) "Firehose: READY"
-                      else "Firehose: NOT READY - connect the 9008 device and run Sahara + Firehose from the 'Read GPT' tab first",
-                      fontSize = 11.sp,
-                      fontWeight = FontWeight.Bold,
-                      color = if (state.firehoseReady) YasGreen else YasOrange
-                  )
-                  OutlinedButton(onClick = onPickRawProgram, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth()) {
-                      Text(state.rawProgramName, color = YasCyan)
-                  }
-                  OutlinedButton(onClick = onPickPatchXml, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth()) {
-                      Text(state.patchXmlName, color = Color.LightGray)
-                  }
-                  OutlinedButton(onClick = onPickFirmwareDir, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth()) {
-                      Text(state.firmwareDirName, color = YasOrange)
-                  }
-                  Button(
-                      onClick = onFlashFirmwareXml,
-                      enabled = state.firehoseReady && !state.isBusy && state.rawProgramUri != null && state.firmwareDirUri != null,
-                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                      modifier = Modifier.fillMaxWidth().height(44.dp)
+                  YASCard(
+                      title = "XML FIRMWARE FLASH",
+                      subtitle = "Qualcomm rawprogram / patch package via Firehose",
+                      accent = YasOrange,
+                      trailing = {
+                          StatusBadge(
+                              text = if (state.firehoseReady) "Firehose ready" else "Firehose not ready",
+                              color = if (state.firehoseReady) YasGreen else YasOrange,
+                              pulse = false
+                          )
+                      }
                   ) {
-                      Text("Start Full XML Firmware Flash", fontWeight = FontWeight.Bold)
+                      if (!state.firehoseReady) {
+                          Text(
+                              "Connect the 9008 device and run 'Upload Loader + Read GPT' from the Read GPT tab first.",
+                              fontSize = 11.sp,
+                              color = YasOrange
+                          )
+                      }
+                      FileSelectorField(
+                          tag = "RAWPROGRAM",
+                          displayName = state.rawProgramName,
+                          placeholder = state.rawProgramName,
+                          uri = state.rawProgramUri,
+                          accent = YasCyan,
+                          enabled = !state.isBusy,
+                          onBrowse = onPickRawProgram,
+                          onClear = clears.rawProgram,
+                          showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "PATCH",
+                          displayName = state.patchXmlName,
+                          placeholder = state.patchXmlName,
+                          uri = state.patchXmlUri,
+                          accent = YasPurple,
+                          enabled = !state.isBusy,
+                          onBrowse = onPickPatchXml,
+                          onClear = clears.patchXml,
+                          showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "FOLDER",
+                          displayName = state.firmwareDirName,
+                          placeholder = state.firmwareDirName,
+                          uri = state.firmwareDirUri,
+                          accent = YasOrange,
+                          enabled = !state.isBusy,
+                          onBrowse = onPickFirmwareDir,
+                          onClear = clears.firmwareDir
+                      )
+                      YASButton(
+                          text = "Start Full XML Firmware Flash",
+                          onClick = onFlashFirmwareXml,
+                          enabled = state.firehoseReady && !state.isBusy && state.rawProgramUri != null && state.firmwareDirUri != null,
+                          kind = BtnKind.Warning,
+                          height = 48.dp,
+                          fontSize = 14.sp,
+                          modifier = Modifier.fillMaxWidth()
+                      )
                   }
               }
           }
 
+          // =====================================================================================
+          //  Tab 4 - Samsung Odin
+          // =====================================================================================
           @Composable
           private fun SamsungOdinTab(
               state: EdlUiState,
+              clears: ClearActions,
               onConnectOdinDevice: () -> Unit,
               onPickBlTar: () -> Unit,
               onPickApTar: () -> Unit,
@@ -6549,175 +7142,151 @@ jobs:
               onExitDownloadMode: () -> Unit,
               onMtpDownloadAt: () -> Unit
           ) {
+              val anySlot = state.blTarUri != null || state.apTarUri != null || state.cpTarUri != null ||
+                  state.cscTarUri != null || state.userdataTarUri != null
+
               Column(
                   modifier = Modifier
                       .fillMaxSize()
                       .verticalScroll(rememberScrollState()),
-                  verticalArrangement = Arrangement.spacedBy(8.dp)
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
               ) {
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .border(1.dp, if (state.odinConnected) YasGreen else YasRed, RoundedCornerShape(8.dp))
+                  // 1. Connection
+                  YASCard(
+                      title = "DOWNLOAD MODE CONNECTION",
+                      subtitle = "Samsung Odin protocol",
+                      accent = if (state.odinConnected) YasGreen else YasRed,
+                      trailing = {
+                          StatusBadge(
+                              text = if (state.odinConnected) "Connected" else "Not connected",
+                              color = if (state.odinConnected) YasGreen else YasRed,
+                              pulse = state.odinConnected
+                          )
+                      }
                   ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Column {
-                                  Text("Samsung Download Mode (Odin protocol)", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 13.sp)
-                                  Text(
-                                      state.odinDeviceDescription,
-                                      fontSize = 11.sp,
-                                      color = if (state.odinConnected) YasGreen else YasRed
-                                  )
-                              }
-                              Button(
-                                  onClick = onConnectOdinDevice,
-                                  enabled = !state.isBusy,
-                                  colors = ButtonDefaults.buttonColors(
-                                      containerColor = if (state.odinConnected) Color(0xFF1E3A5F) else YasCyan,
-                                      contentColor = if (state.odinConnected) Color.White else Color.Black
-                                  ),
-                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp)
-                              ) {
-                                  Text(if (state.odinConnected) "Connected" else "Connect to Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                              }
-                          }
-
-                                  Button(
-                                      onClick = onMtpDownloadAt,
-                                      enabled = !state.isBusy && !state.odinConnected,
-                                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                                      modifier = Modifier
-                                          .fillMaxWidth()
-                                          .height(40.dp)
-                                  ) {
-                                      Text("MTP -> Download Mode", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                  }
-
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Row(verticalAlignment = Alignment.CenterVertically) {
-                                  Checkbox(
-                                      checked = state.odinAutoReboot,
-                                      onCheckedChange = onToggleOdinAutoReboot,
-                                      enabled = !state.isBusy
-                                  )
-                                  Text("Auto-reboot after the operation", color = Color.LightGray, fontSize = 12.sp)
-                              }
-                              OutlinedButton(
-                                  onClick = onExitDownloadMode,
-                                  enabled = !state.isBusy,
-                                  contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-                              ) {
-                                  Text("Exit Download Mode", fontSize = 11.sp, color = YasOrange, fontWeight = FontWeight.Bold)
-                              }
-                          }
+                      Text(
+                          state.odinDeviceDescription,
+                          fontSize = 11.sp,
+                          color = if (state.odinConnected) YasGreen else YasMuted
+                      )
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          YASButton(
+                              text = if (state.odinConnected) "Reconnect" else "Connect",
+                              onClick = onConnectOdinDevice,
+                              enabled = !state.isBusy,
+                              kind = if (state.odinConnected) BtnKind.Tonal else BtnKind.Primary,
+                              height = 38.dp,
+                              modifier = Modifier.weight(1f)
+                          )
+                          YASButton(
+                              text = "MTP \u2192 Download Mode",
+                              onClick = onMtpDownloadAt,
+                              enabled = !state.isBusy && !state.odinConnected,
+                              kind = BtnKind.Warning,
+                              height = 38.dp,
+                              modifier = Modifier.weight(1.4f)
+                          )
+                          YASButton(
+                              text = "Exit",
+                              onClick = onExitDownloadMode,
+                              enabled = !state.isBusy,
+                              kind = BtnKind.Outline,
+                              height = 38.dp,
+                              modifier = Modifier.weight(0.7f)
+                          )
                       }
                   }
 
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
+                  // 2. Slot matrix
+                  YASCard(
+                      title = "FIRMWARE SLOT MATRIX",
+                      subtitle = "Flashed in order BL \u2192 AP \u2192 CP \u2192 CSC \u2192 USERDATA",
+                      accent = YasCyan
                   ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Fast: flash userdata.tar only", color = YasGreen, fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
+                      FileSelectorField(
+                          tag = "BL", displayName = stripSlotPrefix(state.blTarName),
+                          placeholder = "BL (Bootloader) .tar / .md5", uri = state.blTarUri,
+                          accent = YasCyan, enabled = !state.isBusy, onBrowse = onPickBlTar,
+                          onClear = clears.blTar, showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "AP", displayName = stripSlotPrefix(state.apTarName),
+                          placeholder = "AP (System / Kernel) .tar / .md5", uri = state.apTarUri,
+                          accent = YasOrange, enabled = !state.isBusy, onBrowse = onPickApTar,
+                          onClear = clears.apTar, showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "CP", displayName = stripSlotPrefix(state.cpTarName),
+                          placeholder = "CP (Modem) .tar / .md5", uri = state.cpTarUri,
+                          accent = YasGreen, enabled = !state.isBusy, onBrowse = onPickCpTar,
+                          onClear = clears.cpTar, showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "CSC", displayName = stripSlotPrefix(state.cscTarName),
+                          placeholder = "CSC .tar / .md5", uri = state.cscTarUri,
+                          accent = Color(0xFFB8C2D4), enabled = !state.isBusy, onBrowse = onPickCscTar,
+                          onClear = clears.cscTar, showSize = true
+                      )
+                      FileSelectorField(
+                          tag = "USERDATA", displayName = stripSlotPrefix(state.userdataTarName),
+                          placeholder = "userdata.img / .tar", uri = state.userdataTarUri,
+                          accent = YasPurple, enabled = !state.isBusy, onBrowse = onPickUserdataTar,
+                          onClear = clears.userdataTar, showSize = true
+                      )
+                  }
 
-                          OutlinedButton(
-                              onClick = onPickUserdataTar,
-                              enabled = !state.isBusy,
-                              modifier = Modifier.fillMaxWidth(),
-                              contentPadding = PaddingValues(8.dp)
-                          ) {
-                              Text(state.userdataTarName, fontSize = 11.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                          }
-
-                          Button(
+                  // 3. Execution
+                  YASCard(title = "EXECUTION", accent = YasOrange) {
+                      Row(
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .clickable(enabled = !state.isBusy) { onToggleOdinAutoReboot(!state.odinAutoReboot) },
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          Checkbox(
+                              checked = state.odinAutoReboot,
+                              onCheckedChange = onToggleOdinAutoReboot,
+                              enabled = !state.isBusy
+                          )
+                          Text("Auto-reboot after the operation", color = YasTextSoft, fontSize = 12.sp)
+                      }
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                          YASButton(
+                              text = "\u26A1 Flash userdata only",
                               onClick = onFlashUserdataOnly,
                               enabled = !state.isBusy && state.userdataTarUri != null,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .height(42.dp)
-                          ) {
-                              Text("⚡ Flash userdata (img / tar)", fontWeight = FontWeight.ExtraBold, fontSize = 13.sp)
-                          }
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Text("Flash Full Package (BL / AP / CP / CSC / USERDATA)", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                          Text(
-                              "Pick any set below; the selected packages are flashed in order BL -> AP -> CP -> CSC -> USERDATA, exactly as the official Odin software does.",
-                              fontSize = 10.sp,
-                              color = Color.LightGray
+                              kind = BtnKind.Success,
+                              height = 46.dp,
+                              modifier = Modifier.weight(1f)
                           )
-
-                          OutlinedButton(onClick = onPickBlTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
-                              Text(state.blTarName, fontSize = 11.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                          }
-                          OutlinedButton(onClick = onPickApTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
-                              Text(state.apTarName, fontSize = 11.sp, color = YasOrange, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                          }
-                          OutlinedButton(onClick = onPickCpTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
-                              Text(state.cpTarName, fontSize = 11.sp, color = YasGreen, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                          }
-                          OutlinedButton(onClick = onPickCscTar, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(8.dp)) {
-                              Text(state.cscTarName, fontSize = 11.sp, color = Color.LightGray, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                          }
-
-                          Button(
+                          YASButton(
+                              text = "Start Odin Flash",
                               onClick = onRunOdinFlash,
-                              enabled = !state.isBusy && (
-                                  state.blTarUri != null || state.apTarUri != null ||
-                                  state.cpTarUri != null || state.cscTarUri != null ||
-                                  state.userdataTarUri != null
-                              ),
-                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                              modifier = Modifier
-                                  .fillMaxWidth()
-                                  .height(44.dp)
-                          ) {
-                              Text("Start Odin Flash (Selected Packages)", fontWeight = FontWeight.Bold)
-                          }
-                      }
-                  }
-
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Column(modifier = Modifier.padding(10.dp)) {
-                          Text(
-                              "Note: the device itself validates every image (signature, partition size, lock/MDM state). " +
-                                  "Any rejection from the device is shown as-is in the console below -- nothing here tries to bypass that.",
-                              fontSize = 10.sp,
-                              color = Color.Gray
+                              enabled = !state.isBusy && anySlot,
+                              kind = BtnKind.Warning,
+                              height = 46.dp,
+                              fontSize = 14.sp,
+                              modifier = Modifier.weight(1.2f)
                           )
                       }
+                      Text(
+                          "The device validates every image (signature, partition size, lock / MDM state). " +
+                              "Any rejection is shown as-is in the console.",
+                          fontSize = 10.sp,
+                          color = YasMuted
+                      )
                   }
               }
           }
 
+          // =====================================================================================
+          //  Tab 5 - MTP / ADB utilities
+          // =====================================================================================
           @Composable
-          private fun AdbMtpTab(
+          private fun MtpAdbTab(
               state: EdlUiState,
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
@@ -6725,278 +7294,408 @@ jobs:
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
-              ) {
+          ) {
+              val context = LocalContext.current
+              var shellCmd by remember { mutableStateOf("") }
+
               Column(
                   modifier = Modifier
                       .fillMaxSize()
                       .verticalScroll(rememberScrollState()),
-                  verticalArrangement = Arrangement.spacedBy(8.dp)
+                  verticalArrangement = Arrangement.spacedBy(10.dp)
               ) {
-                  val infoContext = LocalContext.current
-                  var shellCmd by remember { mutableStateOf("") }
-                  // =====================================================================
-                  //  SECTION 1 : MTP COMMANDS  (AT FIELD)  - no USB debugging needed
-                  // =====================================================================
-                  CommandSection(
-                      title = "MTP COMMANDS  (AT FIELD)",
-                      subtitle = "Sent over the phone's modem port in File Transfer / MTP mode. USB debugging NOT required.",
-                      accent = YasOrange
-                  ) {
+                  // ---- Quick functions ----
+                  YASCard(title = "QUICK FUNCTIONS", accent = YasOrange) {
+                      Text("MTP (AT)  \u2013  no USB debugging needed", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
                       Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Button(
-                              onClick = onReadMtpInfo,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Read Info", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                          Button(
-                              onClick = onMtpDownloadAt,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                          OutlinedButton(
-                              onClick = onMtpRebootAt,
-                              enabled = !state.isBusy,
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
+                          YASButton("Read Info", onReadMtpInfo, Modifier.weight(1f), !state.isBusy, BtnKind.Primary, 38.dp, 11.sp, 4.dp)
+                          YASButton("Download", onMtpDownloadAt, Modifier.weight(1f), !state.isBusy, BtnKind.Warning, 38.dp, 11.sp, 4.dp)
+                          YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), !state.isBusy, BtnKind.Outline, 38.dp, 11.sp, 4.dp)
+                      }
+                      Text("ADB  \u2013  USB debugging must be ON", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          YASButton("Read Info", onReadAdbInfo, Modifier.weight(1f), !state.isBusy, BtnKind.Success, 38.dp, 11.sp, 4.dp)
+                          YASButton("Download", { onAdbReboot("download", "Download Mode") }, Modifier.weight(1f), !state.isBusy, BtnKind.Warning, 38.dp, 11.sp, 4.dp)
+                          YASButton("Recovery", { onAdbReboot("recovery", "Recovery") }, Modifier.weight(1f), !state.isBusy, BtnKind.Primary, 38.dp, 11.sp, 4.dp)
+                          YASButton("Reboot", { onAdbReboot("", "Normal Reboot") }, Modifier.weight(1f), !state.isBusy, BtnKind.Outline, 38.dp, 11.sp, 4.dp)
                       }
 
                       if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
-                          Surface(
-                              color = YasCardBgAlt,
-                              shape = RoundedCornerShape(8.dp),
-                              modifier = Modifier.fillMaxWidth().border(1.dp, YasGreen, RoundedCornerShape(8.dp))
-                          ) {
-                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                  InfoCopyRow("IMEI", state.infoImei, infoContext)
-                                  InfoCopyRow("Serial (SN)", state.infoSerial, infoContext)
-                              }
-                          }
-                      }
-
-                      if (state.mtpInfoText.isNotBlank()) {
-                          Surface(color = YasCardBgAlt, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
-                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                  SelectionContainer {
-                                      Text(state.mtpInfoText, fontSize = 11.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
-                                  }
-                                  OutlinedButton(
-                                      onClick = { copyToClipboard(infoContext, "Device info", state.mtpInfoText) },
-                                      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                                      modifier = Modifier.height(30.dp)
-                                  ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
-                              }
-                          }
-                      }
-                  }
-
-                  // =====================================================================
-                  //  SECTION 2 : ADB COMMANDS  - USB debugging must be on
-                  // =====================================================================
-                  CommandSection(
-                      title = "ADB COMMANDS",
-                      subtitle = "Standard ADB protocol. USB debugging must be ON and the prompt accepted on the phone.",
-                      accent = YasGreen
-                  ) {
-                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Button(
-                              onClick = onReadAdbInfo,
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Read Info", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                          Button(
-                              onClick = { onAdbReboot("download", "Download Mode") },
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Download", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                      }
-                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                          Button(
-                              onClick = { onAdbReboot("recovery", "Recovery") },
-                              enabled = !state.isBusy,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
-                          OutlinedButton(
-                              onClick = { onAdbReboot("", "Normal Reboot") },
-                              enabled = !state.isBusy,
-                              modifier = Modifier.weight(1f),
-                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                          ) { Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
-                      }
-
-                      Text("ADB SHELL COMMAND", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                      Row(
-                          modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(6.dp),
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          OutlinedTextField(
-                              value = shellCmd,
-                              onValueChange = { shellCmd = it },
-                              placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
-                              singleLine = true,
-                              modifier = Modifier.weight(1f)
-                          )
-                          Button(
-                              onClick = { onAdbShell(shellCmd) },
-                              enabled = !state.isBusy && shellCmd.isNotBlank(),
-                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-                          ) { Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                      }
-
-                      if (state.adbInfoText.isNotBlank()) {
-                          Surface(
-                              color = YasCardBgAlt,
-                              shape = RoundedCornerShape(8.dp),
+                          Column(
                               modifier = Modifier
                                   .fillMaxWidth()
-                                  .border(1.dp, if (state.adbConnected) YasGreen else YasBorder, RoundedCornerShape(8.dp))
+                                  .background(YasCardBgAlt, YasCardShape)
+                                  .border(1.dp, YasBorder, YasCardShape)
+                                  .padding(10.dp),
+                              verticalArrangement = Arrangement.spacedBy(8.dp)
                           ) {
-                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                                  SelectionContainer {
-                                      Text(state.adbInfoText, fontSize = 11.sp, color = Color.White, fontFamily = FontFamily.Monospace)
-                                  }
-                                  OutlinedButton(
-                                      onClick = { copyToClipboard(infoContext, "Device info", state.adbInfoText) },
-                                      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                                      modifier = Modifier.height(30.dp)
-                                  ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
-                              }
+                              InfoCopyRow("IMEI", state.infoImei, context)
+                              InfoCopyRow("Serial (SN)", state.infoSerial, context)
                           }
                       }
+                      InfoGrid("MTP / AT device report", state.mtpInfoText, context)
+                      InfoGrid("ADB device report", state.adbInfoText, context)
                   }
-              }
-          }
 
-          /** Titled, colour-accented card that groups one family of commands (MTP/AT or ADB). */
-          @Composable
-          private fun CommandSection(
-              title: String,
-              subtitle: String,
-              accent: Color,
-              content: @Composable ColumnScope.() -> Unit
-          ) {
-              Surface(
-                  color = YasCardBg,
-                  shape = RoundedCornerShape(12.dp),
-                  modifier = Modifier
-                      .fillMaxWidth()
-                      .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
-              ) {
-                  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                      Column(
+                  // ---- Interactive shell ----
+                  YASCard(
+                      title = "INTERACTIVE SHELL",
+                      subtitle = "ADB shell \u2013 USB debugging must be ON",
+                      accent = YasGreen
+                  ) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(8.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          YasTextField(
+                              value = shellCmd,
+                              onValueChange = { shellCmd = it },
+                              placeholder = "getprop ro.product.model",
+                              imeAction = ImeAction.Send,
+                              onImeAction = { if (!state.isBusy && shellCmd.isNotBlank()) onAdbShell(shellCmd) },
+                              modifier = Modifier.weight(1f)
+                          )
+                          YASButton(
+                              text = "Send",
+                              onClick = { onAdbShell(shellCmd) },
+                              enabled = !state.isBusy && shellCmd.isNotBlank(),
+                              kind = BtnKind.Primary,
+                              height = 52.dp
+                          )
+                      }
+                      Box(
                           modifier = Modifier
                               .fillMaxWidth()
-                              .background(accent.copy(alpha = 0.16f))
-                              .padding(horizontal = 12.dp, vertical = 10.dp),
-                          verticalArrangement = Arrangement.spacedBy(2.dp)
+                              .heightIn(min = 90.dp, max = 220.dp)
+                              .background(YasConsoleBg, YasCardShape)
+                              .border(1.dp, YasBorder, YasCardShape)
+                              .verticalScroll(rememberScrollState())
+                              .padding(10.dp)
                       ) {
-                          Text(title, fontSize = 14.sp, color = accent, fontWeight = FontWeight.ExtraBold)
-                          Text(subtitle, fontSize = 10.sp, color = YasMuted)
+                          SelectionContainer {
+                              Text(
+                                  text = state.adbShellOutput.ifBlank { "$ (no output yet)" },
+                                  color = if (state.adbShellOutput.isBlank()) YasMuted else Color(0xFFD0E1F9),
+                                  fontFamily = FontFamily.Monospace,
+                                  fontSize = 11.sp,
+                                  lineHeight = 14.sp
+                              )
+                          }
                       }
-                      Column(
-                          modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
-                          verticalArrangement = Arrangement.spacedBy(8.dp),
-                          content = content
+                      YASButton(
+                          text = "Copy output",
+                          onClick = { copyToClipboard(context, "Shell output", state.adbShellOutput) },
+                          enabled = state.adbShellOutput.isNotBlank(),
+                          kind = BtnKind.Tonal,
+                          height = 30.dp,
+                          fontSize = 11.sp,
+                          horizontalPad = 12.dp
                       )
                   }
               }
           }
 
           @Composable
+          private fun InfoCopyRow(label: String, value: String, context: Context) {
+              Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Column(modifier = Modifier.weight(1f)) {
+                      Text(label, fontSize = 10.sp, color = YasMuted)
+                      SelectionContainer {
+                          Text(
+                              value.ifBlank { "Not available" },
+                              fontSize = 15.sp,
+                              color = YasText,
+                              fontFamily = FontFamily.Monospace,
+                              fontWeight = FontWeight.Bold
+                          )
+                      }
+                  }
+                  YASButton(
+                      text = "Copy",
+                      onClick = { copyToClipboard(context, label, value) },
+                      enabled = value.isNotBlank(),
+                      kind = BtnKind.Tonal,
+                      height = 32.dp,
+                      fontSize = 12.sp,
+                      horizontalPad = 14.dp
+                  )
+              }
+          }
 
-          private fun TelemetryAndConsolePanel(
-              state: EdlUiState,
-              onClearLogs: () -> Unit,
-              showExpandToggle: Boolean = false,
-              expanded: Boolean = false,
-              onToggleExpanded: () -> Unit = {},
-              modifier: Modifier = Modifier
-          ) {
-              val logContext = LocalContext.current
-              val listState = rememberLazyListState()
-              LaunchedEffect(state.logs.size) {
-                  if (state.logs.isNotEmpty()) {
-                      listState.animateScrollToItem(state.logs.size - 1)
+          // =====================================================================================
+          //  Right-hand panel: device identity inspector
+          // =====================================================================================
+          private class IdRow(val label: String, val value: String, val copyable: Boolean)
+
+          private fun parseInfoLines(vararg texts: String): Map<String, String> {
+              val out = LinkedHashMap<String, String>()
+              for (t in texts) {
+                  for (raw in t.lineSequence()) {
+                      val i = raw.indexOf(':')
+                      if (i <= 0) continue
+                      val key = raw.substring(0, i).trim().lowercase()
+                      val v = raw.substring(i + 1).trim()
+                      if (v.isBlank() || v == "-" || v.equals("unknown", true) || v.startsWith("unavailable", true)) continue
+                      if (key !in out) out[key] = v
                   }
               }
+              return out
+          }
+
+          private fun buildIdentity(state: EdlUiState, mode: ConnMode): List<IdRow> {
+              if (mode == ConnMode.EDL) {
+                  val info = state.deviceInfo ?: return emptyList()
+                  return listOf(
+                      IdRow("Manufacturer", info.oemName, false),
+                      IdRow("Model / SoC", info.socName, false),
+                      IdRow("HWID", info.fullHwIdHex, true),
+                      IdRow("PK_HASH", info.pkHashHex, true),
+                      IdRow("Serial", info.serialHex, true)
+                  )
+              }
+              // ADB first (richer), then MTP/AT.
+              val kv = parseInfoLines(state.adbInfoText, state.mtpInfoText)
+              val maker = kv["manufacturer"]
+              val model = kv["model"]
+              val makerModel = when {
+                  model == null -> maker.orEmpty()
+                  maker != null && !model.startsWith(maker, ignoreCase = true) -> "$maker $model"
+                  else -> model
+              }
+              val ap = kv["version ap"] ?: kv["ap / pda"].orEmpty()
+              val csc = kv["version csc"] ?: kv["csc"] ?: kv["omc / csc"].orEmpty()
+              val baseband = kv["baseband"].orEmpty()
+              return listOf(
+                  IdRow("Manufacturer / Model", makerModel, false),
+                  IdRow("AP", ap, false),
+                  IdRow("CSC", csc, false),
+                  IdRow("Baseband", baseband, false),
+                  IdRow("Serial", state.infoSerial, true),
+                  IdRow("IMEI", state.infoImei, true)
+              )
+          }
+
+          @Composable
+          private fun DeviceInspector(
+              state: EdlUiState,
+              mode: ConnMode,
+              modifier: Modifier = Modifier,
+              showTitle: Boolean = true
+          ) {
+              val context = LocalContext.current
+              val rows = remember(
+                  mode, state.deviceInfo, state.adbInfoText, state.mtpInfoText, state.infoSerial, state.infoImei
+              ) { buildIdentity(state, mode) }
+
+              Surface(
+                  color = YasCardBg,
+                  shape = YasCardShape,
+                  modifier = modifier.border(1.dp, YasBorder, YasCardShape)
+              ) {
+                  Column(
+                      modifier = Modifier
+                          .fillMaxSize()
+                          .verticalScroll(rememberScrollState())
+                          .padding(12.dp),
+                      verticalArrangement = Arrangement.spacedBy(2.dp)
+                  ) {
+                      if (showTitle) {
+                          Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              verticalAlignment = Alignment.CenterVertically,
+                              horizontalArrangement = Arrangement.SpaceBetween
+                          ) {
+                              Text("DEVICE IDENTITY", fontSize = 11.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                              StatusBadge(text = mode.label, color = mode.color, pulse = mode != ConnMode.NONE, dot = false)
+                          }
+                      }
+                      if (rows.isEmpty() || rows.all { it.value.isBlank() }) {
+                          Text(
+                              text = when (mode) {
+                                  ConnMode.EDL -> "Tap 'HWID / PK_HASH' in the Read GPT tab to read the chip identity."
+                                  ConnMode.NONE -> "No device connected."
+                                  else -> "Use 'Read Info' in the MTP / ADB tab to read the device identity."
+                              },
+                              fontSize = 11.sp,
+                              color = YasMuted
+                          )
+                      } else {
+                          rows.forEachIndexed { i, row -> IdentityRow(row, context, i % 2 == 0) }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          private fun KeyValueRow(label: String, value: String, copyable: Boolean, context: Context, zebra: Boolean) {
+              val shown = value.replace("\n", " / ").ifBlank { "\u2014" }
+              Row(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .background(if (zebra) YasCardBgAlt else Color.Transparent, YasChipShape)
+                      .padding(horizontal = 8.dp, vertical = 5.dp),
+                  verticalAlignment = Alignment.CenterVertically,
+                  horizontalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  Text(
+                      label.uppercase(),
+                      fontSize = 9.sp,
+                      color = YasMuted,
+                      fontWeight = FontWeight.Bold,
+                      letterSpacing = 0.5.sp,
+                      maxLines = 2,
+                      modifier = Modifier.width(96.dp)
+                  )
+                  SelectionContainer(modifier = Modifier.weight(1f)) {
+                      Text(
+                          shown,
+                          fontSize = 11.sp,
+                          color = if (value.isBlank()) YasMuted else YasText,
+                          fontFamily = FontFamily.Monospace,
+                          maxLines = 3,
+                          overflow = TextOverflow.Ellipsis
+                      )
+                  }
+                  if (copyable && value.isNotBlank()) {
+                      Text(
+                          "COPY",
+                          fontSize = 9.sp,
+                          color = YasCyan,
+                          fontWeight = FontWeight.ExtraBold,
+                          modifier = Modifier
+                              .border(1.dp, YasBorder, YasChipShape)
+                              .clickable { copyToClipboard(context, label, value) }
+                              .padding(horizontal = 6.dp, vertical = 3.dp)
+                      )
+                  }
+              }
+          }
+
+          @Composable
+          private fun IdentityRow(row: IdRow, context: Context, zebra: Boolean) =
+              KeyValueRow(row.label, row.value, row.copyable, context, zebra)
+
+          /** Turns "Key: value" report text into an inspector grid with section headers. */
+          @Composable
+          private fun InfoGrid(title: String, text: String, context: Context) {
+              if (text.isBlank()) return
+              val entries = remember(text) {
+                  text.lines().mapNotNull { raw ->
+                      val line = raw.trim()
+                      when {
+                          line.isEmpty() -> null
+                          line.startsWith("---") && line.endsWith("---") -> "#" to line.trim('-', ' ')
+                          line.startsWith("[") && line.endsWith("]") -> "#" to line.trim('[', ']', ' ')
+                          line.indexOf(':') in 1..40 -> line.substringBefore(':').trim() to line.substringAfter(':').trim()
+                          else -> "" to line
+                      }
+                  }
+              }
+              Column(
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .background(YasCardBg, YasCardShape)
+                      .border(1.dp, YasBorder, YasCardShape)
+                      .padding(8.dp),
+                  verticalArrangement = Arrangement.spacedBy(1.dp)
+              ) {
+                  Row(
+                      modifier = Modifier.fillMaxWidth().padding(bottom = 4.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
+                  ) {
+                      Text(title.uppercase(), fontSize = 10.sp, color = YasText, fontWeight = FontWeight.Bold, letterSpacing = 0.6.sp)
+                      YASButton(
+                          text = "Copy all",
+                          onClick = { copyToClipboard(context, title, text) },
+                          kind = BtnKind.Tonal,
+                          height = 26.dp,
+                          fontSize = 10.sp,
+                          horizontalPad = 10.dp
+                      )
+                  }
+                  var zebra = false
+                  entries.forEach { (k, v) ->
+                      if (k == "#") {
+                          Text(
+                              v.uppercase(),
+                              fontSize = 9.sp,
+                              color = YasCyan,
+                              fontWeight = FontWeight.ExtraBold,
+                              letterSpacing = 0.8.sp,
+                              modifier = Modifier.padding(start = 8.dp, top = 8.dp, bottom = 2.dp)
+                          )
+                          zebra = false
+                      } else {
+                          KeyValueRow(k, v, copyable = k.isNotEmpty(), context = context, zebra = zebra)
+                          zebra = !zebra
+                      }
+                  }
+              }
+          }
+
+          // =====================================================================================
+          //  Right-hand panel: console terminal
+          // =====================================================================================
+          @Composable
+          private fun ConsolePanel(
+              state: EdlUiState,
+              onClearLogs: () -> Unit,
+              modifier: Modifier = Modifier,
+              expanded: Boolean? = null,
+              onToggleExpanded: () -> Unit = {}
+          ) {
+              val context = LocalContext.current
+              val listState = rememberLazyListState()
+              LaunchedEffect(state.logs.size) {
+                  if (state.logs.isNotEmpty()) listState.animateScrollToItem(state.logs.size - 1)
+              }
+              val shape = YasCardShape
 
               Column(
                   modifier = modifier
-                      .background(YasDarkBg)
-                      .padding(8.dp),
-                  verticalArrangement = Arrangement.spacedBy(4.dp)
+                      .background(YasConsoleBg, shape)
+                      .border(1.dp, YasBorder, shape)
               ) {
                   Row(
-                      modifier = Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.SpaceBetween,
-                      verticalAlignment = Alignment.CenterVertically
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(horizontal = 10.dp, vertical = 6.dp),
+                      verticalAlignment = Alignment.CenterVertically,
+                      horizontalArrangement = Arrangement.SpaceBetween
                   ) {
-                      Text(
-                          text = "Task: ${state.currentTask}",
-                          fontSize = 12.sp,
-                          color = YasCyan,
-                          fontWeight = FontWeight.SemiBold
-                      )
-                      Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                          Text(
-                              text = String.format("%.2f MB/s | %d%%", state.transferSpeedMbps, (state.progress * 100).toInt()),
-                              fontSize = 12.sp,
-                              color = YasOrange,
-                              fontFamily = FontFamily.Monospace
-                          )
-                          if (showExpandToggle) {
+                      Text("CONSOLE", fontSize = 11.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                      Row(horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                          if (expanded != null) {
                               Text(
-                                  text = if (expanded) "\u25bc Collapse" else "\u25b2 Expand",
-                                  fontSize = 11.sp,
-                                  color = YasCyan,
-                                  fontWeight = FontWeight.SemiBold,
+                                  if (expanded) "\u25BC Collapse" else "\u25B2 Expand",
+                                  fontSize = 11.sp, color = YasCyan, fontWeight = FontWeight.SemiBold,
                                   modifier = Modifier.clickable { onToggleExpanded() }
                               )
                           }
                           Text(
-                              text = "Copy",
-                              fontSize = 11.sp,
-                              color = YasCyan,
-                              fontWeight = FontWeight.SemiBold,
-                              modifier = Modifier.clickable { copyToClipboard(logContext, "Log", state.logs.joinToString("\n")) }
+                              "Copy", fontSize = 11.sp, color = YasCyan, fontWeight = FontWeight.SemiBold,
+                              modifier = Modifier.clickable { copyToClipboard(context, "Log", state.logs.joinToString("\n")) }
                           )
                           Text(
-                              text = "Clear",
-                              fontSize = 11.sp,
-                              color = Color.Gray,
+                              "Clear", fontSize = 11.sp, color = YasMuted,
                               modifier = Modifier.clickable { onClearLogs() }
                           )
                       }
                   }
-
-                  LinearProgressIndicator(
-                      progress = { state.progress },
-                      color = YasCyan,
-                      trackColor = YasBorder,
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .height(6.dp)
-                  )
+                  HorizontalDivider(color = YasBorder, thickness = 1.dp)
 
                   LazyColumn(
                       state = listState,
                       modifier = Modifier
-                          .fillMaxSize()
-                          .background(YasCardBg, RoundedCornerShape(10.dp))
-                          .border(1.dp, YasBorder, RoundedCornerShape(10.dp))
-                          .padding(6.dp)
+                          .weight(1f)
+                          .fillMaxWidth()
+                          .padding(horizontal = 10.dp, vertical = 4.dp)
                   ) {
                       items(state.logs) { line ->
                           val isOperationLine = line.contains("Operation completed successfully") ||
@@ -7016,49 +7715,70 @@ jobs:
                               color = color,
                               fontFamily = FontFamily.Monospace,
                               fontSize = 11.sp,
-                              fontWeight = if (isOperationLine) FontWeight.Bold else FontWeight.Normal,
-                              lineHeight = 14.sp
+                              lineHeight = 14.sp,
+                              fontWeight = if (isOperationLine) FontWeight.Bold else FontWeight.Normal
+                          )
+                      }
+                  }
+
+                  // Fixed footer: task, progress, speed
+                  HorizontalDivider(color = YasBorder, thickness = 1.dp)
+                  Column(
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .padding(horizontal = 10.dp, vertical = 8.dp),
+                      verticalArrangement = Arrangement.spacedBy(5.dp)
+                  ) {
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          verticalAlignment = Alignment.CenterVertically,
+                          horizontalArrangement = Arrangement.spacedBy(8.dp)
+                      ) {
+                          Text(
+                              "Task: ${state.currentTask}",
+                              fontSize = 12.sp,
+                              color = YasCyan,
+                              fontWeight = FontWeight.SemiBold,
+                              maxLines = 1,
+                              overflow = TextOverflow.Ellipsis,
+                              modifier = Modifier.weight(1f)
+                          )
+                          StatusBadge(
+                              text = if (state.isBusy) "Busy" else "Ready",
+                              color = if (state.isBusy) YasOrange else YasGreen,
+                              pulse = state.isBusy
+                          )
+                      }
+                      LinearProgressIndicator(
+                          progress = { state.progress.coerceIn(0f, 1f) },
+                          color = YasCyan,
+                          trackColor = YasBorder,
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .height(6.dp)
+                      )
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                          Text(
+                              "${(state.progress * 100).toInt()}%",
+                              fontSize = 11.sp, color = YasText, fontFamily = FontFamily.Monospace
+                          )
+                          Text(
+                              String.format("%.2f MB/s", state.transferSpeedMbps),
+                              fontSize = 11.sp, color = YasOrange, fontFamily = FontFamily.Monospace
                           )
                       }
                   }
               }
           }
 
+          // =====================================================================================
+          //  Helpers
+          // =====================================================================================
           private fun copyToClipboard(context: Context, label: String, text: String) {
               if (text.isBlank()) return
               val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
               cm.setPrimaryClip(ClipData.newPlainText(label, text))
               Toast.makeText(context, "Copied: $label", Toast.LENGTH_SHORT).show()
-          }
-
-          @Composable
-          private fun InfoCopyRow(label: String, value: String, context: Context) {
-              Row(
-                  modifier = Modifier.fillMaxWidth(),
-                  horizontalArrangement = Arrangement.SpaceBetween,
-                  verticalAlignment = Alignment.CenterVertically
-              ) {
-                  Column(modifier = Modifier.weight(1f)) {
-                      Text(label, fontSize = 10.sp, color = YasMuted)
-                      SelectionContainer {
-                          Text(
-                              value.ifBlank { "Not available" },
-                              fontSize = 15.sp,
-                              color = Color.White,
-                              fontFamily = FontFamily.Monospace,
-                              fontWeight = FontWeight.Bold
-                          )
-                      }
-                  }
-                  OutlinedButton(
-                      onClick = { copyToClipboard(context, label, value) },
-                      enabled = value.isNotBlank(),
-                      contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
-                      modifier = Modifier.height(34.dp)
-                  ) {
-                      Text("Copy", fontSize = 12.sp, color = YasCyan)
-                  }
-              }
           }
 
           private fun formatSize(bytes: Long): String {
