@@ -5472,61 +5472,8 @@ jobs:
                   else appendLog("Reboot NOT confirmed. Use 'ADB -> Reboot' if USB debugging is on.")
               }
 
-              /** Runs the Samsung serial-number rewrite sequence over the modem port (MTP mode). */
-              fun atChangeSerial(newSerial: String) {
-                  val sn = newSerial.trim().uppercase()
-                  if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
-                      appendLog("ERROR: invalid serial. It must be exactly 11 letters/digits (e.g. R95R6043KBJ).")
-                      return
-                  }
-                  runTask("AT Change Serial (MTP)") {
-                      val devices = MtpInfoReader.findMtpDevices(context)
-                      if (devices.isEmpty()) {
-                          appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
-                          return@runTask
-                      }
-                      appendLog("Writing serial $sn (5 steps, 1.2 s apart, no factory reset). Do NOT unplug the cable.")
-                      var ok = false
-                      for (dev in devices) {
-                          ok = runCatching { AtCommandTransport(context).use { it.changeSerialSequence(dev, sn) { m -> appendLog(m) } } }
-                              .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
-                          if (ok) break
-                      }
-                      if (ok) appendLog("Sequence finished. The device should restart; check the serial after boot.")
-                      else appendLog("Sequence did not complete cleanly. Review the replies above.")
-                  }
-              }
-
               fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->
                   at.tryRebootToDownloadMode(dev) { appendLog(it) }
-              }
-
-              /** Sends exactly one AT command the user typed in the "Custom AT Command" field, over
-               *  the modem/CDC port exposed while the phone is in MTP mode, and logs the raw reply.
-               *  This is a direct pass-through: the app does not interpret, validate, or pick the
-               *  command -- the user is responsible for what they type here. */
-              fun sendCustomAtCommand(command: String) {
-                  val cmd = command.trim()
-                  if (cmd.isEmpty()) return
-                  runTask("Custom AT Command (MTP)") {
-                      val devices = MtpInfoReader.findMtpDevices(context)
-                      if (devices.isEmpty()) {
-                          appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
-                          return@runTask
-                      }
-                      appendLog("Sending custom AT command: $cmd")
-                      var replied = false
-                      for (dev in devices) {
-                          val reply = runCatching {
-                              AtCommandTransport(context).use { it.sendCustom(dev, cmd) }
-                          }.getOrElse { e -> "AT error: ${e.message}" }
-                          if (reply.isNotBlank()) {
-                              appendLog("Reply: $reply")
-                              replied = true
-                          }
-                      }
-                      if (!replied) appendLog("No device answered this command on its modem port.")
-                  }
               }
 
               /** Connects over the standard ADB protocol (same handshake a PC's adb uses --
@@ -5801,8 +5748,6 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
-              onChangeSerialAt: (String) -> Unit,
-              onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -6062,8 +6007,6 @@ jobs:
                                   onReadMtpInfo = onReadMtpInfo,
                                   onMtpRebootAt = onMtpRebootAt,
                                   onMtpDownloadAt = onMtpDownloadAt,
-                                  onChangeSerialAt = onChangeSerialAt,
-                                  onSendCustomAt = onSendCustomAt,
                                   onReadAdbInfo = onReadAdbInfo,
                                   onAdbReboot = onAdbReboot,
                                   onAdbShell = onAdbShell
@@ -6779,8 +6722,6 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
-              onChangeSerialAt: (String) -> Unit,
-              onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -6792,35 +6733,7 @@ jobs:
                   verticalArrangement = Arrangement.spacedBy(8.dp)
               ) {
                   val infoContext = LocalContext.current
-                  var customAtCmd by remember { mutableStateOf("") }
                   var shellCmd by remember { mutableStateOf("") }
-                  var serialInput by remember { mutableStateOf("") }
-                  var showSerialConfirm by remember { mutableStateOf(false) }
-
-                  if (showSerialConfirm) {
-                      AlertDialog(
-                          onDismissRequest = { showSerialConfirm = false },
-                          title = { Text("Change serial number?", fontWeight = FontWeight.Bold) },
-                          text = {
-                              Text(
-                                  "New serial: ${serialInput.trim().uppercase()}\n\n" +
-                                  "The 5-step AT sequence will be sent (1.2 s between steps), then the phone is " +
-                                  "rebooted normally. No factory reset is sent, so your data is not wiped. " +
-                                  "Keep the cable connected until it reboots."
-                              )
-                          },
-                          confirmButton = {
-                              Button(
-                                  onClick = { showSerialConfirm = false; onChangeSerialAt(serialInput) },
-                                  colors = ButtonDefaults.buttonColors(containerColor = YasRed)
-                              ) { Text("Run sequence") }
-                          },
-                          dismissButton = {
-                              OutlinedButton(onClick = { showSerialConfirm = false }) { Text("Cancel") }
-                          }
-                      )
-                  }
-
                   // =====================================================================
                   //  SECTION 1 : MTP COMMANDS  (AT FIELD)  - no USB debugging needed
                   // =====================================================================
@@ -6851,63 +6764,6 @@ jobs:
                               contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                           ) { Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
                       }
-
-                      // --- Change serial number (6-step AT sequence) ---
-                      Text("CHANGE SERIAL NUMBER", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                      Row(
-                          modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(6.dp),
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          OutlinedTextField(
-                              value = serialInput,
-                              onValueChange = { serialInput = it.filter { c -> c.isLetterOrDigit() }.take(11).uppercase() },
-                              placeholder = { Text("Serial: exactly 11 chars (e.g. R95R6043KBJ)", fontSize = 12.sp) },
-                              supportingText = { Text("${serialInput.length}/11", fontSize = 10.sp, color = if (serialInput.length == 11) YasGreen else YasMuted) },
-                              singleLine = true,
-                              modifier = Modifier.weight(1f)
-                          )
-                          Button(
-                              onClick = { showSerialConfirm = true },
-                              enabled = !state.isBusy && serialInput.length == 11,
-                              colors = ButtonDefaults.buttonColors(containerColor = YasRed, contentColor = Color.Black),
-                              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
-                          ) { Text("Change SN", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                      }
-                      Text(
-                          "Sequence: AT+SWATD=0 > AT+ACTIVATE=0,0,0 > AT+SWATD=1 > AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5 > " +
-                          "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,<SN>, then a normal reboot. NO factory reset (1.2 s between steps).",
-                          fontSize = 10.sp,
-                          color = Color.Gray
-                      )
-
-                      // --- Custom AT field ---
-                      Text("CUSTOM AT FIELD", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                      Row(
-                          modifier = Modifier.fillMaxWidth(),
-                          horizontalArrangement = Arrangement.spacedBy(6.dp),
-                          verticalAlignment = Alignment.CenterVertically
-                      ) {
-                          OutlinedTextField(
-                              value = customAtCmd,
-                              onValueChange = { customAtCmd = it },
-                              placeholder = { Text("Custom AT command (e.g. AT+CGSN)", fontSize = 12.sp) },
-                              singleLine = true,
-                              modifier = Modifier.weight(1f)
-                          )
-                          Button(
-                              onClick = { onSendCustomAt(customAtCmd) },
-                              enabled = !state.isBusy && customAtCmd.isNotBlank(),
-                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-                          ) { Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                      }
-                      Text(
-                          "Sends exactly what you type to the modem port and shows the raw reply in the console. " +
-                          "You are responsible for any command you enter here.",
-                          fontSize = 10.sp,
-                          color = Color.Gray
-                      )
 
                       if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
                           Surface(
@@ -7377,8 +7233,6 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onMtpRebootAt = viewModel::atRebootDevice,
                               onMtpDownloadAt = viewModel::atToDownloadMode,
-                              onChangeSerialAt = viewModel::atChangeSerial,
-                              onSendCustomAt = viewModel::sendCustomAtCommand,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
                               onAdbShell = viewModel::runAdbShell
