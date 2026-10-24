@@ -84,7 +84,7 @@ data class EdlUiState(
     val currentTask: String = "Ready",
     val progress: Float = 0f,
     val transferSpeedMbps: Double = 0.0,
-    val logs: List<String> = listOf("Welcome to YAS SOFTWARE v4.0 (Embedded X216B Firmware + Samsung Odin)")
+    val logs: List<String> = listOf("YAS SOFTWARE v4.0")
 )
 
 class EdlViewModel(application: Application) : AndroidViewModel(application) {
@@ -184,9 +184,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             val status = EmbeddedFirmware.describeStatus(context)
             _uiState.update { it.copy(embeddedFirmwareReady = ready, embeddedFirmwareStatus = status) }
             if (ready) {
-                appendLog("Embedded X216B firmware detected in APK: $status")
+                appendLog("X216B firmware ready.")
             } else {
-                appendLog("WARNING: $status")
+                appendLog("WARNING: X216B firmware is not ready.")
             }
         }
     }
@@ -204,7 +204,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             val ready = T509Firmware.allPresent(context, variant)
             val status = T509Firmware.describeStatus(context, variant)
             _uiState.update { it.copy(t509Variant = variant, t509FirmwareReady = ready, t509FirmwareStatus = status) }
-            if (ready) appendLog("Embedded ${variant.label} firmware detected in APK: $status")
+            if (ready) appendLog("${variant.label} firmware ready.")
         }
     }
 
@@ -292,7 +292,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         runTask("T509 Format + FRP") {
             val variant = _uiState.value.t509Variant
             if (!T509Firmware.allPresent(context, variant)) {
-                throw IllegalStateException("Embedded ${variant.label} firmware missing: ${T509Firmware.describeStatus(context, variant)}")
+                throw IllegalStateException("${variant.label} firmware is not ready.")
             }
             if (!_uiState.value.t509BromConnected) {
                 val bromDevice = transport.findSprdBromDevice()
@@ -588,7 +588,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun bootFirehoseFromEmbeddedLoader() {
-        appendLog("Loading embedded ${EmbeddedFirmware.LOADER} from app assets (no manual pick needed)...")
+        appendLog("Loading loader...")
         val loaderBytes = EmbeddedFirmware.readAllBytes(context, EmbeddedFirmware.LOADER)
         bootFirehoseWithBytes(loaderBytes)
     }
@@ -625,7 +625,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             if (useEmbedded && !EmbeddedFirmware.allPresent(context)) {
                 throw IllegalStateException(
-                    "Embedded firmware missing from APK assets: ${EmbeddedFirmware.describeStatus(context)}"
+                    "Firmware is not ready."
                 )
             }
 
@@ -696,17 +696,17 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             appendLog("=== STEP 2: WRITING PARTITIONS (FRP, SEC_EFS, PERSISTENT) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
-                appendLog("Using EMBEDDED images bundled inside the APK (frp.bin, sec_efs.bin, persistent.bin) -- nothing to pick manually.")
+                appendLog("Writing firmware images...")
                 listOf(
-                    WriteJob("frp", setOf("frp"), EmbeddedFirmware.FRP,
+                    WriteJob("frp", setOf("frp"), "frp",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP)) {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP)
                     },
-                    WriteJob("sec_efs", setOf("sec_efs"), EmbeddedFirmware.SEC_EFS,
+                    WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS)) {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS)
                     },
-                    WriteJob("persistent", setOf("persistent", "persestent", "presistent"), EmbeddedFirmware.PERSISTENT,
+                    WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT)) {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT)
                     }
