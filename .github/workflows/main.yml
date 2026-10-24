@@ -1748,7 +1748,10 @@ jobs:
                   const val ACTION_AT_USB_PERMISSION = "com.yas.flashedl.AT_USB_PERMISSION"
                   // Classic Samsung modem command that forces an immediate reboot into
                   // Download (Odin) mode. A couple of baseband variants are tried too.
-                  val DOWNLOAD_MODE_COMMANDS = listOf("AT+DLOAD\r\n", "AT+SWITCH=DOWNLOAD\r\n")
+                  // AT+FUS? is the Samsung "firmware update service" switch; the others are older variants.
+                  val DOWNLOAD_MODE_COMMANDS = listOf("AT+FUS?\r\n", "AT+DLOAD\r\n", "AT+SWITCH=DOWNLOAD\r\n")
+                  // Standard 3GPP "full functionality + reset" command: restarts the device/modem.
+                  val REBOOT_COMMANDS = listOf("AT+CFUN=1,1\r\n")
                   private const val READ_BUF = 256
               }
 
@@ -1824,7 +1827,7 @@ jobs:
                * resets as part of the switch -- so a clean write with no reply is logged
                * as a plausible success too, not just an explicit reply.
                */
-              private suspend fun runAtSequence(device: UsbDevice, commands: List<String>, log: (String) -> Unit): Boolean {
+              private suspend fun runAtSequence(device: UsbDevice, commands: List<String>, log: (String) -> Unit, stopOnSuccess: Boolean = false): Boolean {
                   if (!ensurePermission(device)) {
                       log("USB permission denied for AT command interface.")
                       return false
@@ -1863,14 +1866,16 @@ jobs:
                           val read = conn.bulkTransfer(epIn, buf, buf.size, 1500)
                           if (read > 0) {
                               val reply = String(buf, 0, read, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim()
-                              val rejected = reply.contains("ERROR", ignoreCase = true)
+                              val rejected = reply.contains("ERROR", ignoreCase = true) || reply.contains("#NG#")
                               log("Interface ${intf.id}: reply '$reply'" + if (rejected) "  <- rejected by the device" else "")
                               if (!rejected && reply.contains("OK", ignoreCase = true)) anySuccess = true
+                              if (anySuccess && stopOnSuccess) break
                           } else {
                               log("Interface ${intf.id}: no reply (device may already be switching modes).")
                           }
                       }
                       conn.releaseInterface(intf)
+                      if (anySuccess && stopOnSuccess) break
                   }
 
                   conn.close()
@@ -1893,7 +1898,7 @@ jobs:
                               val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                               for (cmd in commands) {
                                   val reply = exchange(conn, epIn, epOut, cmd)
-                                  if (reply.isNotBlank() && !reply.contains("ERROR", ignoreCase = true)) result[cmd] = reply
+                                  if (reply.isNotBlank() && !reply.contains("ERROR", ignoreCase = true) && !reply.contains("#NG#")) result[cmd] = reply
                               }
                           } finally {
                               runCatching { conn.releaseInterface(intf) }
@@ -1906,34 +1911,49 @@ jobs:
                   return result
               }
 
+              private fun isAtTerminator(line: String): Boolean {
+                  val t = line.trim()
+                  return t == "OK" || t == "#OK#" || t == "ERROR" || t == "#NG#" || t == "NG" ||
+                      t.startsWith("+CME ERROR") || t.startsWith("+CMS ERROR")
+              }
+
               private fun exchange(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint, cmd: String): String {
+                  // Discard anything left over from a previous (slow) command so replies never shift by one.
                   val drain = ByteArray(READ_BUF)
-                  while (conn.bulkTransfer(epIn, drain, drain.size, 30) > 0) { /* discard stale bytes */ }
+                  while (conn.bulkTransfer(epIn, drain, drain.size, 120) > 0) { /* discard stale bytes */ }
                   val bytes = (cmd + "\r\n").toByteArray(Charsets.US_ASCII)
                   if (conn.bulkTransfer(epOut, bytes, bytes.size, 2000) < 0) return ""
                   val sb = StringBuilder()
                   val buf = ByteArray(1024)
                   var idle = 0
-                  while (idle < 2 && sb.length < 8192) {
+                  var gotData = false
+                  // Wait longer for the first byte (Samsung can be slow), shorter once data is flowing.
+                  while (sb.length < 8192) {
                       val n = conn.bulkTransfer(epIn, buf, buf.size, 600)
                       if (n > 0) {
                           sb.append(String(buf, 0, n, Charsets.US_ASCII))
+                          gotData = true
                           idle = 0
-                          val t = sb.toString().trimEnd()
-                          if (t.endsWith("OK") || t.endsWith("ERROR")) break
+                          val lastLine = sb.toString().replace("\r", "\n").lines().map { it.trim() }.lastOrNull { it.isNotEmpty() }.orEmpty()
+                          if (isAtTerminator(lastLine)) break
                       } else {
                           idle++
+                          if (idle >= (if (gotData) 2 else 3)) break
                       }
                   }
-                  return sb.toString().replace("\r", "\n").lines()
+                  val lines = sb.toString().replace("\r", "\n").lines()
                       .map { it.trim() }
-                      .filter { it.isNotEmpty() && !it.equals(cmd, ignoreCase = true) && it != "OK" }
-                      .joinToString("\n")
+                      .filter { it.isNotEmpty() && !it.equals(cmd, ignoreCase = true) && it != "OK" && it != "#OK#" }
+                  return lines.joinToString("\n")
               }
 
               /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
               suspend fun tryRebootToDownloadMode(device: UsbDevice, log: (String) -> Unit): Boolean =
-                  runAtSequence(device, DOWNLOAD_MODE_COMMANDS, log)
+                  runAtSequence(device, DOWNLOAD_MODE_COMMANDS, log, stopOnSuccess = true)
+
+              /** Reboots the device via [REBOOT_COMMANDS]. */
+              suspend fun tryReboot(device: UsbDevice, log: (String) -> Unit): Boolean =
+                  runAtSequence(device, REBOOT_COMMANDS, log, stopOnSuccess = true)
 
               override fun close() {
                   runCatching {
@@ -5131,39 +5151,73 @@ jobs:
                                           return ""
                                       }
                                       // Samsung AT+DEVCONINFO answers with KEY(value) pairs.
+                                      val devRaw = at["AT+DEVCONINFO"].orEmpty()
                                       val kv = LinkedHashMap<String, String>()
-                                      Regex("([A-Z0-9_]+)\\(([^)]*)\\)").findAll(at["AT+DEVCONINFO"].orEmpty())
-                                          .forEach { kv[it.groupValues[1]] = it.groupValues[2].trim() }
+                                      Regex("([A-Z0-9_]+)\\(([^)]*)\\)").findAll(devRaw)
+                                          .forEach { kv[it.groupValues[1]] = it.groupValues[2].replace(Regex("\\s+"), "").trim() }
 
                                       val found = LinkedHashSet<String>()
                                       kv["IMEI"]?.takeIf { it.length in 14..16 && it.all { c -> c.isDigit() } }?.let { found.add(it) }
                                       listOf("AT+CGSN", "AT+GSN", "AT+IMEINUM").forEach { k ->
                                           Regex("(?<![0-9])[0-9]{15}(?![0-9])").findAll(at[k].orEmpty()).forEach { found.add(it.value) }
                                       }
+                                      // Last resort: look for IMEI(...) anywhere in any reply (covers shifted/merged replies).
+                                      if (found.isEmpty()) {
+                                          Regex("IMEI\\(([0-9]{14,16})\\)").findAll(at.values.joinToString("\n"))
+                                              .forEach { found.add(it.groupValues[1]) }
+                                      }
                                       imeis.addAll(found)
                                       if (usbSerial.isBlank()) kv["SN"]?.takeIf { it.isNotBlank() }?.let { usbSerial = it }
 
                                       val sbAt = StringBuilder()
-                                      fun line(label: String, value: String) { if (value.isNotBlank()) sbAt.appendLine("$label: $value") }
-                                      line("Modem Manufacturer", v("AT+CGMI", "AT+GMI"))
-                                      line("Modem Model", v("AT+CGMM", "AT+GMM"))
-                                      line("Baseband / Firmware", v("AT+CGMR", "AT+GMR"))
+                                      fun line(label: String, value: String) {
+                                          if (value.isNotBlank() && value != "null" && value != "NA") sbAt.appendLine("$label: $value")
+                                      }
+                                      fun group(title: String) { if (sbAt.isNotEmpty()) sbAt.appendLine(); sbAt.appendLine("[$title]") }
+
+                                      group("Identity")
+                                      line("Model", kv["MN"].orEmpty().ifBlank { v("AT+CGMM", "AT+GMM") })
+                                      line("Base model", kv["BASE"].orEmpty().takeIf { it != "UNKNOWN" }.orEmpty())
+                                      line("Manufacturer", v("AT+CGMI", "AT+GMI"))
+                                      line("Serial", kv["SN"].orEmpty())
+                                      line("IMEI", found.joinToString(" / "))
+                                      line("Unique number", kv["UN"].orEmpty())
+                                      line("Phone number", kv["PN"].orEmpty())
+
+                                      group("Firmware")
+                                      fun versionLines(prefix: String, raw: String) {
+                                          val parts = raw.split("/").filter { it.isNotBlank() }
+                                          val names = listOf("AP", "CSC", "CP", "Build")
+                                          if (parts.size <= 1) { line(prefix, raw); return }
+                                          parts.forEachIndexed { i, part -> line("$prefix ${names.getOrElse(i) { "#${i + 1}" }}", part) }
+                                      }
+                                      versionLines("Version", kv["VER"].orEmpty())
+                                      if (kv["HIDVER"] != kv["VER"]) versionLines("Hidden", kv["HIDVER"].orEmpty())
+                                      line("Baseband", v("AT+CGMR", "AT+GMR"))
                                       line("Modem ID", v("ATI"))
                                       line("Capabilities", v("AT+GCAP"))
-                                      val devLabels = linkedMapOf(
-                                          "MN" to "Model Name", "BASE" to "Base Model", "VER" to "Version (AP/CP/CSC)",
-                                          "HIDVER" to "Hidden Version", "PRD" to "Product Code", "CC" to "Country Code",
-                                          "OMCCODE" to "OMC / CSC", "SN" to "Serial (SN)", "UN" to "Unique Number",
-                                          "PN" to "Phone Number", "MCC" to "MCC", "MNC" to "MNC", "AID" to "AID",
-                                          "CON" to "Connections", "LOCKINFO" to "Lock Info"
-                                      )
-                                      for ((k, label) in devLabels) line(label, kv[k].orEmpty())
-                                      kv.filterKeys { it !in devLabels && it != "IMEI" }.forEach { (k, value) -> line(k, value) }
+
+                                      group("Region")
+                                      line("Product code", kv["PRD"].orEmpty())
+                                      line("Country", kv["CC"].orEmpty())
+                                      line("OMC / CSC", kv["OMCCODE"].orEmpty())
+                                      line("MCC / MNC", listOf(kv["MCC"].orEmpty(), kv["MNC"].orEmpty()).filter { it.isNotBlank() }.joinToString(" / "))
+                                      line("AID", kv["AID"].orEmpty())
+
+                                      group("Status")
+                                      line("Connections", kv["CON"].orEmpty().replace(",", ", "))
+                                      line("Lock", kv["LOCK"].orEmpty())
+                                      line("Limit", kv["LIMIT"].orEmpty())
+                                      line("SDP", kv["SDP"].orEmpty())
+                                      line("Partitions (HVID)", kv["HVID"].orEmpty().replace(",", ", ").replace(":", " = "))
                                       line("Battery (+CBC)", v("AT+CBC"))
                                       line("Signal (+CSQ)", v("AT+CSQ"))
                                       line("Radio (+CFUN)", v("AT+CFUN?"))
-                                      line("SIM Status", v("AT+CPIN?"))
-                                      atText = sbAt.toString().trimEnd().ifBlank { "Modem answered but returned no readable info." }
+                                      line("SIM status", v("AT+CPIN?"))
+                                      val shown = setOf("MN","BASE","SN","UN","PN","VER","HIDVER","PRD","CC","OMCCODE","MCC","MNC","AID","CON","LOCK","LIMIT","SDP","HVID","IMEI")
+                                      val extra = kv.filterKeys { it !in shown }
+                                      if (extra.isNotEmpty()) { group("Other"); extra.forEach { (k, value) -> line(k, value) } }
+                                      atText = sbAt.toString().replace(Regex("\\[[A-Za-z ]+\\]\\n(?=\\n|\\[|$)"), "").replace(Regex("\\n{3,}"), "\n\n").trim().ifBlank { "Modem answered but returned no readable info." }
                                   }
                               }
                               if (usbSerial.isNotBlank()) serial = usbSerial
@@ -5186,6 +5240,41 @@ jobs:
                           _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
                       }
                   }
+              }
+
+              /** Sends a mode-switch AT command (reboot / Download Mode) over the phone's modem port
+               *  while it is in MTP mode. No ADB needed. */
+              private fun runAtModeAction(title: String, label: String, send: suspend (AtCommandTransport, UsbDevice) -> Boolean) {
+                  runTask(title) {
+                      val devices = MtpInfoReader.findMtpDevices(context)
+                      if (devices.isEmpty()) {
+                          appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                          return@runTask
+                      }
+                      var done = false
+                      for (dev in devices) {
+                          val ok = runCatching {
+                              AtCommandTransport(context).use { send(it, dev) }
+                          }.getOrElse { e ->
+                              appendLog("AT error: ${e.message}")
+                              false
+                          }
+                          if (ok) { done = true; break }
+                      }
+                      if (done) {
+                          appendLog("AT command accepted. The device should switch to $label shortly.")
+                      } else {
+                          appendLog("The device did not confirm. It may still be switching; if nothing happens, this USB mode has no AT port (on some Samsung phones: *#0808# -> pick a mode with MODEM).")
+                      }
+                  }
+              }
+
+              fun atRebootDevice() = runAtModeAction("AT Reboot (MTP)", "reboot") { at, dev ->
+                  at.tryReboot(dev) { appendLog(it) }
+              }
+
+              fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->
+                  at.tryRebootToDownloadMode(dev) { appendLog(it) }
               }
 
               /** Connects over the standard ADB protocol (same handshake a PC's adb uses --
@@ -5459,6 +5548,8 @@ jobs:
               onToggleOdinAutoReboot: (Boolean) -> Unit,
               onExitDownloadMode: () -> Unit,
               onReadMtpInfo: () -> Unit,
+              onMtpRebootAt: () -> Unit,
+              onMtpDownloadAt: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -5715,6 +5806,8 @@ jobs:
                               4 -> AdbMtpTab(
                                   state = state,
                                   onReadMtpInfo = onReadMtpInfo,
+                                  onMtpRebootAt = onMtpRebootAt,
+                                  onMtpDownloadAt = onMtpDownloadAt,
                                   onReadAdbInfo = onReadAdbInfo,
                                   onAdbReboot = onAdbReboot,
                                   onAdbShell = onAdbShell
@@ -6416,6 +6509,8 @@ jobs:
           private fun AdbMtpTab(
               state: EdlUiState,
               onReadMtpInfo: () -> Unit,
+              onMtpRebootAt: () -> Unit,
+              onMtpDownloadAt: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -6434,7 +6529,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read MTP + AT (IMEI)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Info MTP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
@@ -6473,6 +6568,26 @@ jobs:
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
                           Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Button(
+                          onClick = onMtpDownloadAt,
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      OutlinedButton(
+                          onClick = onMtpRebootAt,
+                          enabled = !state.isBusy,
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
                   }
 
@@ -6884,6 +6999,8 @@ jobs:
                               onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
                               onExitDownloadMode = viewModel::exitDownloadMode,
                               onReadMtpInfo = viewModel::readMtpInfo,
+                              onMtpRebootAt = viewModel::atRebootDevice,
+                              onMtpDownloadAt = viewModel::atToDownloadMode,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
                               onAdbShell = viewModel::runAdbShell
