@@ -1800,7 +1800,13 @@ jobs:
                       val eps = (0 until intf.endpointCount).map { intf.getEndpoint(it) }
                       val hasBulkPair = eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN } &&
                           eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT }
-                      looksSerial && hasBulkPair
+                      // Never talk AT to the ADB interface (class FF/42/01) or the MTP interface:
+                      // text written there is read as ADB/MTP protocol data and can upset them.
+                      val isAdb = intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC &&
+                          intf.interfaceSubclass == 0x42 && intf.interfaceProtocol == 0x01
+                      val isMtp = intf.interfaceClass == 6 ||
+                          (intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC && intf.interfaceSubclass == 0xFF)
+                      looksSerial && hasBulkPair && !isAdb && !isMtp
                   }
 
               private fun bulkIn(intf: UsbInterface) =
@@ -1859,7 +1865,7 @@ jobs:
                               val reply = String(buf, 0, read, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim()
                               val rejected = reply.contains("ERROR", ignoreCase = true)
                               log("Interface ${intf.id}: reply '$reply'" + if (rejected) "  <- rejected by the device" else "")
-                              if (!rejected) anySuccess = true
+                              if (!rejected && reply.contains("OK", ignoreCase = true)) anySuccess = true
                           } else {
                               log("Interface ${intf.id}: no reply (device may already be switching modes).")
                           }
@@ -3854,7 +3860,6 @@ jobs:
           import com.edl.flasher.protocol.*
           import android.content.Context
           import android.hardware.usb.UsbManager
-          import com.edl.flasher.usb.AtCommandTransport
           import com.edl.flasher.usb.MtpDeviceInfoReader
           import com.edl.flasher.usb.EdlUsbTransport
           import kotlinx.coroutines.Dispatchers
@@ -3937,7 +3942,6 @@ jobs:
               private val odin = OdinProtocol(transport, ::appendLog)
               @Volatile private var quietInfoRead = false
               private val adbClient = AdbClient(context) { msg -> if (!quietInfoRead) appendLog(msg) }
-              private val atCommandTransport = AtCommandTransport(context)
 
               private val _uiState = MutableStateFlow(EdlUiState())
               val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -5002,7 +5006,17 @@ jobs:
               }
 
               /** Reads descriptor-level info (VID/PID, manufacturer, product, serial) from a
-               *  device currently connected in MTP / File Transfer mode. No ADB needed. */
+               *  device currently connected in MTP / File Transfer mode. No ADB needed.
+               *
+               *  IMEI is never read here: MTP/File-Transfer mode has no reliable way to get it
+               *  (the modem AT port most phones expose is not guaranteed to answer, and guessing
+               *  wrong is worse than saying nothing), so use the "Read Full Device Info" (ADB)
+               *  button instead -- IMEI there comes straight from the telephony service.
+               *
+               *  The serial shown here is always the device's own USB serial-number descriptor
+               *  (the same string adb/fastboot report). The MTP GetDeviceInfo "serial" field is
+               *  a separate, vendor-specific value that does not match the real device serial on
+               *  many Samsung phones, so it is read for logging only and never used to replace it. */
               fun readMtpInfo() {
                   runTask("Reading MTP Device Info") {
                       // Information reads are silent on purpose: the result goes to the Device Info panel only.
@@ -5018,7 +5032,6 @@ jobs:
                               return@runTask
                           }
                           val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-                          var imei = ""
                           var serial = ""
                           val sections = ArrayList<String>()
                           for (dev in devices) {
@@ -5027,12 +5040,9 @@ jobs:
                               var model = ""
                               var maker = ""
                               var firmware = ""
-                              var modemFw = ""
-                              var verAll = ""
-                              var base = ""
-                              var lockState = ""
                               var usbSerial = ""
                               if (granted) {
+                                  // Real device serial (USB serial-number descriptor) -- the source of truth.
                                   usbSerial = runCatching { dev.serialNumber }.getOrNull().orEmpty()
                                   maker = runCatching { dev.manufacturerName }.getOrNull().orEmpty()
                                   model = runCatching { dev.productName }.getOrNull().orEmpty()
@@ -5041,46 +5051,25 @@ jobs:
                                       if (mtp.manufacturer.isNotBlank()) maker = mtp.manufacturer
                                       if (mtp.model.isNotBlank()) model = mtp.model
                                       firmware = mtp.deviceVersion
-                                      if (mtp.serial.isNotBlank()) usbSerial = mtp.serial
+                                      // NOTE: mtp.serial is intentionally NOT used to overwrite usbSerial --
+                                      // on many Samsung devices it is a different, vendor-specific value,
+                                      // not the real serial number.
+                                      if (usbSerial.isBlank() && mtp.serial.isNotBlank()) usbSerial = mtp.serial
                                   }
-                                  val at = runCatching {
-                                      atCommandTransport.queryReadOnly(
-                                          dev, listOf("AT+DEVCONINFO", "AT+CGSN", "AT+CGMR", "AT+GMR")
-                                      )
-                                  }.getOrDefault(emptyMap())
-                                  val fields = HashMap<String, String>()
-                                  Regex("""([A-Z]+)\(([^)]*)\)""").findAll(at["AT+DEVCONINFO"].orEmpty()).forEach { m ->
-                                      fields[m.groupValues[1]] = m.groupValues[2]
-                                  }
-                                  fun digits(s: String?) = s.orEmpty().filter { it.isDigit() }
-                                  val imeiCandidate = listOf(digits(fields["IMEI"]), digits(at["AT+CGSN"]))
-                                      .firstOrNull { it.length in 14..17 }
-                                  if (imeiCandidate != null) imei = imeiCandidate
-                                  fields["SN"]?.takeIf { it.isNotBlank() }?.let { usbSerial = it }
-                                  fields["MN"]?.takeIf { it.isNotBlank() }?.let { if (model.isBlank()) model = it }
-                                  verAll = fields["VER"].orEmpty()
-                                  base = fields["BASE"].orEmpty()
-                                  lockState = fields["LOCK"].orEmpty()
-                                  modemFw = (at["AT+CGMR"] ?: at["AT+GMR"]).orEmpty().lines().firstOrNull().orEmpty()
                               }
                               if (usbSerial.isNotBlank()) serial = usbSerial
                               sb.appendLine("Manufacturer: ${maker.ifBlank { "Unknown" }}")
                               sb.appendLine("Model: ${model.ifBlank { "Unknown" }}")
-                              sb.appendLine("IMEI: ${imei.ifBlank { "Not available (no AT port answer, or Wi-Fi only)" }}")
                               sb.appendLine("Serial (SN): ${usbSerial.ifBlank { "Unavailable" }}")
                               sb.appendLine("--- Firmware ---")
                               sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
-                              if (verAll.isNotBlank()) sb.appendLine("AP / CP / CSC: $verAll")
-                              if (base.isNotBlank()) sb.appendLine("Base: $base")
-                              if (modemFw.isNotBlank()) sb.appendLine("Modem: $modemFw")
-                              if (lockState.isNotBlank()) sb.appendLine("Lock: $lockState")
                               sb.appendLine("--- USB ---")
                               sb.append(MtpInfoReader.describe(context, dev).trimEnd())
-                              if (!granted) sb.append("\nUSB permission was not granted, so IMEI / firmware could not be read.")
+                              if (!granted) sb.append("\nUSB permission was not granted, so the serial / firmware could not be read.")
                               sections.add(sb.toString())
                           }
                           _uiState.update {
-                              it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = imei, infoSerial = serial)
+                              it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = "", infoSerial = serial)
                           }
                       } catch (e: Exception) {
                           _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
@@ -5224,28 +5213,6 @@ jobs:
                   }
               }
 
-              /** Forces Download Mode via AT commands sent straight to the USB modem/serial
-               *  interface, without needing ADB or the physical button combo. Works only if
-               *  the attached device currently exposes an AT-capable interface. */
-              fun rebootViaAtCommand() {
-                  runTask("AT Command -> Download Mode") {
-                      val device = transport.listDevices().firstOrNull()
-                      if (device == null) {
-                          appendLog("ERROR: no USB device attached to send AT commands to.")
-                          return@runTask
-                      }
-                      appendLog(
-                          "Sending AT command(s) to force Download Mode " +
-                              "(VID=0x${device.vendorId.toString(16)}, PID=0x${device.productId.toString(16)})..."
-                      )
-                      val ok = atCommandTransport.tryRebootToDownloadMode(device, ::appendLog)
-                      appendLog(
-                          if (ok) "AT command accepted -- watch for the device to re-enumerate in Download Mode."
-                          else "This device does not support the 'AT -> Download Mode' method. Use the key combo, or enable USB debugging and use 'ADB -> Download'."
-                      )
-                  }
-              }
-
               private fun updateProgress(doneBytes: Long, totalBytes: Long, startTimeNs: Long) {
                   if (totalBytes <= 0L) return
                   val elapsedSec = ((System.nanoTime() - startTimeNs) / 1_000_000_000.0).coerceAtLeast(0.001)
@@ -5280,7 +5247,6 @@ jobs:
                   transport.unregisterDetachListener()
                   transport.close()
                   adbClient.close()
-                  atCommandTransport.close()
               }
           }
           EOF
@@ -5375,8 +5341,6 @@ jobs:
               onPickCpTar: () -> Unit,
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
-              onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
-              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -5384,8 +5348,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit,
-              onAtDownloadMode: () -> Unit
+              onAdbShell: (String) -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
               val tabs = listOf("1. X216B Service", "2. Read GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
@@ -5631,8 +5594,6 @@ jobs:
                                   onPickCpTar = onPickCpTar,
                                   onPickCscTar = onPickCscTar,
                                   onPickUserdataTar = onPickUserdataTar,
-                                  onToggleSkipSystemFilesInUserdataTar = onToggleSkipSystemFilesInUserdataTar,
-                                  onToggleAllowSmallUserdata = onToggleAllowSmallUserdata,
                                   onRunOdinFlash = onRunOdinFlash,
                                   onFlashUserdataOnly = onFlashUserdataOnly,
                                   onToggleOdinAutoReboot = onToggleOdinAutoReboot,
@@ -5643,8 +5604,7 @@ jobs:
                                   onReadMtpInfo = onReadMtpInfo,
                                   onReadAdbInfo = onReadAdbInfo,
                                   onAdbReboot = onAdbReboot,
-                                  onAdbShell = onAdbShell,
-                                  onAtDownloadMode = onAtDownloadMode
+                                  onAdbShell = onAdbShell
                               )
                           }
                   }
@@ -6166,8 +6126,6 @@ jobs:
               onPickCpTar: () -> Unit,
               onPickCscTar: () -> Unit,
               onPickUserdataTar: () -> Unit,
-              onToggleSkipSystemFilesInUserdataTar: (Boolean) -> Unit,
-              onToggleAllowSmallUserdata: (Boolean) -> Unit,
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
@@ -6256,46 +6214,6 @@ jobs:
                               Text(state.userdataTarName, fontSize = 11.sp, color = YasCyan, maxLines = 1, overflow = TextOverflow.Ellipsis)
                           }
 
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Column(modifier = Modifier.weight(1f)) {
-                                  Text("T505N: skip system files", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                  Text(
-                                      "Keep this enabled to flash only user data from userdata.tar and skip system/vendor files.",
-                                      fontSize = 10.sp,
-                                      color = Color.LightGray
-                                  )
-                              }
-                              Switch(
-                                  checked = state.skipSystemFilesInUserdataTar,
-                                  onCheckedChange = onToggleSkipSystemFilesInUserdataTar,
-                                  enabled = !state.isBusy
-                              )
-                          }
-
-                          Row(
-                              modifier = Modifier.fillMaxWidth(),
-                              horizontalArrangement = Arrangement.SpaceBetween,
-                              verticalAlignment = Alignment.CenterVertically
-                          ) {
-                              Column(modifier = Modifier.weight(1f)) {
-                                  Text("Quick format (small userdata.img)", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                                  Text(
-                                      "Allows a ~64 MB userdata.img (or .tar) to be written as-is. Storage shows smaller until a factory reset from Settings.",
-                                      fontSize = 10.sp,
-                                      color = Color.LightGray
-                                  )
-                              }
-                              Switch(
-                                  checked = state.allowSmallUserdata,
-                                  onCheckedChange = onToggleAllowSmallUserdata,
-                                  enabled = !state.isBusy
-                              )
-                          }
-
                           Button(
                               onClick = onFlashUserdataOnly,
                               enabled = !state.isBusy && state.userdataTarUri != null,
@@ -6375,8 +6293,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit,
-              onAtDownloadMode: () -> Unit
+              onAdbShell: (String) -> Unit
               ) {
               Column(
                   modifier = Modifier
@@ -6432,30 +6349,6 @@ jobs:
                       ) {
                           Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
-                  }
-
-                  Button(
-                      onClick = onAtDownloadMode,
-                      enabled = !state.isBusy,
-                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                      modifier = Modifier
-                          .fillMaxWidth()
-                          .height(44.dp)
-                  ) {
-                      Text("AT -> Download Mode (no ADB)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                  }
-                  Surface(
-                      color = YasCardBg,
-                      shape = RoundedCornerShape(8.dp),
-                      modifier = Modifier.fillMaxWidth()
-                  ) {
-                      Text(
-                          "Sends AT+DLOAD straight over the device's USB modem/serial interface -- no ADB or " +
-                              "button combo needed. Only works if the device currently exposes an AT-capable interface.",
-                          fontSize = 10.sp,
-                          color = Color.Gray,
-                          modifier = Modifier.padding(10.dp)
-                      )
                   }
 
                   val infoContext = LocalContext.current
@@ -6870,8 +6763,7 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
-                              onAdbShell = viewModel::runAdbShell,
-                              onAtDownloadMode = viewModel::rebootViaAtCommand
+                              onAdbShell = viewModel::runAdbShell
                           )
                       }
                   }
