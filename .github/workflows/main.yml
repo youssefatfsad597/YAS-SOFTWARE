@@ -1911,6 +1911,32 @@ jobs:
                   return result
               }
 
+              /** Sends exactly one AT command the caller supplies (used by the "Custom AT Command"
+               *  field). The full raw reply is returned as-is, including OK/ERROR/#NG#, so the caller
+               *  can judge success for itself -- nothing here assumes what the command does. */
+              suspend fun sendCustom(device: UsbDevice, command: String): String {
+                  val cmd = command.trim()
+                  if (cmd.isEmpty()) return ""
+                  if (!ensurePermission(device)) return "USB permission denied for AT command interface."
+                  val conn = usbManager.openDevice(device) ?: return "Could not open USB device for AT command."
+                  try {
+                      for (intf in candidateInterfaces(device)) {
+                          if (!conn.claimInterface(intf, true)) continue
+                          try {
+                              val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                              val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                              val reply = exchange(conn, epIn, epOut, cmd)
+                              if (reply.isNotBlank()) return reply
+                          } finally {
+                              runCatching { conn.releaseInterface(intf) }
+                          }
+                      }
+                  } finally {
+                      conn.close()
+                  }
+                  return "(no reply on any interface)"
+              }
+
               private fun isAtTerminator(line: String): Boolean {
                   val t = line.trim()
                   return t == "OK" || t == "#OK#" || t == "ERROR" || t == "#NG#" || t == "NG" ||
@@ -5299,6 +5325,34 @@ jobs:
                   at.tryRebootToDownloadMode(dev) { appendLog(it) }
               }
 
+              /** Sends exactly one AT command the user typed in the "Custom AT Command" field, over
+               *  the modem/CDC port exposed while the phone is in MTP mode, and logs the raw reply.
+               *  This is a direct pass-through: the app does not interpret, validate, or pick the
+               *  command -- the user is responsible for what they type here. */
+              fun sendCustomAtCommand(command: String) {
+                  val cmd = command.trim()
+                  if (cmd.isEmpty()) return
+                  runTask("Custom AT Command (MTP)") {
+                      val devices = MtpInfoReader.findMtpDevices(context)
+                      if (devices.isEmpty()) {
+                          appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                          return@runTask
+                      }
+                      appendLog("Sending custom AT command: $cmd")
+                      var replied = false
+                      for (dev in devices) {
+                          val reply = runCatching {
+                              AtCommandTransport(context).use { it.sendCustom(dev, cmd) }
+                          }.getOrElse { e -> "AT error: ${e.message}" }
+                          if (reply.isNotBlank()) {
+                              appendLog("Reply: $reply")
+                              replied = true
+                          }
+                      }
+                      if (!replied) appendLog("No device answered this command on its modem port.")
+                  }
+              }
+
               /** Connects over the standard ADB protocol (same handshake a PC's adb uses --
                *  the target still shows its normal "Allow USB debugging?" prompt on first use)
                *  and reads basic build/device properties via 'getprop'. */
@@ -5571,6 +5625,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
+              onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -5830,6 +5885,7 @@ jobs:
                                   onReadMtpInfo = onReadMtpInfo,
                                   onMtpRebootAt = onMtpRebootAt,
                                   onMtpDownloadAt = onMtpDownloadAt,
+                                  onSendCustomAt = onSendCustomAt,
                                   onReadAdbInfo = onReadAdbInfo,
                                   onAdbReboot = onAdbReboot,
                                   onAdbShell = onAdbShell
@@ -6545,6 +6601,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
+              onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
               onAdbShell: (String) -> Unit
@@ -6600,6 +6657,34 @@ jobs:
                       }
                   }
 
+                  var customAtCmd by remember { mutableStateOf("") }
+                  Row(
+                      modifier = Modifier.fillMaxWidth(),
+                      horizontalArrangement = Arrangement.spacedBy(6.dp),
+                      verticalAlignment = Alignment.CenterVertically
+                  ) {
+                      OutlinedTextField(
+                          value = customAtCmd,
+                          onValueChange = { customAtCmd = it },
+                          placeholder = { Text("Custom AT command (your own, e.g. AT+CGSN)", fontSize = 12.sp) },
+                          singleLine = true,
+                          modifier = Modifier.weight(1f)
+                      )
+                      Button(
+                          onClick = { onSendCustomAt(customAtCmd) },
+                          enabled = !state.isBusy && customAtCmd.isNotBlank(),
+                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                      ) {
+                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      }
+                  }
+                  Text(
+                      "Sends exactly what you type to the modem port in MTP mode and shows the raw reply in the console below. " +
+                      "You are responsible for any command you enter here.",
+                      fontSize = 10.sp,
+                      color = Color.Gray
+                  )
                   // ---- 3) ADB actions (USB debugging must be on) ----
                   Text("ADB  -  USB debugging must be on", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -7040,6 +7125,7 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onMtpRebootAt = viewModel::atRebootDevice,
                               onMtpDownloadAt = viewModel::atToDownloadMode,
+                              onSendCustomAt = viewModel::sendCustomAtCommand,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
                               onAdbShell = viewModel::runAdbShell
