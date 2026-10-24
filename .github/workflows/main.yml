@@ -2089,17 +2089,27 @@ jobs:
                   return false
               }
 
-              /** Samsung serial-number rewrite sequence (6 steps, 1.2 s apart). */
+              /** Samsung serial-number rewrite sequence (5 steps, NO factory reset), then a plain reboot. */
               suspend fun changeSerialSequence(device: UsbDevice, newSerial: String, log: (String) -> Unit): Boolean {
+                  fun snOf(raw: String) = Regex("SN\\(([^)]*)\\)").find(raw)?.groupValues?.get(1)?.trim().orEmpty()
+                  val before = snOf(queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty())
+                  log("Serial before: ${before.ifBlank { "(unreadable)" }}")
                   val cmds = listOf(
                       "AT+SWATD=0",
                       "AT+ACTIVATE=0,0,0",
                       "AT+SWATD=1",
                       "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5",
-                      "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,$newSerial",
-                      "AT+FACTORST=0,0"
+                      "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,$newSerial"
                   )
-                  return runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log)
+                  val ok = runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log)
+                  kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
+                  val after = snOf(queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty())
+                  log("Serial after write (before reboot): ${after.ifBlank { "(unreadable)" }}")
+                  if (after.equals(newSerial, true)) log("Serial matches the requested value.")
+                  else log("NOTE: the phone may only show the new serial after a reboot.")
+                  log("Rebooting normally (no factory reset)...")
+                  rebootVerified(device, log)
+                  return ok
               }
 
               /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
@@ -5475,7 +5485,7 @@ jobs:
                           appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
                           return@runTask
                       }
-                      appendLog("Writing serial $sn (6 steps, 1.2 s apart). Do NOT unplug the cable.")
+                      appendLog("Writing serial $sn (5 steps, 1.2 s apart, no factory reset). Do NOT unplug the cable.")
                       var ok = false
                       for (dev in devices) {
                           ok = runCatching { AtCommandTransport(context).use { it.changeSerialSequence(dev, sn) { m -> appendLog(m) } } }
@@ -6794,9 +6804,9 @@ jobs:
                           text = {
                               Text(
                                   "New serial: ${serialInput.trim().uppercase()}\n\n" +
-                                  "The 6-step AT sequence will be sent (1.2 s between steps). The last step " +
-                                  "(AT+FACTORST) makes the phone restart and, on some firmware, may also reset it " +
-                                  "to factory defaults - back up first and keep the cable connected until it reboots."
+                                  "The 5-step AT sequence will be sent (1.2 s between steps), then the phone is " +
+                                  "rebooted normally. No factory reset is sent, so your data is not wiped. " +
+                                  "Keep the cable connected until it reboots."
                               )
                           },
                           confirmButton = {
@@ -6866,7 +6876,7 @@ jobs:
                       }
                       Text(
                           "Sequence: AT+SWATD=0 > AT+ACTIVATE=0,0,0 > AT+SWATD=1 > AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5 > " +
-                          "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,<SN> > AT+FACTORST=0,0  (1.2 s between steps).",
+                          "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,<SN>, then a normal reboot. NO factory reset (1.2 s between steps).",
                           fontSize = 10.sp,
                           color = Color.Gray
                       )
