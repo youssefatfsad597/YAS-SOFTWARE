@@ -2606,6 +2606,123 @@ jobs:
           }
           EOF
 
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/usb/MtpDeviceInfoReader.kt
+          package com.edl.flasher.usb
+
+          import android.hardware.usb.UsbConstants
+          import android.hardware.usb.UsbDevice
+          import android.hardware.usb.UsbDeviceConnection
+          import android.hardware.usb.UsbEndpoint
+          import android.hardware.usb.UsbManager
+          import java.io.ByteArrayOutputStream
+          import java.nio.ByteBuffer
+          import java.nio.ByteOrder
+
+          /** Reads the standard MTP "GetDeviceInfo" dataset (manufacturer, model, firmware/device
+           *  version, serial) straight over USB. Read-only: no session is opened and nothing is written. */
+          object MtpDeviceInfoReader {
+
+              data class MtpInfo(
+                  val manufacturer: String,
+                  val model: String,
+                  val deviceVersion: String,
+                  val serial: String,
+                  val extensions: String
+              )
+
+              fun read(usbManager: UsbManager, dev: UsbDevice): MtpInfo? {
+                  if (!usbManager.hasPermission(dev)) return null
+                  for (i in 0 until dev.interfaceCount) {
+                      val intf = dev.getInterface(i)
+                      val looksMtp = intf.interfaceClass == 6 ||
+                          (intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC && intf.interfaceSubclass == 0xFF)
+                      if (!looksMtp) continue
+                      var epIn: UsbEndpoint? = null
+                      var epOut: UsbEndpoint? = null
+                      for (k in 0 until intf.endpointCount) {
+                          val ep = intf.getEndpoint(k)
+                          if (ep.type != UsbConstants.USB_ENDPOINT_XFER_BULK) continue
+                          if (ep.direction == UsbConstants.USB_DIR_IN) epIn = ep else epOut = ep
+                      }
+                      if (epIn == null || epOut == null) continue
+                      val conn = usbManager.openDevice(dev) ?: continue
+                      try {
+                          if (!conn.claimInterface(intf, true)) continue
+                          val info = getDeviceInfo(conn, epIn, epOut)
+                          if (info != null) return info
+                      } finally {
+                          runCatching { conn.releaseInterface(intf) }
+                          conn.close()
+                      }
+                  }
+                  return null
+              }
+
+              private fun getDeviceInfo(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint): MtpInfo? {
+                  val cmd = ByteBuffer.allocate(12).order(ByteOrder.LITTLE_ENDIAN)
+                  cmd.putInt(12)
+                  cmd.putShort(1)          // container type: command
+                  cmd.putShort(0x1001)     // GetDeviceInfo
+                  cmd.putInt(1)            // transaction id
+                  if (conn.bulkTransfer(epOut, cmd.array(), 12, 3000) < 0) return null
+
+                  val out = ByteArrayOutputStream()
+                  val buf = ByteArray(16384)
+                  var expected = -1
+                  var guard = 0
+                  while (guard++ < 64) {
+                      val n = conn.bulkTransfer(epIn, buf, buf.size, 3000)
+                      if (n <= 0) break
+                      out.write(buf, 0, n)
+                      if (expected < 0 && out.size() >= 4) {
+                          expected = ByteBuffer.wrap(out.toByteArray(), 0, 4).order(ByteOrder.LITTLE_ENDIAN).int
+                      }
+                      if (expected in 0..out.size()) break
+                  }
+                  // Consume the trailing response container so the interface is left clean.
+                  conn.bulkTransfer(epIn, buf, buf.size, 400)
+
+                  val data = out.toByteArray()
+                  if (data.size < 12) return null
+                  val bb = ByteBuffer.wrap(data).order(ByteOrder.LITTLE_ENDIAN)
+                  bb.position(4)
+                  val type = bb.short.toInt()
+                  val code = bb.short.toInt() and 0xFFFF
+                  if (type != 2 || code != 0x1001) return null
+                  bb.position(12)
+                  return try {
+                      bb.short                       // StandardVersion
+                      bb.int                         // VendorExtensionID
+                      bb.short                       // VendorExtensionVersion
+                      val ext = readString(bb)       // VendorExtensionDesc
+                      bb.short                       // FunctionalMode
+                      repeat(5) { skipArray16(bb) }  // operations, events, props, capture, playback formats
+                      val manufacturer = readString(bb)
+                      val model = readString(bb)
+                      val version = readString(bb)
+                      val serial = readString(bb)
+                      MtpInfo(manufacturer, model, version, serial, ext)
+                  } catch (e: Exception) {
+                      null
+                  }
+              }
+
+              private fun skipArray16(bb: ByteBuffer) {
+                  val count = bb.int
+                  if (count < 0 || count * 2 > bb.remaining()) throw IllegalStateException("bad array")
+                  bb.position(bb.position() + count * 2)
+              }
+
+              private fun readString(bb: ByteBuffer): String {
+                  val chars = bb.get().toInt() and 0xFF
+                  if (chars == 0) return ""
+                  val sb = StringBuilder()
+                  repeat(chars) { sb.append(bb.short.toInt().toChar()) }
+                  return sb.toString().trimEnd('\u0000').trim()
+              }
+          }
+          EOF
+
           cat << 'EOF' > app/src/main/java/com/edl/flasher/usb/AtCommandTransport.kt
           package com.edl.flasher.usb
 
@@ -2746,9 +2863,10 @@ jobs:
                           val buf = ByteArray(READ_BUF)
                           val read = conn.bulkTransfer(epIn, buf, buf.size, 1500)
                           if (read > 0) {
-                              val reply = String(buf, 0, read, Charsets.US_ASCII).trim()
-                              log("Interface ${intf.id}: reply '$reply'")
-                              anySuccess = true
+                              val reply = String(buf, 0, read, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim()
+                              val rejected = reply.contains("ERROR", ignoreCase = true)
+                              log("Interface ${intf.id}: reply '$reply'" + if (rejected) "  <- rejected by the device" else "")
+                              if (!rejected) anySuccess = true
                           } else {
                               log("Interface ${intf.id}: no reply (device may already be switching modes).")
                           }
@@ -2760,6 +2878,58 @@ jobs:
                   connection = null
                   claimedInterface = null
                   return anySuccess
+              }
+
+              /** Read-only AT queries (IMEI, firmware, serial). Returns command -> cleaned reply for the
+               *  first interface that answers at least one command; ERROR replies are dropped. */
+              suspend fun queryReadOnly(device: UsbDevice, commands: List<String>): Map<String, String> {
+                  val result = LinkedHashMap<String, String>()
+                  if (!ensurePermission(device)) return result
+                  val conn = usbManager.openDevice(device) ?: return result
+                  try {
+                      for (intf in candidateInterfaces(device)) {
+                          if (!conn.claimInterface(intf, true)) continue
+                          try {
+                              val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                              val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                              for (cmd in commands) {
+                                  val reply = exchange(conn, epIn, epOut, cmd)
+                                  if (reply.isNotBlank() && !reply.contains("ERROR", ignoreCase = true)) result[cmd] = reply
+                              }
+                          } finally {
+                              runCatching { conn.releaseInterface(intf) }
+                          }
+                          if (result.isNotEmpty()) break
+                      }
+                  } finally {
+                      conn.close()
+                  }
+                  return result
+              }
+
+              private fun exchange(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint, cmd: String): String {
+                  val drain = ByteArray(READ_BUF)
+                  while (conn.bulkTransfer(epIn, drain, drain.size, 30) > 0) { /* discard stale bytes */ }
+                  val bytes = (cmd + "\r\n").toByteArray(Charsets.US_ASCII)
+                  if (conn.bulkTransfer(epOut, bytes, bytes.size, 2000) < 0) return ""
+                  val sb = StringBuilder()
+                  val buf = ByteArray(1024)
+                  var idle = 0
+                  while (idle < 2 && sb.length < 8192) {
+                      val n = conn.bulkTransfer(epIn, buf, buf.size, 600)
+                      if (n > 0) {
+                          sb.append(String(buf, 0, n, Charsets.US_ASCII))
+                          idle = 0
+                          val t = sb.toString().trimEnd()
+                          if (t.endsWith("OK") || t.endsWith("ERROR")) break
+                      } else {
+                          idle++
+                      }
+                  }
+                  return sb.toString().replace("\r", "\n").lines()
+                      .map { it.trim() }
+                      .filter { it.isNotEmpty() && !it.equals(cmd, ignoreCase = true) && it != "OK" }
+                      .joinToString("\n")
               }
 
               /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
@@ -4584,7 +4754,10 @@ jobs:
           import androidx.lifecycle.AndroidViewModel
           import androidx.lifecycle.viewModelScope
           import com.edl.flasher.protocol.*
+          import android.content.Context
+          import android.hardware.usb.UsbManager
           import com.edl.flasher.usb.AtCommandTransport
+          import com.edl.flasher.usb.MtpDeviceInfoReader
           import com.edl.flasher.usb.EdlUsbTransport
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
@@ -4647,6 +4820,8 @@ jobs:
               val adbConnected: Boolean = false,
               val mtpInfoText: String = "",
               val adbInfoText: String = "",
+              val infoImei: String = "",
+              val infoSerial: String = "",
               val adbShellOutput: String = "",
               val isBusy: Boolean = false,
               val currentTask: String = "Ready",
@@ -4662,7 +4837,8 @@ jobs:
               private val sahara = SaharaProtocol(transport, ::appendLog)
               private val firehose = FirehoseProtocol(transport, ::appendLog)
               private val odin = OdinProtocol(transport, ::appendLog)
-              private val adbClient = AdbClient(context, ::appendLog)
+              @Volatile private var quietInfoRead = false
+              private val adbClient = AdbClient(context) { msg -> if (!quietInfoRead) appendLog(msg) }
               private val atCommandTransport = AtCommandTransport(context)
 
               private val _uiState = MutableStateFlow(EdlUiState())
@@ -5730,18 +5906,86 @@ jobs:
                *  device currently connected in MTP / File Transfer mode. No ADB needed. */
               fun readMtpInfo() {
                   runTask("Reading MTP Device Info") {
-                      val devices = MtpInfoReader.findMtpDevices(context)
-                      if (devices.isEmpty()) {
-                          appendLog("No MTP device detected. Connect the phone in 'File Transfer / MTP' mode.")
-                          _uiState.update { it.copy(mtpInfoText = "No MTP device found.") }
-                          return@runTask
+                      // Information reads are silent on purpose: the result goes to the Device Info panel only.
+                      try {
+                          val devices = MtpInfoReader.findMtpDevices(context)
+                          if (devices.isEmpty()) {
+                              _uiState.update {
+                                  it.copy(
+                                      mtpInfoText = "No MTP device found. Connect the phone in 'File Transfer / MTP' mode.",
+                                      infoImei = "", infoSerial = ""
+                                  )
+                              }
+                              return@runTask
+                          }
+                          val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                          var imei = ""
+                          var serial = ""
+                          val sections = ArrayList<String>()
+                          for (dev in devices) {
+                              val sb = StringBuilder()
+                              val granted = transport.ensurePermission(dev)
+                              var model = ""
+                              var maker = ""
+                              var firmware = ""
+                              var modemFw = ""
+                              var verAll = ""
+                              var base = ""
+                              var lockState = ""
+                              var usbSerial = ""
+                              if (granted) {
+                                  usbSerial = runCatching { dev.serialNumber }.getOrNull().orEmpty()
+                                  maker = runCatching { dev.manufacturerName }.getOrNull().orEmpty()
+                                  model = runCatching { dev.productName }.getOrNull().orEmpty()
+                                  val mtp = runCatching { MtpDeviceInfoReader.read(usbManager, dev) }.getOrNull()
+                                  if (mtp != null) {
+                                      if (mtp.manufacturer.isNotBlank()) maker = mtp.manufacturer
+                                      if (mtp.model.isNotBlank()) model = mtp.model
+                                      firmware = mtp.deviceVersion
+                                      if (mtp.serial.isNotBlank()) usbSerial = mtp.serial
+                                  }
+                                  val at = runCatching {
+                                      atCommandTransport.queryReadOnly(
+                                          dev, listOf("AT+DEVCONINFO", "AT+CGSN", "AT+CGMR", "AT+GMR")
+                                      )
+                                  }.getOrDefault(emptyMap())
+                                  val fields = HashMap<String, String>()
+                                  Regex("""([A-Z]+)\(([^)]*)\)""").findAll(at["AT+DEVCONINFO"].orEmpty()).forEach { m ->
+                                      fields[m.groupValues[1]] = m.groupValues[2]
+                                  }
+                                  fun digits(s: String?) = s.orEmpty().filter { it.isDigit() }
+                                  val imeiCandidate = listOf(digits(fields["IMEI"]), digits(at["AT+CGSN"]))
+                                      .firstOrNull { it.length in 14..17 }
+                                  if (imeiCandidate != null) imei = imeiCandidate
+                                  fields["SN"]?.takeIf { it.isNotBlank() }?.let { usbSerial = it }
+                                  fields["MN"]?.takeIf { it.isNotBlank() }?.let { if (model.isBlank()) model = it }
+                                  verAll = fields["VER"].orEmpty()
+                                  base = fields["BASE"].orEmpty()
+                                  lockState = fields["LOCK"].orEmpty()
+                                  modemFw = (at["AT+CGMR"] ?: at["AT+GMR"]).orEmpty().lines().firstOrNull().orEmpty()
+                              }
+                              if (usbSerial.isNotBlank()) serial = usbSerial
+                              sb.appendLine("Manufacturer: ${maker.ifBlank { "Unknown" }}")
+                              sb.appendLine("Model: ${model.ifBlank { "Unknown" }}")
+                              sb.appendLine("IMEI: ${imei.ifBlank { "Not available (no AT port answer, or Wi-Fi only)" }}")
+                              sb.appendLine("Serial (SN): ${usbSerial.ifBlank { "Unavailable" }}")
+                              sb.appendLine("--- Firmware ---")
+                              sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
+                              if (verAll.isNotBlank()) sb.appendLine("AP / CP / CSC: $verAll")
+                              if (base.isNotBlank()) sb.appendLine("Base: $base")
+                              if (modemFw.isNotBlank()) sb.appendLine("Modem: $modemFw")
+                              if (lockState.isNotBlank()) sb.appendLine("Lock: $lockState")
+                              sb.appendLine("--- USB ---")
+                              sb.append(MtpInfoReader.describe(context, dev).trimEnd())
+                              if (!granted) sb.append("\nUSB permission was not granted, so IMEI / firmware could not be read.")
+                              sections.add(sb.toString())
+                          }
+                          _uiState.update {
+                              it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = imei, infoSerial = serial)
+                          }
+                      } catch (e: Exception) {
+                          _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
                       }
-                      val info = devices.joinToString("\n---\n") { dev ->
-                          runCatching { MtpInfoReader.describe(context, dev) }
-                              .getOrElse { e -> "Error reading device: ${e.message}" }
-                      }
-                      appendLog("MTP info read (${devices.size} device(s)).")
-                      _uiState.update { it.copy(mtpInfoText = info) }
                   }
               }
 
@@ -5750,6 +5994,7 @@ jobs:
                *  and reads basic build/device properties via 'getprop'. */
               fun readAdbInfo() {
                   runTask("Reading ADB Device Info") {
+                  quietInfoRead = true
                       if (!adbClient.connect()) {
                           _uiState.update {
                               it.copy(
@@ -5813,8 +6058,15 @@ jobs:
                           appendLine("Fingerprint: ${p("ro.build.fingerprint")}")
                           append("ADB Banner: ${adbClient.banner}")
                       }
-                      appendLog("ADB device info read successfully.")
-                      _uiState.update { it.copy(adbConnected = true, adbInfoText = summary) }
+                      // (silent: info reads never write to the log)
+                      _uiState.update {
+                          it.copy(
+                              adbConnected = true,
+                              adbInfoText = summary,
+                              infoImei = imei.orEmpty(),
+                              infoSerial = p("ro.serialno").takeIf { s -> s != "-" }.orEmpty()
+                          )
+                      }
                   }
               }
 
@@ -5890,7 +6142,7 @@ jobs:
                       val ok = atCommandTransport.tryRebootToDownloadMode(device, ::appendLog)
                       appendLog(
                           if (ok) "AT command accepted -- watch for the device to re-enumerate in Download Mode."
-                          else "No AT-capable interface responded. If the device has a working button combo, use that instead."
+                          else "The device did not accept the AT download-mode command (it answered ERROR or nothing). This model does not honour it over USB -- use the key combo, or enable USB debugging and use 'ADB -> Download Mode'."
                       )
                   }
               }
@@ -5916,6 +6168,7 @@ jobs:
                       } catch (e: Exception) {
                           appendLog("ERROR [$taskTitle]: ${e.message}")
                       } finally {
+                          quietInfoRead = false
                           _uiState.update {
                               it.copy(isBusy = false, currentTask = "Ready")
                           }
@@ -5948,6 +6201,12 @@ jobs:
           import androidx.compose.foundation.rememberScrollState
           import androidx.compose.foundation.shape.RoundedCornerShape
           import androidx.compose.foundation.verticalScroll
+          import androidx.compose.foundation.text.selection.SelectionContainer
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
+          import android.widget.Toast
+          import androidx.compose.ui.platform.LocalContext
           import androidx.compose.material3.*
           import androidx.compose.runtime.*
           import androidx.compose.ui.Alignment
@@ -7032,7 +7291,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("ADB -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = { onAdbReboot("recovery", "Recovery") },
@@ -7041,7 +7300,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("MTP -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("ADB -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       OutlinedButton(
                           onClick = { onAdbReboot("", "Normal Reboot") },
@@ -7061,7 +7320,7 @@ jobs:
                           .fillMaxWidth()
                           .height(44.dp)
                   ) {
-                      Text("MTP -> Download Mode", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                      Text("AT -> Download Mode (no ADB)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                   }
                   Surface(
                       color = YasCardBg,
@@ -7075,6 +7334,22 @@ jobs:
                           color = Color.Gray,
                           modifier = Modifier.padding(10.dp)
                       )
+                  }
+
+                  val infoContext = LocalContext.current
+                  if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
+                      Surface(
+                          color = YasCardBg,
+                          shape = RoundedCornerShape(8.dp),
+                          modifier = Modifier
+                              .fillMaxWidth()
+                              .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
+                      ) {
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                              InfoCopyRow("IMEI", state.infoImei, infoContext)
+                              InfoCopyRow("Serial (SN)", state.infoSerial, infoContext)
+                          }
+                      }
                   }
 
                   var shellCmd by remember { mutableStateOf("") }
@@ -7108,13 +7383,21 @@ jobs:
                               .fillMaxWidth()
                               .border(1.dp, if (state.adbConnected) YasGreen else YasBorder, RoundedCornerShape(8.dp))
                       ) {
-                          Text(
-                              state.adbInfoText,
-                              fontSize = 11.sp,
-                              color = Color.White,
-                              fontFamily = FontFamily.Monospace,
-                              modifier = Modifier.padding(10.dp)
-                          )
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              SelectionContainer {
+                                  Text(
+                                      state.adbInfoText,
+                                      fontSize = 11.sp,
+                                      color = Color.White,
+                                      fontFamily = FontFamily.Monospace
+                                  )
+                              }
+                              OutlinedButton(
+                                  onClick = { copyToClipboard(infoContext, "Device info", state.adbInfoText) },
+                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(30.dp)
+                              ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
+                          }
                       }
                   }
 
@@ -7124,13 +7407,21 @@ jobs:
                           shape = RoundedCornerShape(8.dp),
                           modifier = Modifier.fillMaxWidth()
                       ) {
-                          Text(
-                              state.mtpInfoText,
-                              fontSize = 11.sp,
-                              color = Color.LightGray,
-                              fontFamily = FontFamily.Monospace,
-                              modifier = Modifier.padding(10.dp)
-                          )
+                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                              SelectionContainer {
+                                  Text(
+                                      state.mtpInfoText,
+                                      fontSize = 11.sp,
+                                      color = Color.LightGray,
+                                      fontFamily = FontFamily.Monospace
+                                  )
+                              }
+                              OutlinedButton(
+                                  onClick = { copyToClipboard(infoContext, "Device info", state.mtpInfoText) },
+                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                  modifier = Modifier.height(30.dp)
+                              ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
+                          }
                       }
                   }
               }
@@ -7146,6 +7437,7 @@ jobs:
               onToggleExpanded: () -> Unit = {},
               modifier: Modifier = Modifier
           ) {
+              val logContext = LocalContext.current
               val listState = rememberLazyListState()
               LaunchedEffect(state.logs.size) {
                   if (state.logs.isNotEmpty()) {
@@ -7186,6 +7478,13 @@ jobs:
                                   modifier = Modifier.clickable { onToggleExpanded() }
                               )
                           }
+                          Text(
+                              text = "Copy",
+                              fontSize = 11.sp,
+                              color = YasCyan,
+                              fontWeight = FontWeight.SemiBold,
+                              modifier = Modifier.clickable { copyToClipboard(logContext, "Log", state.logs.joinToString("\n")) }
+                          )
                           Text(
                               text = "Clear",
                               fontSize = 11.sp,
@@ -7234,6 +7533,43 @@ jobs:
                               lineHeight = 14.sp
                           )
                       }
+                  }
+              }
+          }
+
+          private fun copyToClipboard(context: Context, label: String, text: String) {
+              if (text.isBlank()) return
+              val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+              cm.setPrimaryClip(ClipData.newPlainText(label, text))
+              Toast.makeText(context, "Copied: $label", Toast.LENGTH_SHORT).show()
+          }
+
+          @Composable
+          private fun InfoCopyRow(label: String, value: String, context: Context) {
+              Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically
+              ) {
+                  Column(modifier = Modifier.weight(1f)) {
+                      Text(label, fontSize = 10.sp, color = YasMuted)
+                      SelectionContainer {
+                          Text(
+                              value.ifBlank { "Not available" },
+                              fontSize = 15.sp,
+                              color = Color.White,
+                              fontFamily = FontFamily.Monospace,
+                              fontWeight = FontWeight.Bold
+                          )
+                      }
+                  }
+                  OutlinedButton(
+                      onClick = { copyToClipboard(context, label, value) },
+                      enabled = value.isNotBlank(),
+                      contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
+                      modifier = Modifier.height(34.dp)
+                  ) {
+                      Text("Copy", fontSize = 12.sp, color = YasCyan)
                   }
               }
           }
