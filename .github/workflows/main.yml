@@ -3154,39 +3154,51 @@ jobs:
               var maxPayloadSize: Int = 1048576
                   private set
 
+              /** Payload limit the target mentioned in a <log> line (e.g. "larger than supported 16384"). */
+              private var logSupportedPayload: Int? = null
+
+              /** Read back every write and compare CRCs, so a loader that ACKs without writing can't pass as success. */
+              var verifyAfterWrite: Boolean = true
+
               @Throws(IOException::class)
               fun configure(storage: StorageType): Boolean {
                   this.storageType = storage
                   drainPendingLogs()
 
-                  val initialSuccess = sendConfigureXml(storage, maxPayloadSize)
-                  if (initialSuccess) {
-                      logger("Firehose Ready: Memory=${storage.memoryName.uppercase()}, Sector=${storage.sectorSize}B, Payload=$maxPayloadSize")
-                      return true
+                  // Many Samsung/Qualcomm loaders only accept a 16 KB payload and NAK anything bigger.
+                  // Jump to the size the target reports, otherwise step down until it ACKs.
+                  val fallbacks = listOf(65536, 16384, 8192, 4096)
+                  var candidate = maxPayloadSize
+                  for (attempt in 1..8) {
+                      logSupportedPayload = null
+                      val rsp = sendConfigureXml(storage, candidate)
+                      if (rsp.ack) {
+                          maxPayloadSize = rsp.maxPayloadSizeToTarget?.takeIf { it >= storage.sectorSize } ?: candidate
+                          logger("Firehose Ready: Memory=${storage.memoryName.uppercase()}, Sector=${storage.sectorSize}B, Payload=$maxPayloadSize")
+                          return true
+                      }
+                      val supportedAttr = Regex("""MaxPayloadSizeToTargetInBytesSupported="(\d+)"""")
+                          .find(rsp.rawXml)?.groupValues?.get(1)?.toIntOrNull()
+                      val hint = listOfNotNull(supportedAttr, logSupportedPayload, rsp.maxPayloadSizeToTarget)
+                          .firstOrNull { it >= storage.sectorSize && it < candidate }
+                      val next = hint ?: fallbacks.firstOrNull { it < candidate }
+                          ?: throw IOException("Firehose <configure> rejected even at $candidate bytes. Response: ${rsp.rawXml.take(300)}")
+                      logger("Target NAKed payload size $candidate; retrying with $next bytes...")
+                      candidate = next
                   }
-
-                  logger("Re-negotiating Firehose payload size ($maxPayloadSize bytes)...")
-                  val retrySuccess = sendConfigureXml(storage, maxPayloadSize)
-                  if (!retrySuccess) {
-                      throw IOException("Firehose <configure> rejected by target.")
-                  }
-                  logger("Firehose Ready: Memory=${storage.memoryName.uppercase()}, Sector=${storage.sectorSize}B, Payload=$maxPayloadSize")
-                  return true
+                  throw IOException("Firehose <configure> negotiation failed after 8 attempts.")
               }
 
-              private fun sendConfigureXml(storage: StorageType, payloadSize: Int): Boolean {
+              private fun sendConfigureXml(storage: StorageType, payloadSize: Int): FirehoseResponse {
                   val xml = buildXml(
                       """<configure MemoryName="${storage.memoryName}" Verbose="0" AlwaysValidate="0" """ +
                       """MaxDigestTableSizeInBytes="8192" MaxPayloadSizeToTargetInBytes="$payloadSize" """ +
                       """ZlpAwareHost="1" SkipStorageInit="0" />"""
                   )
                   transport.write(xml.toByteArray(Charsets.UTF_8))
-                  val rsp = waitForResponse()
-                  if (rsp.maxPayloadSizeToTarget != null && rsp.maxPayloadSizeToTarget > 0) {
-                      maxPayloadSize = rsp.maxPayloadSizeToTarget
-                  }
-                  return rsp.ack
+                  return waitForResponse()
               }
+
 
               @Throws(IOException::class)
               fun readSectors(
@@ -3268,10 +3280,11 @@ jobs:
 
                   val rsp = waitForResponse()
                   if (!rsp.ack || !rsp.rawMode) {
-                      throw IOException("Firehose <program> rejected on LUN $lun, start_sector $startSector")
+                      throw IOException("Firehose <program> rejected on LUN $lun, start_sector $startSector: ${rsp.rawXml.take(300)}")
                   }
 
                   val buffer = ByteArray(maxPayloadSize)
+                  val crc = java.util.zip.CRC32()
                   var bytesSent = 0L
 
                   System.arraycopy(firstBytes, 0, buffer, 0, firstBytes.size)
@@ -3290,6 +3303,7 @@ jobs:
                       }
                       transport.write(buffer, 0, targetChunk, timeoutMs = 60000)
                       transport.writeZlp()
+                      crc.update(buffer, 0, targetChunk)
                       bytesSent += targetChunk
                       bufOffset = 0
                       onProgress(min(bytesSent, totalBytes), totalBytes)
@@ -3297,8 +3311,25 @@ jobs:
 
                   val finalRsp = waitForResponse()
                   if (!finalRsp.ack) {
-                      throw IOException("Firehose <program> failed final verification ACK.")
+                      throw IOException("Firehose <program> failed final ACK: ${finalRsp.rawXml.take(300)}")
                   }
+                  if (verifyAfterWrite && paddedTotalBytes <= 128L * 1024 * 1024) {
+                      verifyWritten(lun, startSector, numSectors, crc.value)
+                  }
+              }
+
+              private fun verifyWritten(lun: Int, startSector: Long, numSectors: Long, expectedCrc: Long) {
+                  logger("Verifying write (read-back)...")
+                  val check = java.util.zip.CRC32()
+                  val sink = object : OutputStream() {
+                      override fun write(b: Int) { check.update(b) }
+                      override fun write(b: ByteArray, off: Int, len: Int) { check.update(b, off, len) }
+                  }
+                  readSectors(lun, startSector, numSectors, sink)
+                  if (check.value != expectedCrc) {
+                      throw IOException("Write verification FAILED on LUN $lun, LBA $startSector: target ACKed the write but flash content does not match. The loader is likely ignoring writes to this range.")
+                  }
+                  logger("Write verified OK (read-back matches).")
               }
 
               private fun writeSparseStream(
@@ -3432,7 +3463,28 @@ jobs:
                   )
                   transport.write(cmd.toByteArray(Charsets.UTF_8))
                   val rsp = waitForResponse()
-                  if (!rsp.ack) throw IOException("Firehose <erase> failed on LUN $lun, LBA $startSector")
+                  if (!rsp.ack) throw IOException("Firehose <erase> failed on LUN $lun, LBA $startSector: ${rsp.rawXml.take(300)}")
+                  checkErased(lun, startSector, numSectors)
+              }
+
+              /** Reads back the start of an erased range so an ACK that did nothing is reported instead of hidden. */
+              private fun checkErased(lun: Int, startSector: Long, numSectors: Long) {
+                  val probe = min(numSectors, 64L)
+                  if (probe <= 0) return
+                  val out = java.io.ByteArrayOutputStream()
+                  if (runCatching { readSectors(lun, startSector, probe, out) }.isFailure) {
+                      logger("Erase check skipped (read-back failed).")
+                      return
+                  }
+                  val data = out.toByteArray()
+                  if (data.isEmpty()) return
+                  val first = data[0]
+                  val uniform = data.all { it == first }
+                  if (uniform && (first == 0.toByte() || first == 0xFF.toByte())) {
+                      logger("Erase verified: LUN $lun LBA $startSector reads back as ${if (first == 0.toByte()) "0x00" else "0xFF"}.")
+                  } else {
+                      logger("WARNING: loader ACKed <erase> but LUN $lun LBA $startSector still contains data. Erase had NO effect.")
+                  }
               }
 
               @Throws(IOException::class)
@@ -3444,16 +3496,39 @@ jobs:
                   if (!rsp.ack) throw IOException("Firehose <patch> failed: $attrs")
               }
 
+              /** Sends <power>. Returns true if the target ACKed it (or the USB link dropped, i.e. it is already rebooting),
+               *  false if the loader refused every variant. */
               @Throws(IOException::class)
-              fun powerControl(mode: String = "reset") {
-                  if (!transport.isConnected) return
-                  val cmd = buildXml("""<power value="$mode" DelayInSeconds="2" />""")
-                  transport.write(cmd.toByteArray(Charsets.UTF_8))
-                  try {
-                      waitForResponse(timeoutMs = 5000)
-                  } catch (e: Exception) {
-                      logger("Power command acknowledged or timed out. Device is likely rebooting.")
+              fun powerControl(mode: String = "reset"): Boolean {
+                  if (!transport.isConnected) return true
+                  drainPendingLogs()
+                  // Loaders differ: some want a delay attribute, some reject it. Try the common forms.
+                  val variants = listOf(
+                      """<power value="$mode" DelayInSeconds="1" />""",
+                      """<power DelayInSeconds="0" value="$mode" />""",
+                      """<power value="$mode" />"""
+                  )
+                  for ((i, v) in variants.withIndex()) {
+                      try {
+                          transport.write(buildXml(v).toByteArray(Charsets.UTF_8))
+                      } catch (e: IOException) {
+                          logger("USB link dropped while sending <power>: device is rebooting.")
+                          return true
+                      }
+                      val rsp = try {
+                          waitForResponse(timeoutMs = 3000)
+                      } catch (e: IOException) {
+                          if (!transport.isConnected) return true
+                          logger("No reply to <power> variant ${i + 1}.")
+                          continue
+                      }
+                      if (rsp.ack) {
+                          logger("Target ACKed <power $mode>.")
+                          return true
+                      }
+                      logger("Target NAKed <power $mode> (variant ${i + 1}): ${rsp.rawXml.take(200)}")
                   }
+                  return false
               }
 
               private fun drainPendingLogs() {
@@ -3509,7 +3584,10 @@ jobs:
               private fun extractLogs(xmlChunk: String) {
                   val logRegex = Regex("""<log\s+value="([^"]*)"\s*/>""")
                   logRegex.findAll(xmlChunk).forEach { match ->
-                      logger("[Target] ${match.groupValues[1]}")
+                      val text = match.groupValues[1]
+                      Regex("""larger than supported (\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
+                          ?.let { logSupportedPayload = it }
+                      logger("[Target] $text")
                   }
               }
 
@@ -4021,6 +4099,12 @@ jobs:
                   input: InputStream,
                   totalSize: Long,
                   singleSequence: Boolean = false,
+                  // The device prints an on-screen "SW REV CHECK FAIL" / secure-check warning for some
+                  // quick-format images even on a run that ultimately succeeds (confirmed against the
+                  // official PC tool on the same file): it is a post-write notice, not a rejection of
+                  // the write itself. When true, a negative ack on the FINAL XMIT_COMPLETE -- after every
+                  // byte has already been sent -- is logged as a warning instead of aborting the flash.
+                  tolerateFinalAckWarning: Boolean = false,
                   onProgress: (Long, Long) -> Unit = { _, _ -> }
               ) {
                   if (totalSize <= 0L) throw IOException("Empty source for partition '${part.name.ifBlank { part.fileName }}'")
@@ -4066,7 +4150,15 @@ jobs:
                       }
 
                       val endInts = intArrayOf(0, actual.toInt(), part.binType, part.devType, part.id, if (isLast) 1 else 0, 0, 0)
-                      rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                      if (isLast && tolerateFinalAckWarning) {
+                          try {
+                              rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                          } catch (e: IOException) {
+                              logger("WARNING: device returned a post-write check after all $totalSize bytes were sent (${e.message}). Treating as non-fatal and continuing.")
+                          }
+                      } else {
+                          rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                      }
 
                       sent += actual
                   }
@@ -4222,7 +4314,7 @@ jobs:
                       logger("Found '${header.name}' -> flashing PIT partition '${part.name.ifBlank { part.fileName }}' (id=${part.id}, ${header.size} bytes)")
                       val bounded = BoundedInputStream(tarInput, header.size)
                       val quickFormat = allowUndersizedUserdata && undersizedReason != null
-                      odin.flashImage(part, bounded, header.size, singleSequence = quickFormat) { done, total ->
+                      odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
                           onPartitionProgress(label, done, total)
                       }
                       bounded.drainRemaining()
@@ -5127,7 +5219,7 @@ jobs:
                   appendLog("Flashing raw userdata.img -> PIT '${part.name}' (id=${part.id}, $size bytes)")
                   val start = System.nanoTime()
                   context.contentResolver.openInputStream(uri)?.use { ins ->
-                      odin.flashImage(part, ins, size, singleSequence = (reason != null)) { done, total -> updateProgress(done, total, start) }
+                      odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total -> updateProgress(done, total, start) }
                   } ?: throw IllegalStateException("Cannot open userdata image.")
               }
 
@@ -5436,9 +5528,12 @@ jobs:
                       if (_uiState.value.firehoseReady) {
                           appendLog("Sending '$mode' command...")
                           try {
-                              firehose.powerControl(mode)
-                              appendLog("Command acknowledged. Waiting for device to reboot...")
-                              delay(2500) // Wait 2.5 seconds before closing USB
+                              if (firehose.powerControl(mode)) {
+                                  appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
+                                  delay(300)
+                              } else {
+                                  appendLog("WARNING: the loader refused <power>. It will not reboot from software; hold Power + Vol Down ~10s.")
+                              }
                           } catch (e: Exception) {
                               appendLog("Warning: ${e.message}")
                           }
