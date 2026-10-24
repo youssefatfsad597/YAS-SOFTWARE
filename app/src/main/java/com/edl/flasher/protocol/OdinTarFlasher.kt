@@ -132,8 +132,40 @@ object OdinTarFlasher {
             logger("Found '${header.name}' -> flashing PIT partition '${part.name.ifBlank { part.fileName }}' (id=${part.id}, ${header.size} bytes)")
             val bounded = BoundedInputStream(tarInput, header.size)
             val quickFormat = allowUndersizedUserdata && undersizedReason != null
-            odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
-                onPartitionProgress(label, done, total)
+            val isUserdata = label.equals("userdata", ignoreCase = true)
+
+            if (isUserdata) {
+                logger(
+                    "USERDATA TRACE: PIT entry id=${part.id} name='${part.name}' fileName='${part.fileName}' " +
+                        "binType=${part.binType} devType=${part.devType} attribute=${part.attribute} " +
+                        "wireBlockSize=${part.wireBlockSize} partitionSizeBytes=${part.partitionSizeBytes} " +
+                        "imageSize=${header.size} quickFormat=$quickFormat"
+                )
+            }
+
+            var lastLoggedPct = -1
+            val startNs = System.nanoTime()
+            try {
+                odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
+                    onPartitionProgress(label, done, total)
+                    if (isUserdata && total > 0L) {
+                        val pct = ((done * 100L) / total).toInt()
+                        if (pct >= lastLoggedPct + 10 || done == total) {
+                            lastLoggedPct = pct
+                            logger("USERDATA TRACE: $pct% ($done / $total bytes)")
+                        }
+                    }
+                }
+            } catch (e: IOException) {
+                if (isUserdata) {
+                    val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+                    logger(
+                        "USERDATA FLASH ERROR: write to PIT partition '${part.name.ifBlank { part.fileName }}' " +
+                            "(id=${part.id}) failed after ${elapsedMs}ms: ${e.message}. " +
+                            "Record this message to decide on a device-specific bypass later."
+                    )
+                }
+                throw e
             }
             bounded.drainRemaining()
             skipPaddingOnly(tarInput, header.size)
