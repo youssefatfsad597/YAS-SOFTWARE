@@ -122,13 +122,6 @@ private object Yas {
     val Idle = Color(0xFF94A3B8)
 }
 
-/** UI language switch. Technology / mode names stay in English in both languages. */
-private object Lang {
-    var ar by mutableStateOf(true)
-}
-
-private fun t(en: String, ar: String): String = if (Lang.ar) ar else en
-
 private val S6 = RoundedCornerShape(6.dp)
 private val S8 = RoundedCornerShape(8.dp)
 
@@ -517,7 +510,7 @@ private fun FileSelectorField(
         if (selected && onClear != null) {
             YASButton("\u2715", onClear, style = BtnStyle.Ghost, compact = true, enabled = enabled)
         } else {
-            YText(t("BROWSE", "اختيار"), size = 10.sp, color = Yas.SkyText, weight = FontWeight.Bold, spacing = 0.8.sp)
+            YText("BROWSE", size = 10.sp, color = Yas.SkyText, weight = FontWeight.Bold, spacing = 0.8.sp)
         }
     }
 }
@@ -546,7 +539,7 @@ private fun YASConfirmDialog(
             YASButton(confirmText, onConfirm, style = if (danger) BtnStyle.Danger else BtnStyle.Primary)
         },
         dismissButton = {
-            YASButton(t("Cancel", "إلغاء"), onDismiss, style = BtnStyle.Secondary)
+            YASButton("Cancel", onDismiss, style = BtnStyle.Secondary)
         }
     )
 }
@@ -559,7 +552,7 @@ private fun copyToClipboard(context: Context, label: String, text: String) {
     if (text.isBlank()) return
     val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
     cm.setPrimaryClip(ClipData.newPlainText(label, text))
-    Toast.makeText(context, t("Copied: $label", "تم النسخ: $label"), Toast.LENGTH_SHORT).show()
+    Toast.makeText(context, "Copied: $label", Toast.LENGTH_SHORT).show()
 }
 
 private fun formatSize(bytes: Long): String {
@@ -600,7 +593,7 @@ private fun connMode(s: EdlUiState): ConnMode = when {
     s.usbConnected -> ConnMode("9008 EDL", Yas.Success, true)
     s.odinConnected -> ConnMode("Samsung Odin", Color(0xFF60A5FA), true)
     s.adbConnected || s.usbAny -> ConnMode("MTP + ADB", Yas.SkyText, true)
-    else -> ConnMode(t("Disconnected", "غير متصل"), Yas.Idle, false)
+    else -> ConnMode("Disconnected", Yas.Idle, false)
 }
 
 private sealed interface InfoItem {
@@ -716,10 +709,9 @@ fun EdlMainScreen(
 
     confirmEraseTarget?.let { target ->
         YASConfirmDialog(
-            title = t("Confirm partition erase", "تأكيد مسح البارتشن"),
-            message = t("Erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})? This cannot be undone.",
-                "مسح '${target.name}' من LUN ${target.lun} (${formatSize(target.sizeInBytes)})؟ لا يمكن التراجع."),
-            confirmText = t("Erase now", "امسح الآن"),
+            title = "Confirm partition erase",
+            message = "Erase '${target.name}' on LUN ${target.lun} (${formatSize(target.sizeInBytes)})? This cannot be undone.",
+            confirmText = "Erase now",
             danger = true,
             onConfirm = {
                 onErasePartition(target)
@@ -731,10 +723,9 @@ fun EdlMainScreen(
 
     if (confirmBatchErase) {
         YASConfirmDialog(
-            title = t("Erase selected partitions", "مسح البارتشنات المحددة"),
-            message = t("Erase ${state.selectedPartKeys.size} selected partition(s)? This cannot be undone.",
-                "مسح ${state.selectedPartKeys.size} بارتشن محدد؟ لا يمكن التراجع."),
-            confirmText = t("Erase all selected", "امسح المحدد"),
+            title = "Erase selected partitions",
+            message = "Erase ${state.selectedPartKeys.size} selected partition(s)? This cannot be undone.",
+            confirmText = "Erase all selected",
             danger = true,
             onConfirm = {
                 onEraseSelectedParts()
@@ -891,11 +882,11 @@ fun EdlMainScreen(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            FilterPill(t("CONSOLE", "السجل"), dockTab == 0) { dockTab = 0 }
-                            FilterPill(t("DEVICE", "الجهاز"), dockTab == 1) { dockTab = 1 }
+                            FilterPill("CONSOLE", dockTab == 0) { dockTab = 0 }
+                            FilterPill("DEVICE", dockTab == 1) { dockTab = 1 }
                             Spacer(Modifier.weight(1f))
                             YASButton(
-                                text = if (dockExpanded) t("Collapse", "تصغير") else t("Expand", "توسيع"),
+                                text = if (dockExpanded) "Collapse" else "Expand",
                                 onClick = { dockExpanded = !dockExpanded },
                                 style = BtnStyle.Ghost,
                                 compact = true
@@ -954,10 +945,9 @@ private fun TopBar(
     }
 
     val toolbar: @Composable () -> Unit = {
-        YASButton(if (Lang.ar) "EN" else "\u0639", { Lang.ar = !Lang.ar }, style = BtnStyle.Ghost, compact = true)
-        YASButton(t("Re-scan USB", "فحص USB"), onConnectUsb, style = BtnStyle.Secondary, compact = true, enabled = !state.isBusy)
-        YASButton(t("Reboot", "إعادة تشغيل"), { onResetDevice("reset") }, style = BtnStyle.Warning, compact = true, enabled = !state.isBusy)
-        YASButton(t("Power Off", "إيقاف"), { onResetDevice("off") }, style = BtnStyle.DangerSoft, compact = true, enabled = !state.isBusy)
+        YASButton("Re-scan USB", onConnectUsb, style = BtnStyle.Secondary, compact = true, enabled = !state.isBusy)
+        YASButton("Reboot", { onResetDevice("reset") }, style = BtnStyle.Warning, compact = true, enabled = !state.isBusy)
+        YASButton("Power Off", { onResetDevice("off") }, style = BtnStyle.DangerSoft, compact = true, enabled = !state.isBusy)
     }
 
     if (wide) {
@@ -1059,7 +1049,7 @@ private fun TabBar(titles: List<String>, selected: Int, onSelect: (Int) -> Unit)
 @Composable
 private fun CopyBadge(onClick: () -> Unit) {
     YText(
-        text = t("COPY", "نسخ"),
+        text = "COPY",
         size = 9.sp,
         mono = true,
         weight = FontWeight.Bold,
@@ -1142,7 +1132,7 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            YText(t("DEVICE IDENTITY", "بيانات الجهاز"), size = 11.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
+            YText("DEVICE IDENTITY", size = 11.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
             StatusBadge(mode.label, mode.color, pulsing = mode.live)
         }
         YDivider()
@@ -1160,7 +1150,7 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
                 InspectorRow("EDL port", state.deviceDescription, copy = false, mono = false)
             }
             if (state.odinConnected) InspectorRow("Odin", state.odinDeviceDescription, copy = false, mono = false)
-            if (deviceTitle.isNotBlank()) InspectorRow(t("Device", "الجهاز"), deviceTitle, copy = false, mono = false)
+            if (deviceTitle.isNotBlank()) InspectorRow("Device", deviceTitle, copy = false, mono = false)
             if (serial.isNotBlank()) InspectorRow("Serial (SN)", serial)
             imeis.forEachIndexed { i, imei ->
                 InspectorRow(if (imeis.size > 1) "IMEI ${i + 1}" else "IMEI", imei)
@@ -1179,16 +1169,13 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
 
             if (firmware.isNotEmpty()) {
                 YDivider(Modifier.padding(vertical = 2.dp))
-                SectionLabel(t("FIRMWARE", "الفيرموير"))
+                SectionLabel("FIRMWARE")
                 firmware.forEach { (k, v) -> InspectorRow(k, v) }
             }
 
             if (!hasData) {
                 YText(
-                    t(
-                        "No data yet. Use Read HWID / PK_HASH in EDL, or Read Info in MTP / ADB.",
-                        "لا توجد بيانات. استخدم Read HWID / PK_HASH في EDL أو Read Info في MTP / ADB."
-                    ),
+                    "No data yet. Use Read HWID / PK_HASH in EDL, or Read Info in MTP / ADB.",
                     size = 11.sp,
                     color = Yas.Muted
                 )
@@ -1217,16 +1204,16 @@ private fun ConsolePanel(state: EdlUiState, onClearLogs: () -> Unit, modifier: M
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            YText(t("CONSOLE", "السجل"), size = 11.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
-            YText(t("${state.logs.size} lines", "${state.logs.size} سطر"), size = 10.sp, mono = true, color = Yas.Muted)
+            YText("CONSOLE", size = 11.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
+            YText("${state.logs.size} lines", size = 10.sp, mono = true, color = Yas.Muted)
             Spacer(Modifier.weight(1f))
             YASButton(
-                t("Copy", "نسخ"),
+                "Copy",
                 { copyToClipboard(context, "Console log", state.logs.joinToString("\n")) },
                 style = BtnStyle.Ghost,
                 compact = true
             )
-            YASButton(t("Clear", "مسح"), onClearLogs, style = BtnStyle.Ghost, compact = true)
+            YASButton("Clear", onClearLogs, style = BtnStyle.Ghost, compact = true)
         }
 
         LazyColumn(
@@ -1262,7 +1249,7 @@ private fun ConsolePanel(state: EdlUiState, onClearLogs: () -> Unit, modifier: M
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 YText(
-                    text = t("Task: ${state.currentTask}", "المهمة: ${state.currentTask}"),
+                    text = "Task: ${state.currentTask}",
                     size = 11.sp,
                     weight = FontWeight.SemiBold,
                     maxLines = 1,
@@ -1270,7 +1257,7 @@ private fun ConsolePanel(state: EdlUiState, onClearLogs: () -> Unit, modifier: M
                     modifier = Modifier.weight(1f)
                 )
                 StatusBadge(
-                    text = if (state.isBusy) t("BUSY", "جارٍ العمل") else t("READY", "جاهز"),
+                    text = if (state.isBusy) "BUSY" else "READY",
                     color = if (state.isBusy) Yas.WarningText else Yas.Success,
                     pulsing = state.isBusy
                 )
@@ -1344,12 +1331,9 @@ private fun ServiceTab(
 
     if (showKnoxConfirm) {
         YASConfirmDialog(
-            title = t("Remove Knox?", "إزالة Knox؟"),
-            message = t(
-                "Disables Knox, MDM and diagnostic packages over ADB and sets a private DNS. Needs normal Android with USB debugging on.",
-                "يعطّل حزم Knox وMDM والتشخيص عبر ADB ويضبط private DNS. يتطلب أندرويد عادي مع USB debugging."
-            ),
-            confirmText = t("Remove Knox", "إزالة Knox"),
+            title = "Remove Knox?",
+            message = "Disables Knox, MDM and diagnostic packages over ADB and sets a private DNS. Needs normal Android with USB debugging on.",
+            confirmText = "Remove Knox",
             danger = true,
             onConfirm = {
                 showKnoxConfirm = false
@@ -1360,8 +1344,8 @@ private fun ServiceTab(
     }
     if (showFrpConfirm) {
         YASConfirmDialog(
-            title = t("Erase FRP?", "مسح FRP؟"),
-            message = t("Erase the FRP partition on the connected 9008 device?", "مسح بارتشن FRP في جهاز 9008 المتصل؟"),
+            title = "Erase FRP?",
+            message = "Erase the FRP partition on the connected 9008 device?",
             confirmText = "Erase FRP",
             danger = true,
             onConfirm = {
@@ -1373,8 +1357,8 @@ private fun ServiceTab(
     }
     if (showFactoryConfirm) {
         YASConfirmDialog(
-            title = t("Factory reset?", "فورمات؟"),
-            message = t("Factory reset the connected 9008 device? User data will be lost.", "فورمات لجهاز 9008 المتصل؟ ستُمسح بيانات المستخدم."),
+            title = "Factory reset?",
+            message = "Factory reset the connected 9008 device? User data will be lost.",
             confirmText = "Factory Reset",
             danger = true,
             onConfirm = {
@@ -1396,7 +1380,7 @@ private fun ServiceTab(
             subtitle = "SM-X216B  \u00B7  EDL 9008",
             trailing = {
                 StatusBadge(
-                    text = if (state.embeddedFirmwareReady) t("FIRMWARE READY", "الفيرموير جاهز") else t("FIRMWARE CHECK", "فحص الفيرموير"),
+                    text = if (state.embeddedFirmwareReady) "FIRMWARE READY" else "FIRMWARE CHECK",
                     color = if (state.embeddedFirmwareReady) Yas.Success else Yas.WarningText
                 )
             }
@@ -1413,7 +1397,7 @@ private fun ServiceTab(
                     if (state.partitions.isEmpty()) "GPT" else "GPT  ${state.partitions.size}",
                     if (state.partitions.isNotEmpty()) Yas.Success else Yas.Idle
                 )
-                StatusBadge(t("Firmware", "الفيرموير"), if (state.embeddedFirmwareReady) Yas.Success else Yas.Idle)
+                StatusBadge("Firmware", if (state.embeddedFirmwareReady) Yas.Success else Yas.Idle)
             }
             YASButton(
                 text = "Wipe & Write  \u00B7  Format + FRP + MDM",
@@ -1423,10 +1407,7 @@ private fun ServiceTab(
                 enabled = !state.isBusy,
                 large = true
             )
-            Hint(t(
-                "EDL 9008: wipes userdata, FRP and MDM, then writes the firmware.",
-                "وضع EDL 9008: يمسح userdata وFRP وMDM ثم يكتب الفيرموير."
-            ))
+            Hint("EDL 9008: wipes userdata, FRP and MDM, then writes the firmware.")
         }
 
         YASCard(
@@ -1434,7 +1415,7 @@ private fun ServiceTab(
             subtitle = "ADB",
             trailing = {
                 StatusBadge(
-                    text = if (state.adbConnected) "ADB" else t("IDLE", "غير متصل"),
+                    text = if (state.adbConnected) "ADB" else "IDLE",
                     color = if (state.adbConnected) Yas.Success else Yas.Idle
                 )
             }
@@ -1447,10 +1428,7 @@ private fun ServiceTab(
                 enabled = !state.isBusy,
                 large = true
             )
-            Hint(t(
-                "ADB (normal Android, USB debugging on): disables Knox / MDM packages.",
-                "وضع ADB (أندرويد عادي مع USB debugging): يعطّل حزم Knox وMDM."
-            ))
+            Hint("ADB (normal Android, USB debugging on): disables Knox / MDM packages.")
         }
 
         YASCard(
@@ -1458,10 +1436,7 @@ private fun ServiceTab(
             subtitle = "Firehose"
         ) {
             if (!state.firehoseReady) {
-                Hint(t(
-                    "Needs Firehose: run Upload Loader + Read GPT first.",
-                    "يحتاج Firehose: شغّل Upload Loader + Read GPT أولاً."
-                ))
+                Hint("Needs Firehose: run Upload Loader + Read GPT first.")
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 YASButton(
@@ -1479,10 +1454,7 @@ private fun ServiceTab(
                     enabled = state.firehoseReady && !state.isBusy
                 )
             }
-            Hint(t(
-                "EDL + Firehose. Erase FRP wipes the FRP partition; Factory Reset erases user data.",
-                "وضع EDL + Firehose. Erase FRP يمسح بارتشن FRP، وFactory Reset يمسح بيانات المستخدم."
-            ))
+            Hint("EDL + Firehose. Erase FRP wipes the FRP partition; Factory Reset erases user data.")
         }
     }
 }
@@ -1535,12 +1507,9 @@ private fun T509Tab(
 
     if (showKnoxConfirm) {
         YASConfirmDialog(
-            title = t("Remove Knox?", "إزالة Knox؟"),
-            message = t(
-                "Disables Knox, MDM and diagnostic packages over ADB, skips the setup wizard, then reboots. Needs normal Android with USB debugging on.",
-                "يعطّل حزم Knox وMDM والتشخيص عبر ADB ويتخطى معالج الإعداد ثم يعيد التشغيل. يتطلب أندرويد عادي مع USB debugging."
-            ),
-            confirmText = t("Remove Knox", "إزالة Knox"),
+            title = "Remove Knox?",
+            message = "Disables Knox, MDM and diagnostic packages over ADB, skips the setup wizard, then reboots. Needs normal Android with USB debugging on.",
+            confirmText = "Remove Knox",
             danger = true,
             onConfirm = {
                 showKnoxConfirm = false
@@ -1552,10 +1521,7 @@ private fun T509Tab(
     if (showFormatConfirm) {
         YASConfirmDialog(
             title = "Format + FRP?",
-            message = t(
-                "Uploads FDL1 / FDL2 over BROM and erases userdata, FRP and persist on the connected ${state.t509Variant.label}. User data will be lost.",
-                "يرفع FDL1 / FDL2 عبر BROM ويمسح userdata وFRP وpersist في ${state.t509Variant.label} المتصل. ستُمسح بيانات المستخدم."
-            ),
+            message = "Uploads FDL1 / FDL2 over BROM and erases userdata, FRP and persist on the connected ${state.t509Variant.label}. User data will be lost.",
             confirmText = "Format + FRP",
             danger = true,
             onConfirm = {
@@ -1577,12 +1543,12 @@ private fun T509Tab(
             subtitle = "Unisoc BROM  \u00B7  FDL1 / FDL2",
             trailing = {
                 StatusBadge(
-                    text = if (state.t509FirmwareReady) t("FIRMWARE READY", "الفيرموير جاهز") else t("FIRMWARE CHECK", "فحص الفيرموير"),
+                    text = if (state.t509FirmwareReady) "FIRMWARE READY" else "FIRMWARE CHECK",
                     color = if (state.t509FirmwareReady) Yas.Success else Yas.WarningText
                 )
             }
         ) {
-            Hint(t("Pick the exact variant: T509 or T509N.", "اختر النسخة بدقة: T509 أو T509N."))
+            Hint("Pick the exact variant: T509 or T509N.")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 T509Variant.values().forEach { v ->
                     YASButton(
@@ -1602,7 +1568,7 @@ private fun T509Tab(
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 StatusBadge("BROM port", if (state.t509BromConnected) Yas.Success else Yas.Idle)
-                StatusBadge(t("Firmware", "الفيرموير"), if (state.t509FirmwareReady) Yas.Success else Yas.Idle)
+                StatusBadge("Firmware", if (state.t509FirmwareReady) Yas.Success else Yas.Idle)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 YASButton(
@@ -1620,10 +1586,7 @@ private fun T509Tab(
                     enabled = !state.isBusy
                 )
             }
-            Hint(t(
-                "Force BROM: puts the device into BROM mode. Fix Handshake: resets USB and retries the BROM handshake.",
-                "Force BROM: يدخل الجهاز في وضع BROM. Fix Handshake: يعيد ضبط USB ويعيد محاولة BROM handshake."
-            ))
+            Hint("Force BROM: puts the device into BROM mode. Fix Handshake: resets USB and retries the BROM handshake.")
             YASButton(
                 "Format + FRP",
                 { showFormatConfirm = true },
@@ -1631,10 +1594,7 @@ private fun T509Tab(
                 style = BtnStyle.Danger,
                 enabled = !state.isBusy
             )
-            Hint(t(
-                "BROM: uploads FDL1 / FDL2, then erases userdata, FRP and persist.",
-                "وضع BROM: يرفع FDL1 / FDL2 ثم يمسح userdata وFRP وpersist."
-            ))
+            Hint("BROM: uploads FDL1 / FDL2, then erases userdata, FRP and persist.")
         }
 
         YASCard(
@@ -1642,7 +1602,7 @@ private fun T509Tab(
             subtitle = "ADB",
             trailing = {
                 StatusBadge(
-                    text = if (state.adbConnected) "ADB" else t("IDLE", "غير متصل"),
+                    text = if (state.adbConnected) "ADB" else "IDLE",
                     color = if (state.adbConnected) Yas.Success else Yas.Idle
                 )
             }
@@ -1655,10 +1615,7 @@ private fun T509Tab(
                 enabled = !state.isBusy,
                 large = true
             )
-            Hint(t(
-                "ADB (normal Android, USB debugging on): disables Knox / MDM packages and reboots.",
-                "وضع ADB (أندرويد عادي مع USB debugging): يعطّل حزم Knox وMDM ثم يعيد التشغيل."
-            ))
+            Hint("ADB (normal Android, USB debugging on): disables Knox / MDM packages and reboots.")
         }
     }
 }
@@ -1697,7 +1654,7 @@ private fun ReadGptTab(
                         onClick = onPickLoader,
                         modifier = m,
                         enabled = !state.isBusy,
-                        badge = if (state.loaderUri != null) t("LOADED", "تم الاختيار") else t("NOT SELECTED", "لم يُختر"),
+                        badge = if (state.loaderUri != null) "LOADED" else "NOT SELECTED",
                         badgeColor = if (state.loaderUri != null) Yas.Success else Yas.Idle,
                         onClear = onClearLoader
                     )
@@ -1753,15 +1710,12 @@ private fun ReadGptTab(
                     enabled = state.firehoseReady && !state.isBusy
                 )
                 StatusBadge(
-                    text = if (state.firehoseReady) "FIREHOSE READY" else if (state.usbConnected) t("9008 CONNECTED", "9008 متصل") else t("NO 9008 DEVICE", "لا يوجد جهاز 9008"),
+                    text = if (state.firehoseReady) "FIREHOSE READY" else if (state.usbConnected) "9008 CONNECTED" else "NO 9008 DEVICE",
                     color = if (state.firehoseReady) Yas.Success else if (state.usbConnected) Yas.SkyText else Yas.Idle,
                     pulsing = state.firehoseReady
                 )
             }
-            Hint(t(
-                "EDL 9008: Read HWID / PK_HASH reads the chip ID. Upload Loader + Read GPT starts Firehose and reads partitions. Read GPT re-reads them.",
-                "وضع EDL 9008: Read HWID / PK_HASH يقرأ هوية الشريحة. Upload Loader + Read GPT يشغّل Firehose ويقرأ البارتشنات. Read GPT يعيد قراءتها."
-            ))
+            Hint("EDL 9008: Read HWID / PK_HASH reads the chip ID. Upload Loader + Read GPT starts Firehose and reads partitions. Read GPT re-reads them.")
         }
 
         PartitionTable(
@@ -1828,7 +1782,7 @@ private fun PartitionTable(
                 YASTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = t("Search partitions", "بحث في البارتشنات"),
+                    placeholder = "Search partitions",
                     modifier = Modifier.weight(1f)
                 )
                 YText("${filtered.size} / ${state.partitions.size}", size = 11.sp, mono = true, color = Yas.Muted)
@@ -1870,9 +1824,9 @@ private fun PartitionTable(
                     ) {
                         YText(
                             text = if (state.partitions.isEmpty())
-                                t("No GPT loaded yet.", "لم يتم تحميل GPT بعد.")
+                                "No GPT loaded yet."
                             else
-                                t("No partitions match.", "لا توجد بارتشنات مطابقة."),
+                                "No partitions match.",
                             size = 12.sp,
                             color = Yas.Muted,
                             align = TextAlign.Center
@@ -1907,7 +1861,7 @@ private fun PartitionTable(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         YText(
-                            t("${state.selectedPartKeys.size} selected", "${state.selectedPartKeys.size} محدد"),
+                            "${state.selectedPartKeys.size} selected",
                             size = 11.sp,
                             mono = true,
                             weight = FontWeight.SemiBold,
@@ -1922,15 +1876,15 @@ private fun PartitionTable(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             YASButton(
-                                t("Select All", "تحديد الكل"),
+                                "Select All",
                                 { onSelectAllParts(filtered.map { it.idKey }) },
                                 style = BtnStyle.Secondary,
                                 compact = true,
                                 enabled = filtered.isNotEmpty() && !state.isBusy
                             )
-                            YASButton(t("Deselect", "إلغاء التحديد"), onClearPartSelection, style = BtnStyle.Secondary, compact = true)
+                            YASButton("Deselect", onClearPartSelection, style = BtnStyle.Secondary, compact = true)
                             YASButton(
-                                t("Erase Selected (${state.selectedPartKeys.size})", "مسح المحدد (${state.selectedPartKeys.size})"),
+                                "Erase Selected (${state.selectedPartKeys.size})",
                                 onRequestBatchErase,
                                 style = BtnStyle.Danger,
                                 compact = true,
@@ -1955,13 +1909,13 @@ private fun PartitionHeader(stacked: Boolean, allSelected: Boolean, enabled: Boo
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
         Box(modifier = Modifier.width(24.dp)) { YASCheck(allSelected, { onToggleAll() }, enabled) }
-        YText(t("NAME", "الاسم"), Modifier.weight(1.2f), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
+        YText("NAME", Modifier.weight(1.2f), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
         YText("LUN", Modifier.width(LunColWidth), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
-        YText(t("SIZE", "الحجم"), Modifier.width(SizeColWidth), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
+        YText("SIZE", Modifier.width(SizeColWidth), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
         if (!stacked) {
-            YText(t("LBA RANGE", "نطاق LBA"), Modifier.weight(1.6f), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
+            YText("LBA RANGE", Modifier.weight(1.6f), size = 10.sp, color = Yas.Muted, weight = FontWeight.Bold, spacing = 1.sp)
             YText(
-                t("ACTIONS", "إجراءات"),
+                "ACTIONS",
                 Modifier.width(ActionsColWidth),
                 size = 10.sp,
                 color = Yas.Muted,
@@ -1992,9 +1946,9 @@ private fun LunChip(lun: Int) {
 @Composable
 private fun PartitionActions(busy: Boolean, onRead: () -> Unit, onWrite: () -> Unit, onErase: () -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-        YASButton(t("Read", "قراءة"), onRead, style = BtnStyle.Secondary, compact = true, enabled = !busy)
-        YASButton(t("Write", "كتابة"), onWrite, style = BtnStyle.Primary, compact = true, enabled = !busy)
-        YASButton(t("Erase", "مسح"), onErase, style = BtnStyle.DangerSoft, compact = true, enabled = !busy)
+        YASButton("Read", onRead, style = BtnStyle.Secondary, compact = true, enabled = !busy)
+        YASButton("Write", onWrite, style = BtnStyle.Primary, compact = true, enabled = !busy)
+        YASButton("Erase", onErase, style = BtnStyle.DangerSoft, compact = true, enabled = !busy)
     }
 }
 
@@ -2125,14 +2079,14 @@ private fun XmlFlasherTab(
             subtitle = "Qualcomm  \u00B7  rawprogram / patch XML",
             trailing = {
                 StatusBadge(
-                    text = if (state.firehoseReady) "FIREHOSE READY" else t("FIREHOSE NOT READY", "Firehose غير جاهز"),
+                    text = if (state.firehoseReady) "FIREHOSE READY" else "FIREHOSE NOT READY",
                     color = if (state.firehoseReady) Yas.Success else Yas.WarningText,
                     pulsing = state.firehoseReady
                 )
             }
         ) {
             if (!state.firehoseReady) {
-                Hint(t("Run Upload Loader + Read GPT first (Read GPT tab).", "شغّل Upload Loader + Read GPT أولاً (تبويب Read GPT)."))
+                Hint("Run Upload Loader + Read GPT first (Read GPT tab).")
             }
             FileSelectorField(
                 label = "RAWPROGRAM XML",
@@ -2140,7 +2094,7 @@ private fun XmlFlasherTab(
                 selected = state.rawProgramUri != null,
                 onClick = onPickRawProgram,
                 enabled = !state.isBusy,
-                badge = t("REQUIRED", "مطلوب"),
+                badge = "REQUIRED",
                 badgeColor = Yas.WarningText,
                 onClear = onClearRawProgram
             )
@@ -2150,17 +2104,17 @@ private fun XmlFlasherTab(
                 selected = state.patchXmlUri != null,
                 onClick = onPickPatchXml,
                 enabled = !state.isBusy,
-                badge = t("OPTIONAL", "اختياري"),
+                badge = "OPTIONAL",
                 badgeColor = Yas.Idle,
                 onClear = onClearPatchXml
             )
             FileSelectorField(
-                label = t("FIRMWARE FOLDER", "مجلد الفيرموير"),
+                label = "FIRMWARE FOLDER",
                 value = state.firmwareDirName,
                 selected = state.firmwareDirUri != null,
                 onClick = onPickFirmwareDir,
                 enabled = !state.isBusy,
-                badge = t("REQUIRED", "مطلوب"),
+                badge = "REQUIRED",
                 badgeColor = Yas.WarningText,
                 onClear = onClearFirmwareDir
             )
@@ -2238,14 +2192,14 @@ private fun OdinSlotRow(
                 overflow = TextOverflow.Ellipsis
             )
             YText(
-                text = if (selected) (size ?: "\u2014") else t("No file selected", "لم يُختر ملف"),
+                text = if (selected) (size ?: "\u2014") else "No file selected",
                 size = 10.sp,
                 mono = true,
                 color = Yas.Muted,
                 maxLines = 1
             )
         }
-        YASButton(t("Browse", "اختيار"), onBrowse, style = BtnStyle.Secondary, compact = true, enabled = enabled)
+        YASButton("Browse", onBrowse, style = BtnStyle.Secondary, compact = true, enabled = enabled)
         if (selected && onClear != null) {
             YASButton("\u2715", onClear, style = BtnStyle.Ghost, compact = true, enabled = enabled)
         }
@@ -2286,7 +2240,7 @@ private fun OdinTab(
             subtitle = state.odinDeviceDescription,
             trailing = {
                 StatusBadge(
-                    text = if (state.odinConnected) t("CONNECTED", "متصل") else t("NOT CONNECTED", "غير متصل"),
+                    text = if (state.odinConnected) "CONNECTED" else "NOT CONNECTED",
                     color = if (state.odinConnected) Yas.Success else Yas.Idle,
                     pulsing = state.odinConnected
                 )
@@ -2300,7 +2254,7 @@ private fun OdinTab(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 YASButton(
-                    text = if (state.odinConnected) t("Reconnect", "إعادة اتصال") else t("Connect", "اتصال"),
+                    text = if (state.odinConnected) "Reconnect" else "Connect",
                     onClick = onConnectOdinDevice,
                     style = BtnStyle.Primary,
                     enabled = !state.isBusy
@@ -2312,16 +2266,13 @@ private fun OdinTab(
                     enabled = !state.isBusy && !state.odinConnected
                 )
                 YASButton(
-                    text = t("Exit Download Mode", "خروج من Download Mode"),
+                    text = "Exit Download Mode",
                     onClick = onExitDownloadMode,
                     style = BtnStyle.Secondary,
                     enabled = !state.isBusy
                 )
             }
-            Hint(t(
-                "Connect: opens Odin on a device in Samsung Download Mode. MTP \u2192 Download: sends the device to Download Mode from MTP. Exit: leaves Download Mode.",
-                "Connect: يفتح اتصال Odin مع جهاز في Samsung Download Mode. MTP \u2192 Download: ينقل الجهاز من MTP إلى Download Mode. Exit: يخرج من Download Mode."
-            ))
+            Hint("Connect: opens Odin on a device in Samsung Download Mode. MTP \u2192 Download: sends the device to Download Mode from MTP. Exit: leaves Download Mode.")
         }
 
         YASCard(
@@ -2349,7 +2300,7 @@ private fun OdinTab(
             }
         }
 
-        YASCard(title = t("Execution", "التنفيذ")) {
+        YASCard(title = "Execution") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2358,14 +2309,14 @@ private fun OdinTab(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 YASCheck(state.odinAutoReboot, onToggleOdinAutoReboot, enabled = !state.isBusy)
-                YText(t("Auto-reboot after the operation", "إعادة تشغيل تلقائية بعد العملية"), size = 12.sp, color = Yas.TextSoft)
+                YText("Auto-reboot after the operation", size = 12.sp, color = Yas.TextSoft)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 YASButton(
-                    text = t("Flash userdata only", "userdata فقط"),
+                    text = "Flash userdata only",
                     onClick = onFlashUserdataOnly,
                     modifier = Modifier.weight(1f),
                     style = BtnStyle.Secondary,
@@ -2381,10 +2332,7 @@ private fun OdinTab(
                     large = true
                 )
             }
-            Hint(t(
-                "Download Mode: Odin Flash writes the selected slots in order. Flash userdata only writes the userdata slot.",
-                "وضع Download Mode: Odin Flash يكتب الخانات المحددة بالترتيب. userdata فقط يكتب خانة userdata."
-            ))
+            Hint("Download Mode: Odin Flash writes the selected slots in order. Flash userdata only writes the userdata slot.")
         }
     }
 }
@@ -2448,7 +2396,7 @@ private fun InfoGridCard(title: String, subtitle: String, text: String) {
         subtitle = subtitle.ifBlank { null },
         trailing = {
             YASButton(
-                t("Copy all", "نسخ الكل"),
+                "Copy all",
                 { copyToClipboard(context, title, text) },
                 style = BtnStyle.Ghost,
                 compact = true
@@ -2481,17 +2429,14 @@ private fun AdbMtpTab(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        YASCard(title = t("Quick functions", "وظائف سريعة")) {
-            SectionLabel(t("MTP  \u00B7  MODEM PORT", "MTP  \u00B7  MODEM PORT"))
+        YASCard(title = "Quick functions") {
+            SectionLabel("MTP  \u00B7  MODEM PORT")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 YASButton("Read Info", onReadMtpInfo, Modifier.weight(1f), style = BtnStyle.Primary, enabled = !state.isBusy)
                 YASButton("Download Mode", onMtpDownloadAt, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy)
-                YASButton(t("Reboot", "إعادة تشغيل"), onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy)
+                YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy)
             }
-            Hint(t(
-                "MTP (no USB debugging): Read Info reads the device info including SN / IMEI. Download Mode and Reboot go through the modem port.",
-                "وضع MTP (بدون USB debugging): Read Info يقرأ بيانات الجهاز مع SN / IMEI. Download Mode وReboot عبر modem port."
-            ))
+            Hint("MTP (no USB debugging): Read Info reads the device info including SN / IMEI. Download Mode and Reboot go through the modem port.")
             YDivider()
             SectionLabel("ADB  \u00B7  USB debugging")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -2511,24 +2456,21 @@ private fun AdbMtpTab(
                     enabled = !state.isBusy
                 )
                 YASButton(
-                    t("Reboot", "إعادة تشغيل"),
+                    "Reboot",
                     { onAdbReboot("", "Normal Reboot") },
                     Modifier.weight(1f),
                     style = BtnStyle.Warning,
                     enabled = !state.isBusy
                 )
             }
-            Hint(t(
-                "ADB (USB debugging on): Read Info reads the device info including SN / IMEI. Download and Recovery reboot into those modes.",
-                "وضع ADB (USB debugging شغال): Read Info يقرأ بيانات الجهاز مع SN / IMEI. Download وRecovery يعيدان التشغيل في الوضع المطلوب."
-            ))
+            Hint("ADB (USB debugging on): Read Info reads the device info including SN / IMEI. Download and Recovery reboot into those modes.")
         }
 
         YASCard(
             title = "ADB Shell",
             trailing = {
                 StatusBadge(
-                    text = if (state.adbConnected) "ADB" else t("IDLE", "غير متصل"),
+                    text = if (state.adbConnected) "ADB" else "IDLE",
                     color = if (state.adbConnected) Yas.Success else Yas.Idle,
                     pulsing = state.adbConnected
                 )
@@ -2551,7 +2493,7 @@ private fun AdbMtpTab(
                             .padding(8.dp)
                     ) {
                         if (state.adbShellOutput.isBlank()) {
-                            YText(t("Output appears here", "الناتج يظهر هنا"), size = 11.sp, mono = true, color = Yas.Muted)
+                            YText("Output appears here", size = 11.sp, mono = true, color = Yas.Muted)
                         } else {
                             state.adbShellOutput.lines().forEach { l ->
                                 YText(
@@ -2573,16 +2515,16 @@ private fun AdbMtpTab(
                 YASTextField(
                     value = shellCmd,
                     onValueChange = { shellCmd = it },
-                    placeholder = t("Command", "الأمر"),
+                    placeholder = "Command",
                     modifier = Modifier.weight(1f),
                     mono = true,
                     leading = "\$",
                     imeAction = ImeAction.Send,
                     onSubmit = sendShell
                 )
-                YASButton(t("Send", "إرسال"), sendShell, style = BtnStyle.Primary, enabled = !state.isBusy && shellCmd.isNotBlank())
+                YASButton("Send", sendShell, style = BtnStyle.Primary, enabled = !state.isBusy && shellCmd.isNotBlank())
                 YASButton(
-                    t("Copy", "نسخ"),
+                    "Copy",
                     { copyToClipboard(context, "ADB output", state.adbShellOutput) },
                     style = BtnStyle.Secondary,
                     enabled = state.adbShellOutput.isNotBlank()

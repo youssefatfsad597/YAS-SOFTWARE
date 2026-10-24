@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import java.io.IOException
 import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.*
@@ -947,10 +948,36 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (reason != null) appendLog("Quick-format mode: sending small userdata.img ($size bytes) on purpose.")
         appendLog("Flashing raw userdata.img -> PIT '${part.name}' (id=${part.id}, $size bytes)")
+        appendLog(
+            "USERDATA TRACE: PIT entry id=${part.id} name='${part.name}' fileName='${part.fileName}' " +
+                "binType=${part.binType} devType=${part.devType} attribute=${part.attribute} " +
+                "wireBlockSize=${part.wireBlockSize} partitionSizeBytes=${part.partitionSizeBytes} " +
+                "imageSize=$size quickFormat=${reason != null}"
+        )
         val start = System.nanoTime()
-        context.contentResolver.openInputStream(uri)?.use { ins ->
-            odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total -> updateProgress(done, total, start) }
-        } ?: throw IllegalStateException("Cannot open userdata image.")
+        var lastLoggedPct = -1
+        try {
+            context.contentResolver.openInputStream(uri)?.use { ins ->
+                odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total ->
+                    updateProgress(done, total, start)
+                    if (total > 0L) {
+                        val pct = ((done * 100L) / total).toInt()
+                        if (pct >= lastLoggedPct + 10 || done == total) {
+                            lastLoggedPct = pct
+                            appendLog("USERDATA TRACE: $pct% ($done / $total bytes)")
+                        }
+                    }
+                }
+            } ?: throw IllegalStateException("Cannot open userdata image.")
+        } catch (e: IOException) {
+            val elapsedMs = (System.nanoTime() - start) / 1_000_000
+            appendLog(
+                "USERDATA FLASH ERROR: write to PIT partition '${part.name.ifBlank { part.fileName }}' " +
+                    "(id=${part.id}) failed after ${elapsedMs}ms: ${e.message}. " +
+                    "Record this message to decide on a device-specific bypass later."
+            )
+            throw e
+        }
     }
 
     /**
