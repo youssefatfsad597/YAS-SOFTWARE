@@ -5023,46 +5023,68 @@ jobs:
 
               fun resetDevice(mode: String = "reset") {
                   runTask("Resetting Device ($mode)") {
-                      if (_uiState.value.firehoseReady) {
-                          appendLog("Sending '$mode' command...")
-                          var accepted = false
-                          try {
-                              accepted = firehose.powerControl(mode)
-                              if (accepted) {
-                                  appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
-                                  delay(300)
-                              } else {
-                                  appendLog("WARNING: the loader refused <power>. It will not reboot from software; hold Power + Vol Down ~10s.")
-                              }
-                          } catch (e: Exception) {
-                              appendLog("Warning: ${e.message}")
-                          }
-                          transport.close()
-                          _uiState.update {
-                              it.copy(
-                                  usbConnected = false,
-                                  firehoseReady = false,
-                                  partitions = emptyList(),
-                                  deviceDescription = "No 9008 Device Detected"
-                              )
-                          }
-                          if (!accepted) {
-                              // The device stays on the bus: forget it so the next scan opens it again.
-                              viewModelScope.launch(Dispatchers.IO) {
-                                  scanMutex.lock()
-                                  try {
-                                      knownUsb.clear()
-                                  } finally {
-                                      scanMutex.unlock()
-                                  }
-                              }
-                          }
-                          appendLog("Device reset command sent. Waiting for the device to come back (no need to unplug the cable)...")
-                          rescanUsbAfterReset()
-                      } else {
+                      if (!_uiState.value.firehoseReady) {
                           appendLog("ERROR: Firehose not ready. Cannot send power command.")
+                          return@runTask
                       }
+                      appendLog("Sending '$mode' command...")
+                      var accepted = false
+                      try {
+                          accepted = firehose.powerControl(mode)
+                      } catch (e: Exception) {
+                          appendLog("Warning: ${e.message}")
+                      }
+
+                      if (accepted) {
+                          appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
+                          // Keep the USB session open until the phone has really left the 9008 bus.
+                          // Closing it right after the ACK can leave some loaders half-reset, which is
+                          // what used to force a cable pull. If it is still in EDL, ask again.
+                          var gone = waitForEdlToLeave(6000)
+                          var attempt = 1
+                          while (!gone && attempt < 3 && transport.isConnected) {
+                              attempt++
+                              appendLog("Device is still in EDL. Re-sending '$mode' (attempt $attempt of 3)...")
+                              runCatching { firehose.powerControl(mode) }
+                              gone = waitForEdlToLeave(5000)
+                          }
+                          if (!gone) {
+                              appendLog("WARNING: The device stayed in EDL after the reset. Hold Power + Vol Down for about 10 seconds to force the restart.")
+                          }
+                      } else {
+                          appendLog("WARNING: the loader refused <power>. It will not reboot from software; hold Power + Vol Down ~10s.")
+                      }
+
+                      transport.close()
+                      _uiState.update {
+                          it.copy(
+                              usbConnected = false,
+                              firehoseReady = false,
+                              partitions = emptyList(),
+                              deviceDescription = "No 9008 Device Detected"
+                          )
+                      }
+                      // Always forget the old handle: whatever shows up next (normal boot, Download Mode,
+                      // or 9008 again) is treated as a brand-new connection, so no cable re-plug is needed.
+                      scanMutex.lock()
+                      try {
+                          knownUsb.clear()
+                      } finally {
+                          scanMutex.unlock()
+                      }
+                      appendLog("Device reset command sent. Waiting for the device to come back (no need to unplug the cable)...")
+                      rescanUsbAfterReset()
                   }
+              }
+
+              /** True once no Qualcomm 9008 device is left on the USB bus; false if it is still there at the timeout. */
+              private suspend fun waitForEdlToLeave(timeoutMs: Long): Boolean {
+                  val end = System.currentTimeMillis() + timeoutMs
+                  while (System.currentTimeMillis() < end) {
+                      if (transport.listDevices().none { isEdlDevice(it) }) return true
+                      delay(500)
+                  }
+                  return false
               }
 
               /** USB attach events that arrive while a task is running are ignored by scanUsbNow() (busy),
@@ -5343,8 +5365,7 @@ jobs:
                           appendLine("Incremental: ${p("ro.build.version.incremental")}")
                           appendLine("Build Type / Tags: ${p("ro.build.type")} / ${p("ro.build.tags")}")
                           appendLine("Build Date: ${p("ro.build.date")}")
-                          appendLine("Fingerprint: ${p("ro.build.fingerprint")}")
-                          append("ADB Banner: ${adbClient.banner}")
+                          append("Fingerprint: ${p("ro.build.fingerprint")}")
                       }
                       // (silent: info reads never write to the log)
                       _uiState.update {
@@ -5801,7 +5822,8 @@ jobs:
                                   onRunOdinFlash = onRunOdinFlash,
                                   onFlashUserdataOnly = onFlashUserdataOnly,
                                   onToggleOdinAutoReboot = onToggleOdinAutoReboot,
-                                  onExitDownloadMode = onExitDownloadMode
+                                  onExitDownloadMode = onExitDownloadMode,
+                                  onMtpDownloadAt = onMtpDownloadAt
                               )
                               4 -> AdbMtpTab(
                                   state = state,
@@ -6347,7 +6369,8 @@ jobs:
               onRunOdinFlash: () -> Unit,
               onFlashUserdataOnly: () -> Unit,
               onToggleOdinAutoReboot: (Boolean) -> Unit,
-              onExitDownloadMode: () -> Unit
+              onExitDownloadMode: () -> Unit,
+              onMtpDownloadAt: () -> Unit
           ) {
               Column(
                   modifier = Modifier
@@ -6388,6 +6411,17 @@ jobs:
                                   Text(if (state.odinConnected) "Connected" else "Connect to Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                               }
                           }
+
+                                  Button(
+                                      onClick = onMtpDownloadAt,
+                                      enabled = !state.isBusy && !state.odinConnected,
+                                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                                      modifier = Modifier
+                                          .fillMaxWidth()
+                                          .height(40.dp)
+                                  ) {
+                                      Text("MTP -> Download Mode", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                                  }
 
                           Row(
                               modifier = Modifier.fillMaxWidth(),
@@ -6521,6 +6555,8 @@ jobs:
                       .verticalScroll(rememberScrollState()),
                   verticalArrangement = Arrangement.spacedBy(8.dp)
               ) {
+                  // ---- 1) Read info ----
+                  Text("READ INFO", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                       Button(
                           onClick = onReadMtpInfo,
@@ -6529,7 +6565,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read Info MTP", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Info (MTP)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
@@ -6538,10 +6574,34 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read Full Device Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read Info (ADB)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                   }
 
+                  // ---- 2) MTP actions (no USB debugging needed) ----
+                  Text("MTP  -  no USB debugging needed", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                      Button(
+                          onClick = onMtpDownloadAt,
+                          enabled = !state.isBusy,
+                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                      }
+                      OutlinedButton(
+                          onClick = onMtpRebootAt,
+                          enabled = !state.isBusy,
+                          modifier = Modifier.weight(1f),
+                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                      ) {
+                          Text("MTP -> Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                      }
+                  }
+
+                  // ---- 3) ADB actions (USB debugging must be on) ----
+                  Text("ADB  -  USB debugging must be on", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
                   Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                       Button(
                           onClick = { onAdbReboot("download", "Download Mode") },
@@ -6567,30 +6627,9 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
+                          Text("ADB -> Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
                   }
-
-                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                      Button(
-                          onClick = onMtpDownloadAt,
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                      OutlinedButton(
-                          onClick = onMtpRebootAt,
-                          enabled = !state.isBusy,
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("MTP Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                      }
-                  }
-
                   val infoContext = LocalContext.current
                   if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
                       Surface(
