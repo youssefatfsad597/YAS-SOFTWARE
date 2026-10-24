@@ -46,7 +46,8 @@ object LogSanitizer {
         "^WARNING: .*[Ee]mbedded.*$" to
             "WARNING: Built-in firmware files are missing from this build, so the one-tap service flow is disabled.",
         "^Skipping '(.*)': no matching PIT entry.*$" to "Skipping '$1': not part of this device's layout.",
-        "^WARNING: device returned a post-write check.*$" to "WARNING: The device reported a post-write check; continuing.",
+        "^WARNING: device returned a post-write check after all \\d+ bytes were sent \\((.*)\\)\\. Treating as non-fatal and continuing\\.$" to
+            "WARNING: Device check after write -- $1",
         "^Writing '(.*)' -> partition '(.*)'.*$" to "Writing '$1' to '$2'...",
         "^Quick-format mode: sending small '(.*)'.*$" to "Quick-format mode: sending a small '$1' on purpose.",
         "^Quick-format mode: sending small userdata.*$" to "Quick-format mode: sending a small userdata image on purpose."
