@@ -91,6 +91,7 @@ import androidx.compose.ui.unit.sp
 import com.edl.flasher.R
 import com.edl.flasher.protocol.PartitionEntry
 import com.edl.flasher.protocol.StorageType
+import com.edl.flasher.protocol.T509Variant
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
