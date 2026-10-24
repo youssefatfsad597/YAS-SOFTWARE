@@ -5465,8 +5465,8 @@ jobs:
               /** Runs the Samsung serial-number rewrite sequence over the modem port (MTP mode). */
               fun atChangeSerial(newSerial: String) {
                   val sn = newSerial.trim().uppercase()
-                  if (!Regex("^[A-Z0-9]{8,20}$").matches(sn)) {
-                      appendLog("ERROR: invalid serial. Use 8-20 letters/digits only (e.g. R95R6043KBJ).")
+                  if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
+                      appendLog("ERROR: invalid serial. It must be exactly 11 letters/digits (e.g. R95R6043KBJ).")
                       return
                   }
                   runTask("AT Change Serial (MTP)") {
@@ -6851,14 +6851,15 @@ jobs:
                       ) {
                           OutlinedTextField(
                               value = serialInput,
-                              onValueChange = { serialInput = it.filter { c -> c.isLetterOrDigit() }.take(20).uppercase() },
-                              placeholder = { Text("New serial (e.g. R95R6043KBJ)", fontSize = 12.sp) },
+                              onValueChange = { serialInput = it.filter { c -> c.isLetterOrDigit() }.take(11).uppercase() },
+                              placeholder = { Text("Serial: exactly 11 chars (e.g. R95R6043KBJ)", fontSize = 12.sp) },
+                              supportingText = { Text("${serialInput.length}/11", fontSize = 10.sp, color = if (serialInput.length == 11) YasGreen else YasMuted) },
                               singleLine = true,
                               modifier = Modifier.weight(1f)
                           )
                           Button(
                               onClick = { showSerialConfirm = true },
-                              enabled = !state.isBusy && serialInput.length >= 8,
+                              enabled = !state.isBusy && serialInput.length == 11,
                               colors = ButtonDefaults.buttonColors(containerColor = YasRed, contentColor = Color.Black),
                               contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
                           ) { Text("Change SN", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
