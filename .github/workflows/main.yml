@@ -3861,6 +3861,7 @@ jobs:
           import android.content.Context
           import android.hardware.usb.UsbManager
           import com.edl.flasher.usb.MtpDeviceInfoReader
+          import com.edl.flasher.usb.AtCommandTransport
           import com.edl.flasher.usb.EdlUsbTransport
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
@@ -5005,18 +5006,12 @@ jobs:
                   }
               }
 
-              /** Reads descriptor-level info (VID/PID, manufacturer, product, serial) from a
-               *  device currently connected in MTP / File Transfer mode. No ADB needed.
-               *
-               *  IMEI is never read here: MTP/File-Transfer mode has no reliable way to get it
-               *  (the modem AT port most phones expose is not guaranteed to answer, and guessing
-               *  wrong is worse than saying nothing), so use the "Read Full Device Info" (ADB)
-               *  button instead -- IMEI there comes straight from the telephony service.
-               *
-               *  The serial shown here is always the device's own USB serial-number descriptor
-               *  (the same string adb/fastboot report). The MTP GetDeviceInfo "serial" field is
-               *  a separate, vendor-specific value that does not match the real device serial on
-               *  many Samsung phones, so it is read for logging only and never used to replace it. */
+              /** Reads info from a device connected in MTP / File Transfer mode, no ADB needed:
+               *  1) USB descriptors + MTP GetDeviceInfo (manufacturer, model, firmware, serial)
+               *  2) READ-ONLY AT queries (IMEI, serial, model, firmware) over the phone's modem/CDC
+               *     port, when the current USB mode exposes one. Nothing is ever written to the device.
+               *  The serial shown is the USB serial-number descriptor (same as adb/fastboot); the AT
+               *  serial is only used when the descriptor is blank. */
               fun readMtpInfo() {
                   runTask("Reading MTP Device Info") {
                       // Information reads are silent on purpose: the result goes to the Device Info panel only.
@@ -5034,6 +5029,7 @@ jobs:
                           val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
                           var serial = ""
                           val sections = ArrayList<String>()
+                          val imeis = LinkedHashSet<String>()
                           for (dev in devices) {
                               val sb = StringBuilder()
                               val granted = transport.ensurePermission(dev)
@@ -5057,19 +5053,50 @@ jobs:
                                       if (usbSerial.isBlank() && mtp.serial.isNotBlank()) usbSerial = mtp.serial
                                   }
                               }
+                              // ---- Read-only AT queries (IMEI / serial / model / firmware) ----
+                              var atText = ""
+                              if (granted) {
+                                  val atCmds = listOf(
+                                      "AT+CGSN", "AT+GSN", "AT+IMEINUM", "AT+DEVCONINFO",
+                                      "ATI", "AT+CGMI", "AT+CGMM", "AT+CGMR"
+                                  )
+                                  val at = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
+                                      .getOrDefault(emptyMap())
+                                  if (at.isEmpty()) {
+                                      atText = "No AT/modem port answered in this USB mode.\n" +
+                                          "Some phones only expose it in a modem/diag USB configuration " +
+                                          "(on some Samsung phones: dial *#0808# and pick a mode that includes MODEM)."
+                                  } else {
+                                      val sbAt = StringBuilder()
+                                      for ((c, r) in at) sbAt.appendLine("$c -> ${r.replace("\n", " | ")}")
+                                      atText = sbAt.toString().trimEnd()
+                                      val all = at.values.joinToString("\n")
+                                      val found = LinkedHashSet<String>()
+                                      Regex("IMEI\\(([0-9]{14,16})\\)").findAll(all).forEach { found.add(it.groupValues[1]) }
+                                      listOf("AT+CGSN", "AT+GSN", "AT+IMEINUM").forEach { k ->
+                                          Regex("(?<![0-9])[0-9]{15}(?![0-9])").findAll(at[k].orEmpty()).forEach { found.add(it.value) }
+                                      }
+                                      imeis.addAll(found)
+                                      if (usbSerial.isBlank()) {
+                                          Regex("(?<![A-Z])SN\\(([^)]+)\\)").find(all)?.let { usbSerial = it.groupValues[1].trim() }
+                                      }
+                                  }
+                              }
                               if (usbSerial.isNotBlank()) serial = usbSerial
                               sb.appendLine("Manufacturer: ${maker.ifBlank { "Unknown" }}")
                               sb.appendLine("Model: ${model.ifBlank { "Unknown" }}")
                               sb.appendLine("Serial (SN): ${usbSerial.ifBlank { "Unavailable" }}")
+                              sb.appendLine("IMEI: ${if (imeis.isEmpty()) "Unavailable" else imeis.joinToString(" / ")}")
                               sb.appendLine("--- Firmware ---")
                               sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
                               sb.appendLine("--- USB ---")
                               sb.append(MtpInfoReader.describe(context, dev).trimEnd())
+                              sb.append("\n--- AT Commands (read-only) ---\n").append(atText)
                               if (!granted) sb.append("\nUSB permission was not granted, so the serial / firmware could not be read.")
                               sections.add(sb.toString())
                           }
                           _uiState.update {
-                              it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = "", infoSerial = serial)
+                              it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = imeis.joinToString("\n"), infoSerial = serial)
                           }
                       } catch (e: Exception) {
                           _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
@@ -6309,7 +6336,7 @@ jobs:
                           modifier = Modifier.weight(1f),
                           contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
                       ) {
-                          Text("Read MTP Info", fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                          Text("Read MTP + AT (IMEI)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
                       }
                       Button(
                           onClick = onReadAdbInfo,
