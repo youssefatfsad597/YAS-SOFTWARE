@@ -2606,6 +2606,177 @@ jobs:
           }
           EOF
 
+          cat << 'EOF' > app/src/main/java/com/edl/flasher/usb/AtCommandTransport.kt
+          package com.edl.flasher.usb
+
+          import android.app.PendingIntent
+          import android.content.BroadcastReceiver
+          import android.content.Context
+          import android.content.Intent
+          import android.content.IntentFilter
+          import android.hardware.usb.*
+          import android.os.Build
+          import kotlinx.coroutines.suspendCancellableCoroutine
+          import java.io.Closeable
+          import kotlin.coroutines.resume
+
+          /**
+           * Sends AT commands over a USB CDC/modem-style interface exposed by the phone
+           * while it is enumerated as a normal MTP/modem composite device (i.e. BEFORE
+           * ADB or a button combo is used). This is the classic "AT+DLOAD" technique some
+           * Samsung basebands honor to force the device straight into Download (Odin)
+           * mode -- handy when the volume/power combo is broken or awkward, or when USB
+           * debugging is not enabled so `adb reboot download` is unavailable.
+           *
+           * Every candidate interface on the device is tried in turn; nothing here assumes
+           * a specific model, since which interface carries the AT port varies by phone
+           * and USB mode. The device itself decides whether it honors the command at all.
+           */
+          class AtCommandTransport(private val context: Context) : Closeable {
+
+              companion object {
+                  const val ACTION_AT_USB_PERMISSION = "com.yas.flashedl.AT_USB_PERMISSION"
+                  // Classic Samsung modem command that forces an immediate reboot into
+                  // Download (Odin) mode. A couple of baseband variants are tried too.
+                  val DOWNLOAD_MODE_COMMANDS = listOf("AT+DLOAD\r\n", "AT+SWITCH=DOWNLOAD\r\n")
+                  private const val READ_BUF = 256
+              }
+
+              private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+              private var connection: UsbDeviceConnection? = null
+              private var claimedInterface: UsbInterface? = null
+
+              suspend fun ensurePermission(device: UsbDevice): Boolean {
+                  if (usbManager.hasPermission(device)) return true
+                  return suspendCancellableCoroutine { cont ->
+                      val receiver = object : BroadcastReceiver() {
+                          override fun onReceive(ctx: Context, intent: Intent) {
+                              if (intent.action != ACTION_AT_USB_PERMISSION) return
+                              runCatching { context.unregisterReceiver(this) }
+                              val granted = intent.getBooleanExtra(UsbManager.EXTRA_PERMISSION_GRANTED, false) ||
+                                  usbManager.hasPermission(device)
+                              if (cont.isActive) cont.resume(granted)
+                          }
+                      }
+                      val filter = IntentFilter(ACTION_AT_USB_PERMISSION)
+                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                          context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+                      } else {
+                          context.registerReceiver(receiver, filter)
+                      }
+                      val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                          PendingIntent.FLAG_MUTABLE or PendingIntent.FLAG_ALLOW_UNSAFE_IMPLICIT_INTENT
+                      } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                          PendingIntent.FLAG_MUTABLE
+                      } else {
+                          0
+                      }
+                      val pendingIntent = PendingIntent.getBroadcast(
+                          context, device.deviceName.hashCode(),
+                          Intent(ACTION_AT_USB_PERMISSION).setPackage(context.packageName),
+                          flags or PendingIntent.FLAG_UPDATE_CURRENT
+                      )
+                      usbManager.requestPermission(device, pendingIntent)
+                      cont.invokeOnCancellation { runCatching { context.unregisterReceiver(receiver) } }
+                  }
+              }
+
+              /** Candidate interfaces: CDC-ACM / CDC-DATA / vendor-specific, each with a bulk IN+OUT pair. */
+              private fun candidateInterfaces(device: UsbDevice): List<UsbInterface> =
+                  (0 until device.interfaceCount).map { device.getInterface(it) }.filter { intf ->
+                      val looksSerial = intf.interfaceClass == UsbConstants.USB_CLASS_COMM ||
+                          intf.interfaceClass == UsbConstants.USB_CLASS_CDC_DATA ||
+                          intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC
+                      val eps = (0 until intf.endpointCount).map { intf.getEndpoint(it) }
+                      val hasBulkPair = eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN } &&
+                          eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT }
+                      looksSerial && hasBulkPair
+                  }
+
+              private fun bulkIn(intf: UsbInterface) =
+                  (0 until intf.endpointCount).map { intf.getEndpoint(it) }
+                      .first { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN }
+
+              private fun bulkOut(intf: UsbInterface) =
+                  (0 until intf.endpointCount).map { intf.getEndpoint(it) }
+                      .first { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT }
+
+              /**
+               * Tries every AT-capable interface on [device], sending each command in
+               * [commands] in turn. Phones that honor a mode-switch command often drop
+               * straight off the bus without replying "OK" first, since the USB link
+               * resets as part of the switch -- so a clean write with no reply is logged
+               * as a plausible success too, not just an explicit reply.
+               */
+              private suspend fun runAtSequence(device: UsbDevice, commands: List<String>, log: (String) -> Unit): Boolean {
+                  if (!ensurePermission(device)) {
+                      log("USB permission denied for AT command interface.")
+                      return false
+                  }
+                  val conn = usbManager.openDevice(device) ?: run {
+                      log("Could not open USB device for AT command.")
+                      return false
+                  }
+                  connection = conn
+                  val interfaces = candidateInterfaces(device)
+                  if (interfaces.isEmpty()) {
+                      log("No CDC/serial-style interface found on this device for AT commands.")
+                      conn.close()
+                      connection = null
+                      return false
+                  }
+
+                  var anySuccess = false
+                  for (intf in interfaces) {
+                      if (!conn.claimInterface(intf, true)) continue
+                      claimedInterface = intf
+                      val epIn = runCatching { bulkIn(intf) }.getOrNull()
+                      val epOut = runCatching { bulkOut(intf) }.getOrNull()
+                      if (epIn == null || epOut == null) {
+                          conn.releaseInterface(intf)
+                          continue
+                      }
+
+                      for (cmd in commands) {
+                          val bytes = cmd.toByteArray(Charsets.US_ASCII)
+                          val sent = conn.bulkTransfer(epOut, bytes, bytes.size, 2000)
+                          log("Interface ${intf.id}: wrote '${cmd.trim()}' ($sent bytes)")
+                          if (sent < 0) continue
+
+                          val buf = ByteArray(READ_BUF)
+                          val read = conn.bulkTransfer(epIn, buf, buf.size, 1500)
+                          if (read > 0) {
+                              val reply = String(buf, 0, read, Charsets.US_ASCII).trim()
+                              log("Interface ${intf.id}: reply '$reply'")
+                              anySuccess = true
+                          } else {
+                              log("Interface ${intf.id}: no reply (device may already be switching modes).")
+                          }
+                      }
+                      conn.releaseInterface(intf)
+                  }
+
+                  conn.close()
+                  connection = null
+                  claimedInterface = null
+                  return anySuccess
+              }
+
+              /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
+              suspend fun tryRebootToDownloadMode(device: UsbDevice, log: (String) -> Unit): Boolean =
+                  runAtSequence(device, DOWNLOAD_MODE_COMMANDS, log)
+
+              override fun close() {
+                  runCatching {
+                      claimedInterface?.let { connection?.releaseInterface(it) }
+                      connection?.close()
+                  }
+                  connection = null
+                  claimedInterface = null
+              }
+          }
+          EOF
+
           cat << 'EOF' > app/src/main/java/com/edl/flasher/protocol/SaharaDeviceInfo.kt
           package com.edl.flasher.protocol
 
@@ -4413,6 +4584,7 @@ jobs:
           import androidx.lifecycle.AndroidViewModel
           import androidx.lifecycle.viewModelScope
           import com.edl.flasher.protocol.*
+          import com.edl.flasher.usb.AtCommandTransport
           import com.edl.flasher.usb.EdlUsbTransport
           import kotlinx.coroutines.Dispatchers
           import kotlinx.coroutines.delay
@@ -4491,6 +4663,7 @@ jobs:
               private val firehose = FirehoseProtocol(transport, ::appendLog)
               private val odin = OdinProtocol(transport, ::appendLog)
               private val adbClient = AdbClient(context, ::appendLog)
+              private val atCommandTransport = AtCommandTransport(context)
 
               private val _uiState = MutableStateFlow(EdlUiState())
               val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -5700,6 +5873,28 @@ jobs:
                   }
               }
 
+              /** Forces Download Mode via AT commands sent straight to the USB modem/serial
+               *  interface, without needing ADB or the physical button combo. Works only if
+               *  the attached device currently exposes an AT-capable interface. */
+              fun rebootViaAtCommand() {
+                  runTask("AT Command -> Download Mode") {
+                      val device = transport.listDevices().firstOrNull()
+                      if (device == null) {
+                          appendLog("ERROR: no USB device attached to send AT commands to.")
+                          return@runTask
+                      }
+                      appendLog(
+                          "Sending AT command(s) to force Download Mode " +
+                              "(VID=0x${device.vendorId.toString(16)}, PID=0x${device.productId.toString(16)})..."
+                      )
+                      val ok = atCommandTransport.tryRebootToDownloadMode(device, ::appendLog)
+                      appendLog(
+                          if (ok) "AT command accepted -- watch for the device to re-enumerate in Download Mode."
+                          else "No AT-capable interface responded. If the device has a working button combo, use that instead."
+                      )
+                  }
+              }
+
               private fun updateProgress(doneBytes: Long, totalBytes: Long, startTimeNs: Long) {
                   if (totalBytes <= 0L) return
                   val elapsedSec = ((System.nanoTime() - startTimeNs) / 1_000_000_000.0).coerceAtLeast(0.001)
@@ -5733,6 +5928,7 @@ jobs:
                   transport.unregisterDetachListener()
                   transport.close()
                   adbClient.close()
+                  atCommandTransport.close()
               }
           }
           EOF
@@ -5829,7 +6025,8 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit
+              onAdbShell: (String) -> Unit,
+              onAtDownloadMode: () -> Unit
               ) {
               var selectedTab by remember { mutableIntStateOf(0) }
               val tabs = listOf("1. X216B Service", "2. Read GPT", "3. XML Flasher", "4. Samsung Odin", "5. MTP / ADB")
@@ -6090,7 +6287,8 @@ jobs:
                               onReadMtpInfo = onReadMtpInfo,
                               onReadAdbInfo = onReadAdbInfo,
                               onAdbReboot = onAdbReboot,
-                              onAdbShell = onAdbShell
+                              onAdbShell = onAdbShell,
+                              onAtDownloadMode = onAtDownloadMode
                           )
                       }
                   }
@@ -6796,7 +6994,8 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
-              onAdbShell: (String) -> Unit
+              onAdbShell: (String) -> Unit,
+              onAtDownloadMode: () -> Unit
               ) {
               Column(
                   modifier = Modifier
@@ -6852,6 +7051,30 @@ jobs:
                       ) {
                           Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
                       }
+                  }
+
+                  Button(
+                      onClick = onAtDownloadMode,
+                      enabled = !state.isBusy,
+                      colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                      modifier = Modifier
+                          .fillMaxWidth()
+                          .height(44.dp)
+                  ) {
+                      Text("MTP -> Download Mode", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                  }
+                  Surface(
+                      color = YasCardBg,
+                      shape = RoundedCornerShape(8.dp),
+                      modifier = Modifier.fillMaxWidth()
+                  ) {
+                      Text(
+                          "Sends AT+DLOAD straight over the device's USB modem/serial interface -- no ADB or " +
+                              "button combo needed. Only works if the device currently exposes an AT-capable interface.",
+                          fontSize = 10.sp,
+                          color = Color.Gray,
+                          modifier = Modifier.padding(10.dp)
+                      )
                   }
 
                   var shellCmd by remember { mutableStateOf("") }
@@ -7189,7 +7412,8 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
-                              onAdbShell = viewModel::runAdbShell
+                              onAdbShell = viewModel::runAdbShell,
+                              onAtDownloadMode = viewModel::rebootViaAtCommand
                           )
                       }
                   }
