@@ -3062,6 +3062,7 @@ jobs:
               val filename: String,
               val physicalPartitionNumber: Int,
               val startSector: Long,
+              val startSectorRaw: String,
               val numPartitionSectors: Long,
               val sectorSizeInBytes: Int
           )
@@ -3079,17 +3080,19 @@ jobs:
                           val filename = parser.getAttributeValue(null, "filename").orEmpty().trim()
                           val label = parser.getAttributeValue(null, "label").orEmpty()
                           val lun = parser.getAttributeValue(null, "physical_partition_number")?.toIntOrNull() ?: 0
-                          val startSector = parser.getAttributeValue(null, "start_sector")?.toLongOrNull() ?: -1L
+                          val startSectorRaw = parser.getAttributeValue(null, "start_sector").orEmpty().trim()
+                          val startSector = startSectorRaw.toLongOrNull() ?: -1L
                           val numSectors = parser.getAttributeValue(null, "num_partition_sectors")?.toLongOrNull() ?: 0L
                           val sectorSize = parser.getAttributeValue(null, "SECTOR_SIZE_IN_BYTES")?.toIntOrNull() ?: 4096
 
-                          if (filename.isNotEmpty() && startSector >= 0L) {
+                          if (filename.isNotEmpty()) {
                               ops.add(
                                   RawProgramOp(
                                       label = label,
                                       filename = filename,
                                       physicalPartitionNumber = lun,
                                       startSector = startSector,
+                                      startSectorRaw = startSectorRaw,
                                       numPartitionSectors = numSectors,
                                       sectorSizeInBytes = sectorSize
                                   )
@@ -4926,6 +4929,10 @@ jobs:
                       appendLog("ERROR: Select both rawprogram*.xml and the Firmware Folder first.")
                       return
                   }
+                  if (!_uiState.value.firehoseReady) {
+                      appendLog("ERROR: Firehose is not ready. Connect the 9008 device and run Sahara + Firehose from the 'Read GPT' tab first.")
+                      return
+                  }
 
                   runTask("Flashing Full XML Firmware") {
                       val treeDoc = DocumentFile.fromTreeUri(context, dirUri)
@@ -4935,13 +4942,24 @@ jobs:
                       val ops = context.contentResolver.openInputStream(rawUri)?.use {
                           FirmwareXmlParser.parseRawProgramXml(it)
                       }.orEmpty()
+                      if (ops.isEmpty()) {
+                          throw IllegalStateException("No <program> entries with a filename were found in ${_uiState.value.rawProgramName}. Is this a rawprogram*.xml?")
+                      }
 
                       appendLog("Loaded ${ops.size} flash operations from ${_uiState.value.rawProgramName}.")
 
+                      var written = 0
+                      var skipped = 0
                       ops.forEachIndexed { index, op ->
+                          if (op.startSector < 0L) {
+                              appendLog("Skipping ${op.label} (${op.filename}): start_sector '${op.startSectorRaw}' is relative to the disk end and is not supported.")
+                              skipped++
+                              return@forEachIndexed
+                          }
                           val imgDoc = fileMap[op.filename]
                           if (imgDoc == null) {
                               appendLog("Skipping ${op.label} (${op.filename} not found)")
+                              skipped++
                               return@forEachIndexed
                           }
 
@@ -4949,17 +4967,24 @@ jobs:
                           val startNs = System.nanoTime()
                           val fileLen = imgDoc.length()
 
-                          context.contentResolver.openInputStream(imgDoc.uri)?.use { input ->
+                          val input = context.contentResolver.openInputStream(imgDoc.uri)
+                              ?: throw IllegalStateException("Cannot open ${op.filename}")
+                          input.use {
                               firehose.writePartitionStream(
                                   lun = op.physicalPartitionNumber,
                                   startSector = op.startSector,
                                   maxPartitionSectors = op.numPartitionSectors,
-                                  inputStream = input,
+                                  inputStream = it,
                                   totalStreamBytes = fileLen
                               ) { done, total ->
                                   updateProgress(done, total, startNs)
                               }
                           }
+                          written++
+                      }
+
+                      if (written == 0) {
+                          throw IllegalStateException("Nothing was written: none of the image files listed in the XML were found in the selected folder.")
                       }
 
                       _uiState.value.patchXmlUri?.let { patchUri ->
@@ -4972,7 +4997,7 @@ jobs:
                           appendLog("Patches applied.")
                       }
 
-                      appendLog("Operation completed successfully.")
+                      appendLog("Operation completed: $written written, $skipped skipped.")
                   }
               }
 
@@ -4980,8 +5005,10 @@ jobs:
                   runTask("Resetting Device ($mode)") {
                       if (_uiState.value.firehoseReady) {
                           appendLog("Sending '$mode' command...")
+                          var accepted = false
                           try {
-                              if (firehose.powerControl(mode)) {
+                              accepted = firehose.powerControl(mode)
+                              if (accepted) {
                                   appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
                                   delay(300)
                               } else {
@@ -4999,9 +5026,34 @@ jobs:
                                   deviceDescription = "No 9008 Device Detected"
                               )
                           }
-                          appendLog("Device reset command sent. Reconnect USB if needed.")
+                          if (!accepted) {
+                              // The device stays on the bus: forget it so the next scan opens it again.
+                              viewModelScope.launch(Dispatchers.IO) {
+                                  scanMutex.lock()
+                                  try {
+                                      knownUsb.clear()
+                                  } finally {
+                                      scanMutex.unlock()
+                                  }
+                              }
+                          }
+                          appendLog("Device reset command sent. Waiting for the device to come back (no need to unplug the cable)...")
+                          rescanUsbAfterReset()
                       } else {
                           appendLog("ERROR: Firehose not ready. Cannot send power command.")
+                      }
+                  }
+              }
+
+              /** USB attach events that arrive while a task is running are ignored by scanUsbNow() (busy),
+               *  so after a reset we poll for a few seconds until the device shows up again and gets reconnected. */
+              private fun rescanUsbAfterReset() {
+                  viewModelScope.launch(Dispatchers.IO) {
+                      for (i in 1..20) {
+                          delay(1000)
+                          scanUsbNow()
+                          val st = _uiState.value
+                          if (st.usbConnected || st.odinConnected) break
                       }
                   }
               }
@@ -5053,33 +5105,65 @@ jobs:
                                       if (usbSerial.isBlank() && mtp.serial.isNotBlank()) usbSerial = mtp.serial
                                   }
                               }
-                              // ---- Read-only AT queries (IMEI / serial / model / firmware) ----
+                              // ---- Modem info over the phone's AT port (IMEI, serial, model, firmware, ...) ----
                               var atText = ""
                               if (granted) {
                                   val atCmds = listOf(
                                       "AT+CGSN", "AT+GSN", "AT+IMEINUM", "AT+DEVCONINFO",
-                                      "ATI", "AT+CGMI", "AT+CGMM", "AT+CGMR"
+                                      "AT+CGMI", "AT+CGMM", "AT+CGMR", "AT+GMI", "AT+GMM", "AT+GMR",
+                                      "ATI", "AT+GCAP", "AT+CBC", "AT+CSQ", "AT+CFUN?", "AT+CPIN?"
                                   )
                                   val at = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
                                       .getOrDefault(emptyMap())
                                   if (at.isEmpty()) {
-                                      atText = "No AT/modem port answered in this USB mode.\n" +
+                                      atText = "No modem port answered in this USB mode.\n" +
                                           "Some phones only expose it in a modem/diag USB configuration " +
                                           "(on some Samsung phones: dial *#0808# and pick a mode that includes MODEM)."
                                   } else {
-                                      val sbAt = StringBuilder()
-                                      for ((c, r) in at) sbAt.appendLine("$c -> ${r.replace("\n", " | ")}")
-                                      atText = sbAt.toString().trimEnd()
-                                      val all = at.values.joinToString("\n")
+                                      fun v(vararg keys: String): String {
+                                          for (k in keys) {
+                                              val txt = at[k].orEmpty().lines()
+                                                  .map { it.trim().replace(Regex("^\\+[A-Za-z]+:\\s*"), "") }
+                                                  .filter { it.isNotEmpty() }
+                                                  .joinToString(" | ")
+                                              if (txt.isNotBlank()) return txt
+                                          }
+                                          return ""
+                                      }
+                                      // Samsung AT+DEVCONINFO answers with KEY(value) pairs.
+                                      val kv = LinkedHashMap<String, String>()
+                                      Regex("([A-Z0-9_]+)\\(([^)]*)\\)").findAll(at["AT+DEVCONINFO"].orEmpty())
+                                          .forEach { kv[it.groupValues[1]] = it.groupValues[2].trim() }
+
                                       val found = LinkedHashSet<String>()
-                                      Regex("IMEI\\(([0-9]{14,16})\\)").findAll(all).forEach { found.add(it.groupValues[1]) }
+                                      kv["IMEI"]?.takeIf { it.length in 14..16 && it.all { c -> c.isDigit() } }?.let { found.add(it) }
                                       listOf("AT+CGSN", "AT+GSN", "AT+IMEINUM").forEach { k ->
                                           Regex("(?<![0-9])[0-9]{15}(?![0-9])").findAll(at[k].orEmpty()).forEach { found.add(it.value) }
                                       }
                                       imeis.addAll(found)
-                                      if (usbSerial.isBlank()) {
-                                          Regex("(?<![A-Z])SN\\(([^)]+)\\)").find(all)?.let { usbSerial = it.groupValues[1].trim() }
-                                      }
+                                      if (usbSerial.isBlank()) kv["SN"]?.takeIf { it.isNotBlank() }?.let { usbSerial = it }
+
+                                      val sbAt = StringBuilder()
+                                      fun line(label: String, value: String) { if (value.isNotBlank()) sbAt.appendLine("$label: $value") }
+                                      line("Modem Manufacturer", v("AT+CGMI", "AT+GMI"))
+                                      line("Modem Model", v("AT+CGMM", "AT+GMM"))
+                                      line("Baseband / Firmware", v("AT+CGMR", "AT+GMR"))
+                                      line("Modem ID", v("ATI"))
+                                      line("Capabilities", v("AT+GCAP"))
+                                      val devLabels = linkedMapOf(
+                                          "MN" to "Model Name", "BASE" to "Base Model", "VER" to "Version (AP/CP/CSC)",
+                                          "HIDVER" to "Hidden Version", "PRD" to "Product Code", "CC" to "Country Code",
+                                          "OMCCODE" to "OMC / CSC", "SN" to "Serial (SN)", "UN" to "Unique Number",
+                                          "PN" to "Phone Number", "MCC" to "MCC", "MNC" to "MNC", "AID" to "AID",
+                                          "CON" to "Connections", "LOCKINFO" to "Lock Info"
+                                      )
+                                      for ((k, label) in devLabels) line(label, kv[k].orEmpty())
+                                      kv.filterKeys { it !in devLabels && it != "IMEI" }.forEach { (k, value) -> line(k, value) }
+                                      line("Battery (+CBC)", v("AT+CBC"))
+                                      line("Signal (+CSQ)", v("AT+CSQ"))
+                                      line("Radio (+CFUN)", v("AT+CFUN?"))
+                                      line("SIM Status", v("AT+CPIN?"))
+                                      atText = sbAt.toString().trimEnd().ifBlank { "Modem answered but returned no readable info." }
                                   }
                               }
                               if (usbSerial.isNotBlank()) serial = usbSerial
@@ -5091,7 +5175,7 @@ jobs:
                               sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
                               sb.appendLine("--- USB ---")
                               sb.append(MtpInfoReader.describe(context, dev).trimEnd())
-                              sb.append("\n--- AT Commands (read-only) ---\n").append(atText)
+                              sb.append("\n--- Modem ---\n").append(atText)
                               if (!granted) sb.append("\nUSB permission was not granted, so the serial / firmware could not be read.")
                               sections.add(sb.toString())
                           }
@@ -5265,6 +5349,8 @@ jobs:
                           _uiState.update {
                               it.copy(isBusy = false, currentTask = "Ready")
                           }
+                          // USB attach/detach events that arrived while busy were skipped: catch up now.
+                          scanUsb()
                       }
                   }
               }
@@ -5580,8 +5666,8 @@ jobs:
                   // READ GPT tab: on wide screens (tablet / landscape) the console sits in a side panel so it never
                   // covers the partition list; on narrow screens it shrinks to a thin strip that can be expanded.
                   val wideScreen = LocalConfiguration.current.screenWidthDp >= 720
-                  val gptSideLog = selectedTab == 1 && wideScreen
-                  val gptCompact = selectedTab == 1 && !wideScreen && !logExpanded
+                  val gptSideLog = (selectedTab == 1 || selectedTab == 2) && wideScreen
+                  val gptCompact = (selectedTab == 1 || selectedTab == 2) && !wideScreen && !logExpanded
                   val tabContent: @Composable () -> Unit = {
                           when (selectedTab) {
                               0 -> LoaderSetupTab(
@@ -5663,7 +5749,7 @@ jobs:
                       TelemetryAndConsolePanel(
                           state = state,
                           onClearLogs = onClearLogs,
-                          showExpandToggle = selectedTab == 1,
+                          showExpandToggle = selectedTab == 1 || selectedTab == 2,
                           expanded = logExpanded,
                           onToggleExpanded = { logExpanded = !logExpanded },
                           modifier = (if (gptCompact) Modifier.height(100.dp) else Modifier.weight(0.38f))
@@ -6123,7 +6209,19 @@ jobs:
               onPickFirmwareDir: () -> Unit,
               onFlashFirmwareXml: () -> Unit
           ) {
-              Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .verticalScroll(rememberScrollState()),
+                  verticalArrangement = Arrangement.spacedBy(8.dp)
+              ) {
+                  Text(
+                      if (state.firehoseReady) "Firehose: READY"
+                      else "Firehose: NOT READY - connect the 9008 device and run Sahara + Firehose from the 'Read GPT' tab first",
+                      fontSize = 11.sp,
+                      fontWeight = FontWeight.Bold,
+                      color = if (state.firehoseReady) YasGreen else YasOrange
+                  )
                   OutlinedButton(onClick = onPickRawProgram, enabled = !state.isBusy, modifier = Modifier.fillMaxWidth()) {
                       Text(state.rawProgramName, color = YasCyan)
                   }
