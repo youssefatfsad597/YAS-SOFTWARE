@@ -6754,8 +6754,6 @@ jobs:
                               onPickCpTar = { cpTarPicker.launch(arrayOf("*/*")) },
                               onPickCscTar = { cscTarPicker.launch(arrayOf("*/*")) },
                               onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
-                              onToggleSkipSystemFilesInUserdataTar = viewModel::setSkipSystemFilesInUserdataTar,
-                              onToggleAllowSmallUserdata = viewModel::setAllowSmallUserdata,
                               onRunOdinFlash = viewModel::runOdinFlashSequence,
                               onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
                               onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
