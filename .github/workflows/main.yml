@@ -1751,7 +1751,11 @@ jobs:
                   // AT+FUS? is the Samsung "firmware update service" switch; the others are older variants.
                   val DOWNLOAD_MODE_COMMANDS = listOf("AT+FUS?\r\n", "AT+DLOAD\r\n", "AT+SWITCH=DOWNLOAD\r\n")
                   // Standard 3GPP "full functionality + reset" command: restarts the device/modem.
-                  val REBOOT_COMMANDS = listOf("AT+CFUN=1,1\r\n")
+                  // Tried in order. After EACH one we check whether the phone actually dropped off the
+                  // USB bus; an "OK" alone is not proof (AT+CFUN=1,1 often only resets the modem).
+                  val REBOOT_COMMANDS = listOf("AT+CFUN=1,1\r\n", "AT+CFUN=1,1\r", "AT+RESET\r\n", "AT+CRESET\r\n", "AT+REBOOT\r\n")
+                  // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
+                  const val SERIAL_STEP_DELAY_MS = 1200L
                   private const val READ_BUF = 256
               }
 
@@ -1855,6 +1859,7 @@ jobs:
                           conn.releaseInterface(intf)
                           continue
                       }
+                      assertControlLines(conn, intf)
 
                       for (cmd in commands) {
                           val bytes = cmd.toByteArray(Charsets.US_ASCII)
@@ -1973,13 +1978,137 @@ jobs:
                   return lines.joinToString("\n")
               }
 
+
+              /** Many CDC-ACM modems ignore bulk data until DTR/RTS are asserted. */
+              private fun assertControlLines(conn: UsbDeviceConnection, intf: UsbInterface) {
+                  val ctrlIds = if (intf.interfaceClass == UsbConstants.USB_CLASS_CDC_DATA)
+                      listOf(maxOf(0, intf.id - 1), intf.id) else listOf(intf.id)
+                  for (id in ctrlIds) {
+                      // SET_CONTROL_LINE_STATE (DTR | RTS)
+                      runCatching { conn.controlTransfer(0x21, 0x22, 0x03, id, null, 0, 200) }
+                      // SET_LINE_CODING: 115200 8N1
+                      val lc = byteArrayOf(0x00, 0xC2.toByte(), 0x01, 0x00, 0x00, 0x00, 0x08)
+                      runCatching { conn.controlTransfer(0x21, 0x20, 0, id, lc, lc.size, 200) }
+                  }
+              }
+
+              private fun deviceStillPresent(device: UsbDevice): Boolean =
+                  usbManager.deviceList.values.any { it.deviceName == device.deviceName && it.vendorId == device.vendorId && it.productId == device.productId }
+
+              private suspend fun waitForDetach(device: UsbDevice, timeoutMs: Long): Boolean {
+                  val end = System.currentTimeMillis() + timeoutMs
+                  while (System.currentTimeMillis() < end) {
+                      if (!deviceStillPresent(device)) return true
+                      kotlinx.coroutines.delay(250)
+                  }
+                  return !deviceStillPresent(device)
+              }
+
+              /**
+               * Real reboot: sends each candidate command on each AT interface and, after each one,
+               * waits up to 6 s for the phone to disconnect from USB. Only a disconnect counts as success.
+               */
+              suspend fun rebootVerified(device: UsbDevice, log: (String) -> Unit): Boolean {
+                  if (!ensurePermission(device)) { log("USB permission denied for AT command interface."); return false }
+                  val conn = usbManager.openDevice(device) ?: run { log("Could not open USB device for AT command."); return false }
+                  try {
+                      val interfaces = candidateInterfaces(device)
+                      if (interfaces.isEmpty()) {
+                          log("No AT/modem port is exposed in this USB mode. On Samsung dial *#0808# (or *#2767*...) and choose a mode that includes MODEM, then retry.")
+                          return false
+                      }
+                      for (intf in interfaces) {
+                          if (!conn.claimInterface(intf, true)) { log("Interface ${intf.id}: could not claim."); continue }
+                          try {
+                              val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                              val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                              assertControlLines(conn, intf)
+                              // Probe: make sure this really is an AT port before sending anything else.
+                              val probe = exchange(conn, epIn, epOut, "AT")
+                              log("Interface ${intf.id}: probe 'AT' -> '${probe.ifBlank { "(no reply)" }}'")
+                              for (cmd in REBOOT_COMMANDS) {
+                                  val bytes = cmd.toByteArray(Charsets.US_ASCII)
+                                  val sent = conn.bulkTransfer(epOut, bytes, bytes.size, 2000)
+                                  log("Interface ${intf.id}: wrote '${cmd.trim()}' ($sent bytes)")
+                                  if (sent < 0) continue
+                                  val buf = ByteArray(READ_BUF)
+                                  val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
+                                  if (n > 0) log("   reply: '" + String(buf, 0, n, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim() + "'")
+                                  if (waitForDetach(device, 6000)) {
+                                      log("USB link dropped after '${cmd.trim()}': the device is rebooting.")
+                                      return true
+                                  }
+                                  log("   device still connected, trying next command...")
+                              }
+                          } finally {
+                              runCatching { conn.releaseInterface(intf) }
+                          }
+                      }
+                  } finally {
+                      runCatching { conn.close() }
+                  }
+                  log("The phone never disconnected: no reboot happened. This USB mode/firmware does not honor AT reboot commands.")
+                  return false
+              }
+
+              /**
+               * Runs a list of AT commands one after the other with a fixed delay (>= 1 s) between them.
+               * Returns the list of "command -> reply" lines. The last command may legitimately get no reply
+               * because the phone resets itself.
+               */
+              suspend fun runTimedSequence(device: UsbDevice, commands: List<String>, delayMs: Long, log: (String) -> Unit): Boolean {
+                  if (!ensurePermission(device)) { log("USB permission denied for AT command interface."); return false }
+                  val conn = usbManager.openDevice(device) ?: run { log("Could not open USB device for AT command."); return false }
+                  try {
+                      for (intf in candidateInterfaces(device)) {
+                          if (!conn.claimInterface(intf, true)) continue
+                          try {
+                              val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                              val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                              assertControlLines(conn, intf)
+                              val probe = exchange(conn, epIn, epOut, "AT")
+                              if (probe.contains("ERROR", true) && probe.length > 40) continue
+                              log("Interface ${intf.id}: AT port selected.")
+                              var allOk = true
+                              commands.forEachIndexed { i, cmd ->
+                                  val reply = exchange(conn, epIn, epOut, cmd)
+                                  val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
+                                  log("[${i + 1}/${commands.size}] $cmd  ->  ${reply.ifBlank { "(no reply / OK)" }}" + if (bad) "   <- rejected" else "")
+                                  if (bad) allOk = false
+                                  if (i < commands.size - 1) kotlinx.coroutines.delay(delayMs)
+                              }
+                              return allOk
+                          } finally {
+                              runCatching { conn.releaseInterface(intf) }
+                          }
+                      }
+                  } finally {
+                      runCatching { conn.close() }
+                  }
+                  log("No usable AT interface found. Enable a USB mode with MODEM (*#0808#) and retry.")
+                  return false
+              }
+
+              /** Samsung serial-number rewrite sequence (6 steps, 1.2 s apart). */
+              suspend fun changeSerialSequence(device: UsbDevice, newSerial: String, log: (String) -> Unit): Boolean {
+                  val cmds = listOf(
+                      "AT+SWATD=0",
+                      "AT+ACTIVATE=0,0,0",
+                      "AT+SWATD=1",
+                      "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5",
+                      "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,$newSerial",
+                      "AT+FACTORST=0,0"
+                  )
+                  return runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log)
+              }
+
               /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
               suspend fun tryRebootToDownloadMode(device: UsbDevice, log: (String) -> Unit): Boolean =
                   runAtSequence(device, DOWNLOAD_MODE_COMMANDS, log, stopOnSuccess = true)
 
               /** Reboots the device via [REBOOT_COMMANDS]. */
               suspend fun tryReboot(device: UsbDevice, log: (String) -> Unit): Boolean =
-                  runAtSequence(device, REBOOT_COMMANDS, log, stopOnSuccess = true)
+                  rebootVerified(device, log)
 
               override fun close() {
                   runCatching {
@@ -5317,8 +5446,45 @@ jobs:
                   }
               }
 
-              fun atRebootDevice() = runAtModeAction("AT Reboot (MTP)", "reboot") { at, dev ->
-                  at.tryReboot(dev) { appendLog(it) }
+              fun atRebootDevice() = runTask("AT Reboot (MTP)") {
+                  val devices = MtpInfoReader.findMtpDevices(context)
+                  if (devices.isEmpty()) {
+                      appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                      return@runTask
+                  }
+                  var rebooted = false
+                  for (dev in devices) {
+                      val ok = runCatching { AtCommandTransport(context).use { it.tryReboot(dev) { m -> appendLog(m) } } }
+                          .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+                      if (ok) { rebooted = true; break }
+                  }
+                  if (rebooted) appendLog("Reboot confirmed (device left the USB bus).")
+                  else appendLog("Reboot NOT confirmed. Use 'ADB -> Reboot' if USB debugging is on.")
+              }
+
+              /** Runs the Samsung serial-number rewrite sequence over the modem port (MTP mode). */
+              fun atChangeSerial(newSerial: String) {
+                  val sn = newSerial.trim().uppercase()
+                  if (!Regex("^[A-Z0-9]{8,20}$").matches(sn)) {
+                      appendLog("ERROR: invalid serial. Use 8-20 letters/digits only (e.g. R95R6043KBJ).")
+                      return
+                  }
+                  runTask("AT Change Serial (MTP)") {
+                      val devices = MtpInfoReader.findMtpDevices(context)
+                      if (devices.isEmpty()) {
+                          appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                          return@runTask
+                      }
+                      appendLog("Writing serial $sn (6 steps, 1.2 s apart). Do NOT unplug the cable.")
+                      var ok = false
+                      for (dev in devices) {
+                          ok = runCatching { AtCommandTransport(context).use { it.changeSerialSequence(dev, sn) { m -> appendLog(m) } } }
+                              .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+                          if (ok) break
+                      }
+                      if (ok) appendLog("Sequence finished. The device should restart; check the serial after boot.")
+                      else appendLog("Sequence did not complete cleanly. Review the replies above.")
+                  }
               }
 
               fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->
@@ -5625,6 +5791,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
+              onChangeSerialAt: (String) -> Unit,
               onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
@@ -5885,6 +6052,7 @@ jobs:
                                   onReadMtpInfo = onReadMtpInfo,
                                   onMtpRebootAt = onMtpRebootAt,
                                   onMtpDownloadAt = onMtpDownloadAt,
+                                  onChangeSerialAt = onChangeSerialAt,
                                   onSendCustomAt = onSendCustomAt,
                                   onReadAdbInfo = onReadAdbInfo,
                                   onAdbReboot = onAdbReboot,
@@ -6601,6 +6769,7 @@ jobs:
               onReadMtpInfo: () -> Unit,
               onMtpRebootAt: () -> Unit,
               onMtpDownloadAt: () -> Unit,
+              onChangeSerialAt: (String) -> Unit,
               onSendCustomAt: (String) -> Unit,
               onReadAdbInfo: () -> Unit,
               onAdbReboot: (String, String) -> Unit,
@@ -6612,196 +6781,268 @@ jobs:
                       .verticalScroll(rememberScrollState()),
                   verticalArrangement = Arrangement.spacedBy(8.dp)
               ) {
-                  // ---- 1) Read info ----
-                  Text("READ INFO", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                      Button(
-                          onClick = onReadMtpInfo,
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("Read Info (MTP)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                      Button(
-                          onClick = onReadAdbInfo,
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("Read Info (ADB)", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                  }
-
-                  // ---- 2) MTP actions (no USB debugging needed) ----
-                  Text("MTP  -  no USB debugging needed", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                      Button(
-                          onClick = onMtpDownloadAt,
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("MTP -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                      OutlinedButton(
-                          onClick = onMtpRebootAt,
-                          enabled = !state.isBusy,
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("MTP -> Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                      }
-                  }
-
-                  var customAtCmd by remember { mutableStateOf("") }
-                  Row(
-                      modifier = Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.spacedBy(6.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      OutlinedTextField(
-                          value = customAtCmd,
-                          onValueChange = { customAtCmd = it },
-                          placeholder = { Text("Custom AT command (your own, e.g. AT+CGSN)", fontSize = 12.sp) },
-                          singleLine = true,
-                          modifier = Modifier.weight(1f)
-                      )
-                      Button(
-                          onClick = { onSendCustomAt(customAtCmd) },
-                          enabled = !state.isBusy && customAtCmd.isNotBlank(),
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
-                      ) {
-                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                      }
-                  }
-                  Text(
-                      "Sends exactly what you type to the modem port in MTP mode and shows the raw reply in the console below. " +
-                      "You are responsible for any command you enter here.",
-                      fontSize = 10.sp,
-                      color = Color.Gray
-                  )
-                  // ---- 3) ADB actions (USB debugging must be on) ----
-                  Text("ADB  -  USB debugging must be on", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
-                  Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                      Button(
-                          onClick = { onAdbReboot("download", "Download Mode") },
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("ADB -> Download", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                      Button(
-                          onClick = { onAdbReboot("recovery", "Recovery") },
-                          enabled = !state.isBusy,
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("ADB -> Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold)
-                      }
-                      OutlinedButton(
-                          onClick = { onAdbReboot("", "Normal Reboot") },
-                          enabled = !state.isBusy,
-                          modifier = Modifier.weight(1f),
-                          contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
-                      ) {
-                          Text("ADB -> Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold)
-                      }
-                  }
                   val infoContext = LocalContext.current
-                  if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
-                      Surface(
-                          color = YasCardBg,
-                          shape = RoundedCornerShape(8.dp),
-                          modifier = Modifier
-                              .fillMaxWidth()
-                              .border(1.dp, YasGreen, RoundedCornerShape(8.dp))
-                      ) {
-                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                              InfoCopyRow("IMEI", state.infoImei, infoContext)
-                              InfoCopyRow("Serial (SN)", state.infoSerial, infoContext)
-                          }
-                      }
-                  }
-
+                  var customAtCmd by remember { mutableStateOf("") }
                   var shellCmd by remember { mutableStateOf("") }
-                  Row(
-                      modifier = Modifier.fillMaxWidth(),
-                      horizontalArrangement = Arrangement.spacedBy(6.dp),
-                      verticalAlignment = Alignment.CenterVertically
-                  ) {
-                      OutlinedTextField(
-                          value = shellCmd,
-                          onValueChange = { shellCmd = it },
-                          placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
-                          singleLine = true,
-                          modifier = Modifier.weight(1f)
+                  var serialInput by remember { mutableStateOf("") }
+                  var showSerialConfirm by remember { mutableStateOf(false) }
+
+                  if (showSerialConfirm) {
+                      AlertDialog(
+                          onDismissRequest = { showSerialConfirm = false },
+                          title = { Text("Change serial number?", fontWeight = FontWeight.Bold) },
+                          text = {
+                              Text(
+                                  "New serial: ${serialInput.trim().uppercase()}\n\n" +
+                                  "The 6-step AT sequence will be sent (1.2 s between steps). The last step " +
+                                  "(AT+FACTORST) makes the phone restart and, on some firmware, may also reset it " +
+                                  "to factory defaults - back up first and keep the cable connected until it reboots."
+                              )
+                          },
+                          confirmButton = {
+                              Button(
+                                  onClick = { showSerialConfirm = false; onChangeSerialAt(serialInput) },
+                                  colors = ButtonDefaults.buttonColors(containerColor = YasRed)
+                              ) { Text("Run sequence") }
+                          },
+                          dismissButton = {
+                              OutlinedButton(onClick = { showSerialConfirm = false }) { Text("Cancel") }
+                          }
                       )
-                      Button(
-                          onClick = { onAdbShell(shellCmd) },
-                          enabled = !state.isBusy && shellCmd.isNotBlank(),
-                          colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
-                          contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                  }
+
+                  // =====================================================================
+                  //  SECTION 1 : MTP COMMANDS  (AT FIELD)  - no USB debugging needed
+                  // =====================================================================
+                  CommandSection(
+                      title = "MTP COMMANDS  (AT FIELD)",
+                      subtitle = "Sent over the phone's modem port in File Transfer / MTP mode. USB debugging NOT required.",
+                      accent = YasOrange
+                  ) {
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Button(
+                              onClick = onReadMtpInfo,
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Read Info", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                          Button(
+                              onClick = onMtpDownloadAt,
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Download Mode", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                          OutlinedButton(
+                              onClick = onMtpRebootAt,
+                              enabled = !state.isBusy,
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
+                      }
+
+                      // --- Change serial number (6-step AT sequence) ---
+                      Text("CHANGE SERIAL NUMBER", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          verticalAlignment = Alignment.CenterVertically
                       ) {
-                          Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                          OutlinedTextField(
+                              value = serialInput,
+                              onValueChange = { serialInput = it.filter { c -> c.isLetterOrDigit() }.take(20).uppercase() },
+                              placeholder = { Text("New serial (e.g. R95R6043KBJ)", fontSize = 12.sp) },
+                              singleLine = true,
+                              modifier = Modifier.weight(1f)
+                          )
+                          Button(
+                              onClick = { showSerialConfirm = true },
+                              enabled = !state.isBusy && serialInput.length >= 8,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasRed, contentColor = Color.Black),
+                              contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+                          ) { Text("Change SN", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                      }
+                      Text(
+                          "Sequence: AT+SWATD=0 > AT+ACTIVATE=0,0,0 > AT+SWATD=1 > AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5 > " +
+                          "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,<SN> > AT+FACTORST=0,0  (1.2 s between steps).",
+                          fontSize = 10.sp,
+                          color = Color.Gray
+                      )
+
+                      // --- Custom AT field ---
+                      Text("CUSTOM AT FIELD", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          OutlinedTextField(
+                              value = customAtCmd,
+                              onValueChange = { customAtCmd = it },
+                              placeholder = { Text("Custom AT command (e.g. AT+CGSN)", fontSize = 12.sp) },
+                              singleLine = true,
+                              modifier = Modifier.weight(1f)
+                          )
+                          Button(
+                              onClick = { onSendCustomAt(customAtCmd) },
+                              enabled = !state.isBusy && customAtCmd.isNotBlank(),
+                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                          ) { Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                      }
+                      Text(
+                          "Sends exactly what you type to the modem port and shows the raw reply in the console. " +
+                          "You are responsible for any command you enter here.",
+                          fontSize = 10.sp,
+                          color = Color.Gray
+                      )
+
+                      if (state.infoImei.isNotBlank() || state.infoSerial.isNotBlank()) {
+                          Surface(
+                              color = YasCardBgAlt,
+                              shape = RoundedCornerShape(8.dp),
+                              modifier = Modifier.fillMaxWidth().border(1.dp, YasGreen, RoundedCornerShape(8.dp))
+                          ) {
+                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                  InfoCopyRow("IMEI", state.infoImei, infoContext)
+                                  InfoCopyRow("Serial (SN)", state.infoSerial, infoContext)
+                              }
+                          }
+                      }
+
+                      if (state.mtpInfoText.isNotBlank()) {
+                          Surface(color = YasCardBgAlt, shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
+                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  SelectionContainer {
+                                      Text(state.mtpInfoText, fontSize = 11.sp, color = Color.LightGray, fontFamily = FontFamily.Monospace)
+                                  }
+                                  OutlinedButton(
+                                      onClick = { copyToClipboard(infoContext, "Device info", state.mtpInfoText) },
+                                      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                      modifier = Modifier.height(30.dp)
+                                  ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
+                              }
+                          }
                       }
                   }
 
-                  if (state.adbInfoText.isNotBlank()) {
-                      Surface(
-                          color = YasCardBg,
-                          shape = RoundedCornerShape(8.dp),
+                  // =====================================================================
+                  //  SECTION 2 : ADB COMMANDS  - USB debugging must be on
+                  // =====================================================================
+                  CommandSection(
+                      title = "ADB COMMANDS",
+                      subtitle = "Standard ADB protocol. USB debugging must be ON and the prompt accepted on the phone.",
+                      accent = YasGreen
+                  ) {
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Button(
+                              onClick = onReadAdbInfo,
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasGreen, contentColor = Color.Black),
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Read Info", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                          Button(
+                              onClick = { onAdbReboot("download", "Download Mode") },
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasOrange, contentColor = Color.Black),
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Download", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                      }
+                      Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                          Button(
+                              onClick = { onAdbReboot("recovery", "Recovery") },
+                              enabled = !state.isBusy,
+                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Recovery", fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                          OutlinedButton(
+                              onClick = { onAdbReboot("", "Normal Reboot") },
+                              enabled = !state.isBusy,
+                              modifier = Modifier.weight(1f),
+                              contentPadding = PaddingValues(horizontal = 4.dp, vertical = 10.dp)
+                          ) { Text("Reboot", fontSize = 11.sp, color = Color.White, fontWeight = FontWeight.Bold) }
+                      }
+
+                      Text("ADB SHELL COMMAND", fontSize = 10.sp, color = YasMuted, fontWeight = FontWeight.Bold)
+                      Row(
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalArrangement = Arrangement.spacedBy(6.dp),
+                          verticalAlignment = Alignment.CenterVertically
+                      ) {
+                          OutlinedTextField(
+                              value = shellCmd,
+                              onValueChange = { shellCmd = it },
+                              placeholder = { Text("ADB command (e.g. getprop ro.product.model)", fontSize = 12.sp) },
+                              singleLine = true,
+                              modifier = Modifier.weight(1f)
+                          )
+                          Button(
+                              onClick = { onAdbShell(shellCmd) },
+                              enabled = !state.isBusy && shellCmd.isNotBlank(),
+                              colors = ButtonDefaults.buttonColors(containerColor = YasCyan, contentColor = Color.Black),
+                              contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp)
+                          ) { Text("Send", fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                      }
+
+                      if (state.adbInfoText.isNotBlank()) {
+                          Surface(
+                              color = YasCardBgAlt,
+                              shape = RoundedCornerShape(8.dp),
+                              modifier = Modifier
+                                  .fillMaxWidth()
+                                  .border(1.dp, if (state.adbConnected) YasGreen else YasBorder, RoundedCornerShape(8.dp))
+                          ) {
+                              Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                  SelectionContainer {
+                                      Text(state.adbInfoText, fontSize = 11.sp, color = Color.White, fontFamily = FontFamily.Monospace)
+                                  }
+                                  OutlinedButton(
+                                      onClick = { copyToClipboard(infoContext, "Device info", state.adbInfoText) },
+                                      contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
+                                      modifier = Modifier.height(30.dp)
+                                  ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
+                              }
+                          }
+                      }
+                  }
+              }
+          }
+
+          /** Titled, colour-accented card that groups one family of commands (MTP/AT or ADB). */
+          @Composable
+          private fun CommandSection(
+              title: String,
+              subtitle: String,
+              accent: Color,
+              content: @Composable ColumnScope.() -> Unit
+          ) {
+              Surface(
+                  color = YasCardBg,
+                  shape = RoundedCornerShape(12.dp),
+                  modifier = Modifier
+                      .fillMaxWidth()
+                      .border(1.dp, accent.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+              ) {
+                  Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                      Column(
                           modifier = Modifier
                               .fillMaxWidth()
-                              .border(1.dp, if (state.adbConnected) YasGreen else YasBorder, RoundedCornerShape(8.dp))
+                              .background(accent.copy(alpha = 0.16f))
+                              .padding(horizontal = 12.dp, vertical = 10.dp),
+                          verticalArrangement = Arrangement.spacedBy(2.dp)
                       ) {
-                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                              SelectionContainer {
-                                  Text(
-                                      state.adbInfoText,
-                                      fontSize = 11.sp,
-                                      color = Color.White,
-                                      fontFamily = FontFamily.Monospace
-                                  )
-                              }
-                              OutlinedButton(
-                                  onClick = { copyToClipboard(infoContext, "Device info", state.adbInfoText) },
-                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(30.dp)
-                              ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
-                          }
+                          Text(title, fontSize = 14.sp, color = accent, fontWeight = FontWeight.ExtraBold)
+                          Text(subtitle, fontSize = 10.sp, color = YasMuted)
                       }
-                  }
-
-                  if (state.mtpInfoText.isNotBlank()) {
-                      Surface(
-                          color = YasCardBg,
-                          shape = RoundedCornerShape(8.dp),
-                          modifier = Modifier.fillMaxWidth()
-                      ) {
-                          Column(modifier = Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                              SelectionContainer {
-                                  Text(
-                                      state.mtpInfoText,
-                                      fontSize = 11.sp,
-                                      color = Color.LightGray,
-                                      fontFamily = FontFamily.Monospace
-                                  )
-                              }
-                              OutlinedButton(
-                                  onClick = { copyToClipboard(infoContext, "Device info", state.mtpInfoText) },
-                                  contentPadding = PaddingValues(horizontal = 12.dp, vertical = 2.dp),
-                                  modifier = Modifier.height(30.dp)
-                              ) { Text("Copy all info", fontSize = 11.sp, color = YasCyan) }
-                          }
-                      }
+                      Column(
+                          modifier = Modifier.padding(start = 10.dp, end = 10.dp, bottom = 10.dp),
+                          verticalArrangement = Arrangement.spacedBy(8.dp),
+                          content = content
+                      )
                   }
               }
           }
@@ -7125,6 +7366,7 @@ jobs:
                               onReadMtpInfo = viewModel::readMtpInfo,
                               onMtpRebootAt = viewModel::atRebootDevice,
                               onMtpDownloadAt = viewModel::atToDownloadMode,
+                              onChangeSerialAt = viewModel::atChangeSerial,
                               onSendCustomAt = viewModel::sendCustomAtCommand,
                               onReadAdbInfo = viewModel::readAdbInfo,
                               onAdbReboot = viewModel::adbRebootTo,
