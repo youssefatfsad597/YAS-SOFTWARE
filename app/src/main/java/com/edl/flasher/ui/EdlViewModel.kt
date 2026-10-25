@@ -560,6 +560,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                     appendLog("Download-Mode device connected automatically.")
+                    autoProbeOdinInfo()
                 } else {
                     appendLog("ERROR: could not open the Download-Mode USB interface (busy).")
                 }
@@ -948,17 +949,55 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  to leave the session clean for a normal Odin flash. */
     fun readOdinDeviceInfo() {
         runTask("Reading Download-Mode Device Info") {
-            openOdinConnectionIfNeeded()
-            val info = OdinDeviceInfo.probe(transport, ::appendLog)
+            // DVIF only works on a FRESH handle, before the ODIN/LOKE handshake. If a session is
+            // already open, close it cleanly first (end-session, no reboot) and reopen the interface.
+            if (_uiState.value.odinSessionReady && transport.isConnected) {
+                runCatching { odin.shutdown(reboot = false) }
+            }
             transport.close()
             _uiState.update { it.copy(odinConnected = false, odinSessionReady = false) }
-            if (!info.isEmpty) {
-                _uiState.update { it.copy(odinDeviceInfoText = info.toDisplayText()) }
-                val randNote = if (info.rand.isNotEmpty()) "RAND present" else "RAND not reported by this bootloader"
-                appendLog("Device info: ${info.fields.size} field(s) read ($randNote).")
+            openOdinTransportOnly()
+            val info = OdinDeviceInfo.probe(transport, ::appendLog)
+            publishOdinInfo(info)
+            if (info.isEmpty) {
+                // No answer: leave the USB handle in a clean state for the normal ODIN session.
+                transport.close()
+                _uiState.update { it.copy(odinConnected = false, odinSessionReady = false) }
             }
             openOdinConnectionIfNeeded()
         }
+    }
+
+    private fun publishOdinInfo(info: OdinDeviceInfo) {
+        if (info.isEmpty) return
+        _uiState.update { it.copy(odinDeviceInfoText = info.toDisplayText()) }
+        val randNote = if (info.rand.isNotEmpty()) "RAND present" else "RAND not reported by this bootloader"
+        appendLog("Device info: ${info.fields.size} field(s) read ($randNote).")
+        info.fields["MODEL"]?.let { appendLog("Download Mode device model: $it") }
+    }
+
+    /** Opens just the USB interface (no ODIN handshake, no PIT) so DVIF can be sent first. */
+    private suspend fun openOdinTransportOnly() {
+        if (transport.isConnected) return
+        val device = transport.findSamsungDownloadModeDevice()
+            ?: throw IllegalStateException("No Download-Mode device detected on USB!")
+        val opened = transport.requestPermissionAndOpen(device)
+        if (!opened) throw IllegalStateException("Could not open USB Download-Mode interface.")
+        _uiState.update {
+            it.copy(
+                odinConnected = true,
+                odinDeviceDescription = "Samsung Download Mode (Odin Protocol)",
+                usbConnected = false,
+                firehoseReady = false
+            )
+        }
+    }
+
+    /** Reads DVIF right after a fresh connect (like Android Utility does) -- best effort, never fails the connect. */
+    private suspend fun autoProbeOdinInfo() {
+        if (_uiState.value.odinSessionReady || !transport.isConnected) return
+        val info = kotlinx.coroutines.withContext(Dispatchers.IO) { OdinDeviceInfo.probe(transport, ::appendLog) }
+        publishOdinInfo(info)
     }
 
     fun connectSamsungDownloadMode() {
@@ -989,6 +1028,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 appendLog("USB connected to Download-Mode device.")
+                autoProbeOdinInfo()
             } else {
                 appendLog("ERROR: USB permission denied or interface busy.")
             }
@@ -1243,6 +1283,61 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     fun formatT505NWithUri(uri: Uri) {
         setUserdataTarUri(uri)
         formatT505N()
+    }
+
+    /**
+     * "Test eMMC Write": finds out WHY an eMMC ignores writes in EDL. Reads storage info, then runs the
+     * one-sector invert/read-back/restore probe on a disposable sector (userdata) with several loader
+     * "dialects" (ZLP on/off, payload size, minimal vs full <program> attributes).
+     */
+    fun diagnoseStorageWrite() {
+        runTask("Testing storage write") {
+            check(_uiState.value.firehoseReady) { "Start Firehose first (Upload Loader + Read GPT)." }
+            val parts = _uiState.value.partitions
+            val target = parts.firstOrNull { it.name.equals("userdata", true) }
+                ?: parts.firstOrNull { it.name.equals("cache", true) }
+                ?: throw IllegalStateException("No userdata/cache partition in the GPT to test on. Read the GPT first.")
+            val sector = target.firstLba + 2048L.coerceAtMost(target.numSectors / 2)
+            appendLog("Write test on '${target.name}' LUN ${target.lun} sector $sector (original data is restored).")
+
+            firehose.getStorageInfo(target.lun)
+
+            data class Dialect(val name: String, val payload: Int, val zlp: Boolean, val full: Boolean)
+            val dialects = listOf(
+                Dialect("default (ZLP, 64K, minimal)", 65536, true, false),
+                Dialect("ZLP, 16K, minimal", 16384, true, false),
+                Dialect("no-ZLP, 16K, minimal", 16384, false, false),
+                Dialect("ZLP, 16K, full attributes", 16384, true, true),
+                Dialect("no-ZLP, 4K, full attributes", 4096, false, true)
+            )
+            val storage = _uiState.value.selectedStorage
+            var anyWorks = false
+            val verdicts = mutableListOf<FirehoseProtocol.WriteVerdict>()
+            for (d in dialects) {
+                if (!firehose.reconfigure(storage, d.payload, d.zlp)) {
+                    appendLog("[${d.name}] loader refused <configure>; skipped.")
+                    continue
+                }
+                val r = firehose.writeSelfTest(target.lun, sector, d.full)
+                verdicts += r.verdict
+                appendLog("[${d.name}] -> ${r.verdict}: ${r.detail}")
+                if (r.verdict == FirehoseProtocol.WriteVerdict.WRITES_WORK) { anyWorks = true; break }
+            }
+            appendLog(
+                when {
+                    anyWorks -> "RESULT: writes work with the dialect above. Flash using it (the app keeps it configured)."
+                    verdicts.isNotEmpty() && verdicts.all { it == FirehoseProtocol.WriteVerdict.SILENTLY_IGNORED } ->
+                        "RESULT: the loader ACKs every write but the eMMC never changes. That is not a protocol problem: " +
+                            "the eMMC is write-protected (power-on/permanent WP) or has dropped into read-only mode " +
+                            "(worn-out/failed chip). Erase cannot help. Needs an eMMC ISP tool to read EXT_CSD " +
+                            "(USER_WP, PRE_EOL_INFO, life-time estimate); permanent WP / EOL read-only means replacing the eMMC."
+                    verdicts.isNotEmpty() && verdicts.all { it == FirehoseProtocol.WriteVerdict.REJECTED } ->
+                        "RESULT: the loader NAKs writes. Likely a restricted/signed programmer or the wrong variant for this " +
+                            "binary: try another SDM662 programmer for the same device/binary."
+                    else -> "RESULT: mixed/unclear (${verdicts.joinToString()}). Send me this log."
+                }
+            )
+        }
     }
 
     fun readAllGptPartitions() {

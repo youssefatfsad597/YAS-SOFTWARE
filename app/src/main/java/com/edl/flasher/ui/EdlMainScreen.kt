@@ -662,6 +662,7 @@ fun EdlMainScreen(
     onStorageSelected: (StorageType) -> Unit,
     onRunSaharaAndFirehose: () -> Unit,
     onReadGpt: () -> Unit,
+    onDiagnoseWrite: () -> Unit,
     onLunFilterSelected: (Int) -> Unit,
     onTogglePartSelection: (String) -> Unit,
     onSelectAllParts: (List<String>) -> Unit,
@@ -776,6 +777,7 @@ fun EdlMainScreen(
                 onStorageSelected = onStorageSelected,
                 onRunSaharaAndFirehose = onRunSaharaAndFirehose,
                 onReadGpt = onReadGpt,
+                onDiagnoseWrite = onDiagnoseWrite,
                 onLunFilterSelected = onLunFilterSelected,
                 onTogglePartSelection = onTogglePartSelection,
                 onSelectAllParts = onSelectAllParts,
@@ -1649,6 +1651,7 @@ private fun ReadGptTab(
     onStorageSelected: (StorageType) -> Unit,
     onRunSaharaAndFirehose: () -> Unit,
     onReadGpt: () -> Unit,
+    onDiagnoseWrite: () -> Unit,
     onLunFilterSelected: (Int) -> Unit,
     onTogglePartSelection: (String) -> Unit,
     onSelectAllParts: (List<String>) -> Unit,
@@ -1724,6 +1727,12 @@ private fun ReadGptTab(
                     onReadGpt,
                     style = BtnStyle.Secondary,
                     enabled = state.firehoseReady && !state.isBusy
+                )
+                YASButton(
+                    "Test eMMC Write",
+                    onDiagnoseWrite,
+                    style = BtnStyle.Warning,
+                    enabled = state.firehoseReady && state.partitions.isNotEmpty() && !state.isBusy
                 )
                 StatusBadge(
                     text = if (state.firehoseReady) "FIREHOSE READY" else if (state.usbConnected) "9008 CONNECTED" else "NO 9008 DEVICE",
