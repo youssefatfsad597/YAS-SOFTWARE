@@ -12,6 +12,22 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      - name: Remove misplaced duplicate sources
+        run: |
+          # These three files belong ONLY in .../flasher/ui/. A copy in .../flasher/protocol/
+          # causes "Redeclaration" / "Conflicting overloads" compile errors.
+          B=app/src/main/java/com/edl/flasher
+          for f in EdlMainScreen.kt EdlViewModel.kt LogSanitizer.kt; do
+            if [ -f "$B/protocol/$f" ]; then
+              echo "::warning::Deleting stray $B/protocol/$f (it belongs in ui/)"
+              rm -f "$B/protocol/$f"
+            fi
+          done
+          for f in EdlMainScreen.kt EdlViewModel.kt LogSanitizer.kt; do
+            [ -f "$B/ui/$f" ] || { echo "::error::Missing $B/ui/$f - upload it into the ui folder."; exit 1; }
+          done
+          grep -q "PackageEntry" "$B/protocol/OdinTarFlasher.kt" || { echo "::error::protocol/OdinTarFlasher.kt is the OLD version - upload the new one."; exit 1; }
+
 
       - name: Copy Embedded X216B Firmware Assets From Repository
         run: |
