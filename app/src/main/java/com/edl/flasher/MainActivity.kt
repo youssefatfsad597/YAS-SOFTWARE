@@ -176,10 +176,7 @@ class MainActivity : ComponentActivity() {
                     onMtpDownloadAt = viewModel::atToDownloadMode,
                     onReadAdbInfo = viewModel::readAdbInfo,
                     onAdbReboot = viewModel::adbRebootTo,
-                    onAdbShell = viewModel::runAdbShell,
-                    onReadMtpStorage = viewModel::readMtpStorage,
-                    onMtpFormatAt = viewModel::atFormatDevice,
-                    onChangeSerial = viewModel::changeSamsungSerial
+                    onAdbShell = viewModel::runAdbShell
                 )
             }
         }
