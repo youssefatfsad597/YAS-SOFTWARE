@@ -37,6 +37,42 @@ object OdinTarFlasher {
             "capacity. Flashing it would leave most of the partition unusable."
     }
 
+    /** One component found inside a firmware package. */
+    data class PackageEntry(val name: String, val label: String, val size: Long)
+
+    /**
+     * Reads only the tar headers of [tarInput] (skipping data with seeks where possible) and returns
+     * every regular file inside, so the UI can show the user what the package contains.
+     * A bare image (not a tar) is handled by the caller.
+     */
+    @Throws(IOException::class)
+    fun listEntries(tarInput: InputStream): List<PackageEntry> {
+        val out = mutableListOf<PackageEntry>()
+        while (true) {
+            val header = readTarHeader(tarInput) ?: break
+            if (header.typeFlag == '0' || header.typeFlag == '\u0000') {
+                val base = header.name.substringAfterLast('/')
+                if (base.isNotBlank()) {
+                    out.add(PackageEntry(header.name, displayLabel(base), header.size))
+                }
+            }
+            fastSkip(tarInput, header.size + (512 - (header.size % 512)) % 512)
+        }
+        return out
+    }
+
+    private fun fastSkip(input: InputStream, count: Long) {
+        var remaining = count
+        val buf = ByteArray(8192)
+        while (remaining > 0) {
+            val s = input.skip(remaining)
+            if (s > 0) { remaining -= s; continue }
+            val r = input.read(buf, 0, minOf(buf.size.toLong(), remaining).toInt())
+            if (r < 0) break
+            remaining -= r
+        }
+    }
+
     /** Friendly label for logs/filters, e.g. "userdata.img" -> "userdata". Matching against the PIT uses the full name. */
     private fun displayLabel(baseName: String): String {
         for (ext in IMAGE_EXTENSIONS) {
@@ -150,7 +186,7 @@ object OdinTarFlasher {
                 // partition) instead of forcing one giant block -- a working third-party
                 // Odin tool flashes this same file successfully using normal windowing,
                 // so the single-block path was the cause of the write not sticking.
-                odin.flashImage(part, bounded, header.size, singleSequence = false, tolerateFinalAckWarning = quickFormat) { done, total ->
+                odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
                     onPartitionProgress(label, done, total)
                     if (isUserdata && total > 0L) {
                         val pct = ((done * 100L) / total).toInt()
