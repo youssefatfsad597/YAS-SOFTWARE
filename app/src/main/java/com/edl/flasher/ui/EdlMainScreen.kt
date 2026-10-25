@@ -1336,43 +1336,47 @@ private fun ConsolePanel(state: EdlUiState, onClearLogs: () -> Unit, modifier: M
 
 // ===== X216B tab ADB button: edit the label / command here =====
 private const val X216B_ADB_BUTTON_LABEL = "X216B Remove KNOX"
+// NOTE: packages that belong to an external/carrier device-management or lease-protection
+// service (OMA-DM sync agents, managed-provisioning, Knox Guard, MDM clients, attestation/
+// analytics uploaders) are intentionally NOT disabled here. Disabling one of those can trip
+// the device's anti-tamper lock ("Device Services was uninstalled without authorisation"),
+// which then needs the owning service/carrier to unlock -- this list only touches the
+// on-device Knox container/feature packages themselves.
 private val X216B_ADB_COMMAND = """
     settings put global private_dns_mode hostname;
     settings put global private_dns_specifier ad97b6.dns.nextdns.io;
-    pm disable-user --user 0 com.samsung.android.sm.devicesecurity;
-    pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
     pm disable-user --user 0 com.samsung.android.knox.er;
-    pm disable-user --user 0 com.sec.epdg;
-    pm disable-user --user 0 com.samsung.sec.android.application.csc;
-    pm disable-user --user 0 com.sec.android.diagmonagent;
-    pm disable-user --user 0 com.sec.enterprise.knox.cloudmdm.smdms;
-    pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
-    pm disable-user --user 0 com.knox.vpn.proxyhandler;
-    pm disable-user --user 0 com.wssyncmldm;
-    pm disable-user --user 0 com.sec.android.soagent;
-    pm disable-user --user 0 com.android.managedprovisioning
-""".trimIndent().replace("\n", " ")
-
-private val T505N_KNOX_ADB_COMMAND = """
-    pm disable-user --user 0 com.samsung.android.knox.er;
-    pm disable-user --user 0 com.sec.enterprise.knox.cloudmdm.smdms;
     pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
     pm disable-user --user 0 com.knox.vpn.proxyhandler;
     pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
-    pm disable-user --user 0 com.android.managedprovisioning;
-    pm disable-user --user 0 com.samsung.android.kgclient;
-    pm disable-user --user 0 com.samsung.klmsagent;
-    pm disable-user --user 0 com.samsung.android.mdm;
-    pm disable-user --user 0 com.samsung.android.knox.analytics.uploader;
-    pm disable-user --user 0 com.samsung.android.knox.attestation;
-    pm disable-user --user 0 com.sec.enterprise.knox.attestation;
     pm disable-user --user 0 com.samsung.android.knox.containercore;
     pm disable-user --user 0 com.samsung.android.knox.containeragent;
-    pm disable-user --user 0 com.samsung.android.knox.kpecore;
     pm disable-user --user 0 com.samsung.android.knox.pushmanager;
     pm disable-user --user 0 com.samsung.android.knox.zt.framework;
     pm disable-user --user 0 com.samsung.knox.keychain;
-    pm disable-user --user 0 com.sec.enterprise.mdm.services.simpin;
+    pm disable-user --user 0 com.samsung.knox.securefolder;
+    pm disable-user --user 0 com.sec.epdg;
+    pm disable-user --user 0 com.samsung.sec.android.application.csc;
+    pm disable-user --user 0 com.sec.android.diagmonagent;
+    pm disable-user --user 0 com.samsung.android.sm.devicesecurity
+""".trimIndent().replace("\n", " ")
+
+// NOTE: packages that belong to an external/carrier device-management or lease-protection
+// service (OMA-DM sync agents, managed-provisioning, Knox Guard, MDM clients, attestation/
+// analytics uploaders) are intentionally NOT disabled here. Disabling one of those can trip
+// the device's anti-tamper lock ("Device Services was uninstalled without authorisation"),
+// which then needs the owning service/carrier to unlock -- this list only touches the
+// on-device Knox container/feature packages themselves.
+private val T505N_KNOX_ADB_COMMAND = """
+    pm disable-user --user 0 com.samsung.android.knox.er;
+    pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
+    pm disable-user --user 0 com.knox.vpn.proxyhandler;
+    pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
+    pm disable-user --user 0 com.samsung.android.knox.containercore;
+    pm disable-user --user 0 com.samsung.android.knox.containeragent;
+    pm disable-user --user 0 com.samsung.android.knox.pushmanager;
+    pm disable-user --user 0 com.samsung.android.knox.zt.framework;
+    pm disable-user --user 0 com.samsung.knox.keychain;
     pm disable-user --user 0 com.samsung.knox.securefolder
 """.trimIndent().replace("\n", " ")
 
@@ -1529,32 +1533,23 @@ private fun ServiceTab(
 
 // ===== T509 tab ADB button: edit the label / command here =====
 private const val T509_ADB_BUTTON_LABEL = "T509 Remove Knox"
+// NOTE: packages that belong to an external/carrier device-management or lease-protection
+// service (OMA-DM sync agents, managed-provisioning, Knox Guard, MDM clients, attestation/
+// analytics uploaders) are intentionally NOT disabled here. Disabling one of those can trip
+// the device's anti-tamper lock ("Device Services was uninstalled without authorisation"),
+// which then needs the owning service/carrier to unlock -- this list only touches the
+// on-device Knox container/feature packages themselves.
 private val T509_ADB_COMMAND = """
     pm disable-user --user 0 com.samsung.android.knox.er;
-    pm disable-user --user 0 com.sec.enterprise.knox.cloudmdm.smdms;
     pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
     pm disable-user --user 0 com.knox.vpn.proxyhandler;
     pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
-    pm disable-user --user 0 com.android.managedprovisioning;
-    pm disable-user --user 0 com.samsung.android.kgclient;
-    pm disable-user --user 0 com.samsung.klmsagent;
-    pm disable-user --user 0 com.samsung.android.mdm;
-    pm disable-user --user 0 com.samsung.android.knox.analytics.uploader;
-    pm disable-user --user 0 com.samsung.android.knox.attestation;
-    pm disable-user --user 0 com.sec.enterprise.knox.attestation;
     pm disable-user --user 0 com.samsung.android.knox.containercore;
     pm disable-user --user 0 com.samsung.android.knox.containeragent;
-    pm disable-user --user 0 com.samsung.android.knox.kpecore;
     pm disable-user --user 0 com.samsung.android.knox.pushmanager;
     pm disable-user --user 0 com.samsung.android.knox.zt.framework;
     pm disable-user --user 0 com.samsung.knox.keychain;
-    pm disable-user --user 0 com.sec.enterprise.mdm.services.simpin;
-    pm disable-user --user 0 com.samsung.knox.securefolder;
-    settings put global device_provisioned 1;
-    settings put secure user_setup_complete 1;
-    content insert --uri content://settings/secure --bind name:s:user_setup_complete --bind value:s:1;
-    content insert --uri content://settings/global --bind name:s:device_provisioned --bind value:s:1;
-    reboot
+    pm disable-user --user 0 com.samsung.knox.securefolder
 """.trimIndent().replace("\n", " ")
 
 @Composable
