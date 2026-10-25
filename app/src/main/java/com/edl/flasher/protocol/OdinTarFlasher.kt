@@ -146,7 +146,11 @@ object OdinTarFlasher {
             var lastLoggedPct = -1
             val startNs = System.nanoTime()
             try {
-                odin.flashImage(part, bounded, header.size, singleSequence = quickFormat, tolerateFinalAckWarning = quickFormat) { done, total ->
+                // Send in the device's normal windowed sequence (same as every other
+                // partition) instead of forcing one giant block -- a working third-party
+                // Odin tool flashes this same file successfully using normal windowing,
+                // so the single-block path was the cause of the write not sticking.
+                odin.flashImage(part, bounded, header.size, singleSequence = false, tolerateFinalAckWarning = quickFormat) { done, total ->
                     onPartitionProgress(label, done, total)
                     if (isUserdata && total > 0L) {
                         val pct = ((done * 100L) / total).toInt()
