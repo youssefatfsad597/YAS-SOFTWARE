@@ -89,6 +89,7 @@ import androidx.compose.ui.unit.coerceIn
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.edl.flasher.R
+import com.edl.flasher.protocol.OdinTarFlasher
 import com.edl.flasher.protocol.PartitionEntry
 import com.edl.flasher.protocol.StorageType
 import com.edl.flasher.protocol.T509Variant
@@ -679,7 +680,8 @@ fun EdlMainScreen(
     onPickCscTar: () -> Unit,
     onPickUserdataTar: () -> Unit,
     onRunOdinFlash: () -> Unit,
-    onFlashUserdataOnly: () -> Unit,
+    onToggleOdinSlot: (String) -> Unit,
+    onToggleOdinEntry: (String, String) -> Unit,
     onFormatT505N: () -> Unit,
     onToggleOdinAutoReboot: (Boolean) -> Unit,
     onExitDownloadMode: () -> Unit,
@@ -706,7 +708,7 @@ fun EdlMainScreen(
     var confirmBatchErase by remember { mutableStateOf(false) }
     var dockExpanded by remember { mutableStateOf(false) }
     var dockTab by remember { mutableIntStateOf(0) }
-    val tabTitles = listOf("X216B Service", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "MTP / ADB")
+    val tabTitles = listOf("X216B Service", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "T505N", "MTP / ADB")
 
     confirmEraseTarget?.let { target ->
         YASConfirmDialog(
@@ -794,11 +796,16 @@ fun EdlMainScreen(
                 onClearCscTar = onClearCscTar,
                 onClearUserdataTar = onClearUserdataTar,
                 onRunOdinFlash = onRunOdinFlash,
-                onFlashUserdataOnly = onFlashUserdataOnly,
-                onFormatT505N = onFormatT505N,
+                onToggleOdinSlot = onToggleOdinSlot,
+                onToggleOdinEntry = onToggleOdinEntry,
                 onToggleOdinAutoReboot = onToggleOdinAutoReboot,
                 onExitDownloadMode = onExitDownloadMode,
                 onMtpDownloadAt = onMtpDownloadAt
+            )
+            5 -> T505NTab(
+                state = state,
+                onMtpDownloadAt = onMtpDownloadAt,
+                onFormatT505N = onFormatT505N
             )
             else -> AdbMtpTab(
                 state = state,
@@ -932,9 +939,7 @@ private fun TopBar(
             Image(
                 painter = painterResource(id = R.drawable.yas_logo),
                 contentDescription = "YAS SOFTWARE logo",
-                modifier = Modifier
-                    .size(30.dp)
-                    .clip(S6)
+                modifier = Modifier.size(38.dp)
             )
             Column {
                 Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -2209,6 +2214,72 @@ private fun OdinSlotRow(
 }
 
 @Composable
+private fun OdinComponentList(
+    slot: String,
+    entries: List<OdinTarFlasher.PackageEntry>,
+    deselected: Set<String>,
+    enabled: Boolean,
+    onToggleSlot: () -> Unit,
+    onToggleEntry: (String) -> Unit
+) {
+    if (entries.isEmpty()) return
+    var expanded by remember(slot, entries.size) { mutableStateOf(true) }
+    val selectedCount = entries.count { "$slot|${it.label}" !in deselected }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(bottom = 8.dp)
+            .background(Yas.Bg, S6)
+            .border(1.dp, Yas.Border, S6)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(Yas.SurfaceHi, S6)
+                .clickable { expanded = !expanded }
+                .padding(horizontal = 10.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            YASCheck(selectedCount == entries.size, { onToggleSlot() }, enabled = enabled)
+            YText(
+                "$slot: $selectedCount / ${entries.size} selected",
+                size = 11.sp,
+                weight = FontWeight.SemiBold,
+                color = Yas.TextSoft,
+                modifier = Modifier.weight(1f)
+            )
+            YText(if (expanded) "\u25B2" else "\u25BC", size = 10.sp, color = Yas.Muted)
+        }
+        if (expanded) {
+            entries.forEach { e ->
+                val on = "$slot|${e.label}" !in deselected
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable(enabled = enabled) { onToggleEntry(e.label) }
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    YASCheck(on, { onToggleEntry(e.label) }, enabled = enabled)
+                    YText(
+                        e.label,
+                        size = 11.sp,
+                        mono = true,
+                        color = if (on) Yas.Text else Yas.Muted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    YText(formatSize(e.size), size = 10.sp, mono = true, color = Yas.Muted, maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun OdinTab(
     state: EdlUiState,
     onConnectOdinDevice: () -> Unit,
@@ -2223,28 +2294,22 @@ private fun OdinTab(
     onClearCscTar: (() -> Unit)?,
     onClearUserdataTar: (() -> Unit)?,
     onRunOdinFlash: () -> Unit,
-    onFlashUserdataOnly: () -> Unit,
-    onFormatT505N: () -> Unit,
+    onToggleOdinSlot: (String) -> Unit,
+    onToggleOdinEntry: (String, String) -> Unit,
     onToggleOdinAutoReboot: (Boolean) -> Unit,
     onExitDownloadMode: () -> Unit,
     onMtpDownloadAt: () -> Unit
 ) {
-    var showFormatT505NConfirm by remember { mutableStateOf(false) }
-    if (showFormatT505NConfirm) {
-        YASConfirmDialog(
-            title = "Format T505N?",
-            message = "Flashes only the selected userdata image to the tablet in Download Mode and reboots it. All user data will be erased. FRP / Samsung account lock is not removed by this.",
-            confirmText = "Format",
-            danger = true,
-            onConfirm = {
-                showFormatT505NConfirm = false
-                onFormatT505N()
-            },
-            onDismiss = { showFormatT505NConfirm = false }
-        )
+    val slotUris = listOf(
+        "BL" to state.blTarUri, "AP" to state.apTarUri, "CP" to state.cpTarUri,
+        "CSC" to state.cscTarUri, "USERDATA" to state.userdataTarUri
+    )
+    // Something is flashable when a package is loaded and at least one of its components is ticked
+    // (a package whose contents could not be listed counts as ticked).
+    val anySlot = slotUris.any { (slot, uri) ->
+        val entries = state.odinEntries[slot].orEmpty()
+        uri != null && (entries.isEmpty() || entries.any { "$slot|${it.label}" !in state.odinDeselected })
     }
-    val anySlot = state.blTarUri != null || state.apTarUri != null || state.cpTarUri != null ||
-        state.cscTarUri != null || state.userdataTarUri != null
 
     Column(
         modifier = Modifier
@@ -2298,12 +2363,16 @@ private fun OdinTab(
         ) {
             Column {
                 OdinSlotRow("BL", "Bootloader", state.blTarName, state.blTarUri, !state.isBusy, onPickBlTar, onClearBlTar)
+                OdinComponentList("BL", state.odinEntries["BL"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("BL") }, { onToggleOdinEntry("BL", it) })
                 YDivider()
                 OdinSlotRow("AP", "System / Kernel", state.apTarName, state.apTarUri, !state.isBusy, onPickApTar, onClearApTar)
+                OdinComponentList("AP", state.odinEntries["AP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("AP") }, { onToggleOdinEntry("AP", it) })
                 YDivider()
                 OdinSlotRow("CP", "Modem", state.cpTarName, state.cpTarUri, !state.isBusy, onPickCpTar, onClearCpTar)
+                OdinComponentList("CP", state.odinEntries["CP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CP") }, { onToggleOdinEntry("CP", it) })
                 YDivider()
                 OdinSlotRow("CSC", "CSC", state.cscTarName, state.cscTarUri, !state.isBusy, onPickCscTar, onClearCscTar)
+                OdinComponentList("CSC", state.odinEntries["CSC"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CSC") }, { onToggleOdinEntry("CSC", it) })
                 YDivider()
                 OdinSlotRow(
                     "USERDATA",
@@ -2314,6 +2383,7 @@ private fun OdinTab(
                     onPickUserdataTar,
                     onClearUserdataTar
                 )
+                OdinComponentList("USERDATA", state.odinEntries["USERDATA"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("USERDATA") }, { onToggleOdinEntry("USERDATA", it) })
             }
         }
 
@@ -2329,36 +2399,78 @@ private fun OdinTab(
                 YText("Auto-reboot after the operation", size = 12.sp, color = Yas.TextSoft)
             }
             YASButton(
-                text = "Format T505N (Download Mode)",
-                onClick = { showFormatT505NConfirm = true },
+                text = "Odin Flash",
+                onClick = onRunOdinFlash,
                 modifier = Modifier.fillMaxWidth(),
-                style = BtnStyle.Danger,
-                enabled = !state.isBusy && state.userdataTarUri != null,
+                style = BtnStyle.Primary,
+                enabled = !state.isBusy && anySlot,
                 large = true
             )
-            Hint("Format T505N: select userdata.tar above, put the tablet in Download Mode, then tap. Only userdata is written.")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                YASButton(
-                    text = "Flash userdata only",
-                    onClick = onFlashUserdataOnly,
-                    modifier = Modifier.weight(1f),
-                    style = BtnStyle.Secondary,
-                    enabled = !state.isBusy && state.userdataTarUri != null,
-                    large = true
-                )
-                YASButton(
-                    text = "Odin Flash",
-                    onClick = onRunOdinFlash,
-                    modifier = Modifier.weight(1.4f),
-                    style = BtnStyle.Primary,
-                    enabled = !state.isBusy && anySlot,
-                    large = true
+            Hint("Download Mode: load a package, then tick only the components you want. Odin Flash writes just the ticked ones, in order.")
+        }
+    }
+}
+
+// =====================================================================================
+//  Tab 5 : T505N (MTP Download + Format by flashing userdata)
+// =====================================================================================
+
+@Composable
+private fun T505NTab(
+    state: EdlUiState,
+    onMtpDownloadAt: () -> Unit,
+    onFormatT505N: () -> Unit
+) {
+    var showFormatConfirm by remember { mutableStateOf(false) }
+    if (showFormatConfirm) {
+        YASConfirmDialog(
+            title = "Format T505N?",
+            message = "You will be asked to choose the userdata file. Only userdata is flashed to the tablet in Download Mode, then it reboots. All user data will be erased. FRP / Samsung account lock is not removed by this.",
+            confirmText = "Choose file & Format",
+            danger = true,
+            onConfirm = {
+                showFormatConfirm = false
+                onFormatT505N()
+            },
+            onDismiss = { showFormatConfirm = false }
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        YASCard(
+            title = "T505N",
+            subtitle = state.odinDeviceDescription,
+            trailing = {
+                StatusBadge(
+                    text = if (state.odinConnected) "DOWNLOAD MODE" else "NOT CONNECTED",
+                    color = if (state.odinConnected) Yas.Success else Yas.Idle,
+                    pulsing = state.odinConnected
                 )
             }
-            Hint("Download Mode: Odin Flash writes the selected slots in order. Flash userdata only writes the userdata slot.")
+        ) {
+            YASButton(
+                text = "MTP DOWNLOAD",
+                onClick = onMtpDownloadAt,
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.Warning,
+                enabled = !state.isBusy && !state.odinConnected,
+                large = true
+            )
+            Hint("MTP DOWNLOAD: sends the tablet to Download Mode from MTP (normal Android, cable connected).")
+            YASButton(
+                text = "Format",
+                onClick = { showFormatConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.Danger,
+                enabled = !state.isBusy,
+                large = true
+            )
+            Hint("Format: asks for the userdata file, then flashes it in Download Mode and reboots. Only userdata is written.")
         }
     }
 }

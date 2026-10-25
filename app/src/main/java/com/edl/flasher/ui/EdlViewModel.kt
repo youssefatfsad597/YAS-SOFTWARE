@@ -69,6 +69,10 @@ data class EdlUiState(
     val cscTarName: String = "CSC .tar/.md5: Not Selected",
     val userdataTarUri: Uri? = null,
     val userdataTarName: String = "userdata.img / .tar: Not Selected",
+    // Components found inside each loaded package (slot -> entries) and the ones the user
+    // un-ticked ("SLOT|label"). Everything is ticked by default.
+    val odinEntries: Map<String, List<OdinTarFlasher.PackageEntry>> = emptyMap(),
+    val odinDeselected: Set<String> = emptySet(),
     val odinAutoReboot: Boolean = true,
     // Some T505N userdata packages contain extra system images.  Keep the
     // safe default enabled so only userdata is sent from that package.
@@ -770,30 +774,125 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
         _uiState.update { it.copy(blTarUri = uri, blTarName = "BL: $name") }
         appendLog("Selected BL package: $name")
+        scanPackage("BL", uri, name)
     }
+
+    fun clearBlTar() = clearOdinSlot("BL")
 
     fun setApTarUri(uri: Uri) {
         val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
         _uiState.update { it.copy(apTarUri = uri, apTarName = "AP: $name") }
         appendLog("Selected AP package: $name")
+        scanPackage("AP", uri, name)
     }
+
+    fun clearApTar() = clearOdinSlot("AP")
 
     fun setCpTarUri(uri: Uri) {
         val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
         _uiState.update { it.copy(cpTarUri = uri, cpTarName = "CP: $name") }
         appendLog("Selected CP package: $name")
+        scanPackage("CP", uri, name)
     }
+
+    fun clearCpTar() = clearOdinSlot("CP")
 
     fun setCscTarUri(uri: Uri) {
         val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
         _uiState.update { it.copy(cscTarUri = uri, cscTarName = "CSC: $name") }
         appendLog("Selected CSC package: $name")
+        scanPackage("CSC", uri, name)
     }
+
+    fun clearCscTar() = clearOdinSlot("CSC")
 
     fun setUserdataTarUri(uri: Uri) {
         val name = DocumentFile.fromSingleUri(context, uri)?.name ?: uri.lastPathSegment.orEmpty()
         _uiState.update { it.copy(userdataTarUri = uri, userdataTarName = "userdata: $name") }
         appendLog("Selected userdata package: $name")
+        scanPackage("USERDATA", uri, name)
+    }
+
+    fun clearUserdataTar() = clearOdinSlot("USERDATA")
+
+    /** Opens the chosen package in the background and lists every component inside it. */
+    private fun scanPackage(slot: String, uri: Uri, fileName: String) {
+        _uiState.update { st ->
+            st.copy(
+                odinEntries = st.odinEntries - slot,
+                odinDeselected = st.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet()
+            )
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            val entries: List<OdinTarFlasher.PackageEntry> = runCatching {
+                if (isRawImage(uri)) {
+                    val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+                    val base = fileName.substringAfterLast('/')
+                    listOf(OdinTarFlasher.PackageEntry(base, base.substringBeforeLast('.', base), size))
+                } else {
+                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.listEntries(it) }.orEmpty()
+                }
+            }.getOrElse { e ->
+                appendLog("Could not read the contents of $fileName: ${e.message}")
+                emptyList()
+            }
+            // Only keep the answer if the user did not pick a different file meanwhile.
+            val still = when (slot) {
+                "BL" -> _uiState.value.blTarUri
+                "AP" -> _uiState.value.apTarUri
+                "CP" -> _uiState.value.cpTarUri
+                "CSC" -> _uiState.value.cscTarUri
+                else -> _uiState.value.userdataTarUri
+            }
+            if (still != uri) return@launch
+            _uiState.update { it.copy(odinEntries = it.odinEntries + (slot to entries)) }
+            if (entries.isEmpty()) {
+                appendLog("$slot package: no components could be listed (it will be flashed as a whole).")
+            } else {
+                appendLog("$slot package contains ${entries.size} component(s): " + entries.joinToString(", ") { it.label })
+            }
+        }
+    }
+
+    private fun clearOdinSlot(slot: String) {
+        _uiState.update { st ->
+            val cleared = when (slot) {
+                "BL" -> st.copy(blTarUri = null, blTarName = "BL (Bootloader) .tar/.md5: Not Selected")
+                "AP" -> st.copy(apTarUri = null, apTarName = "AP (System/Kernel) .tar/.md5: Not Selected")
+                "CP" -> st.copy(cpTarUri = null, cpTarName = "CP (Modem) .tar/.md5: Not Selected")
+                "CSC" -> st.copy(cscTarUri = null, cscTarName = "CSC .tar/.md5: Not Selected")
+                else -> st.copy(userdataTarUri = null, userdataTarName = "userdata.img / .tar: Not Selected")
+            }
+            cleared.copy(
+                odinEntries = cleared.odinEntries - slot,
+                odinDeselected = cleared.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet()
+            )
+        }
+    }
+
+    /** Tick / untick one component of one package. */
+    fun toggleOdinEntry(slot: String, label: String) {
+        val key = "$slot|$label"
+        _uiState.update {
+            it.copy(odinDeselected = if (key in it.odinDeselected) it.odinDeselected - key else it.odinDeselected + key)
+        }
+    }
+
+    /** Tick / untick every component of one package at once. */
+    fun toggleOdinSlot(slot: String) {
+        _uiState.update { st ->
+            val labels = st.odinEntries[slot].orEmpty().map { "$slot|${it.label}" }
+            val allOn = labels.none { it in st.odinDeselected }
+            st.copy(odinDeselected = if (allOn) st.odinDeselected + labels else st.odinDeselected - labels.toSet())
+        }
+    }
+
+    private fun entrySelected(slot: String, label: String): Boolean =
+        "$slot|$label" !in _uiState.value.odinDeselected
+
+    private fun shouldFlashFor(slot: String, honorSelection: Boolean): (String) -> Boolean {
+        val base = userdataFilterFor(slot)
+        return { l -> base(l) && (!honorSelection || entrySelected(slot, l)) }
     }
 
     fun setSkipSystemFilesInUserdataTar(enabled: Boolean) {
@@ -961,7 +1060,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 // Normal windowed transfer (same as every other partition) -- a working
                 // third-party Odin tool flashes this same file successfully using normal
                 // windowing, so the single-block path was the cause of the write not sticking.
-                odin.flashImage(part, ins, size, singleSequence = false, tolerateFinalAckWarning = (reason != null)) { done, total ->
+                odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total ->
                     updateProgress(done, total, start)
                     if (total > 0L) {
                         val pct = ((done * 100L) / total).toInt()
@@ -990,7 +1089,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      * against this device's own PIT table), then again to actually stream
      * the data.
      */
-    private suspend fun flashTarsWithOdin(slots: List<Pair<String, Uri>>) {
+    private suspend fun flashTarsWithOdin(allSlots: List<Pair<String, Uri>>, honorSelection: Boolean = true) {
+        // Drop packages whose components were all un-ticked.
+        val slots = allSlots.filter { (slot, _) ->
+            val entries = _uiState.value.odinEntries[slot].orEmpty()
+            val keep = !honorSelection || entries.isEmpty() || entries.any { entrySelected(slot, it.label) }
+            if (!keep) appendLog("Skipping $slot: nothing selected inside it.")
+            keep
+        }
+        if (slots.isEmpty()) throw IllegalStateException("Nothing is selected to flash. Tick at least one component.")
         openOdinConnectionIfNeeded()
         val pit = odin.requirePit()
 
@@ -1002,7 +1109,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     rawImageSize(uri, pit)
                 } else {
                     OdinTarFlasher.sumFlashableSize(
-                        sizingStream, pit, userdataFilterFor(label),
+                        sizingStream, pit, shouldFlashFor(label, honorSelection),
                         allowUndersizedUserdata = _uiState.value.allowSmallUserdata
                     )
                 }
@@ -1037,7 +1144,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                         }
                         updateProgress(done, partTotal, partitionStartNs)
                     },
-                    shouldFlash = userdataFilterFor(label),
+                    shouldFlash = shouldFlashFor(label, honorSelection),
                     allowUndersizedUserdata = _uiState.value.allowSmallUserdata
                 )
                 if (flashed.isEmpty()) {
@@ -1077,19 +1184,6 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun runFlashUserdataTarOnly() {
-        runTask("Flash userdata.tar") {
-            val uri = _uiState.value.userdataTarUri
-                ?: throw IllegalStateException("Please select userdata.tar first!")
-
-            appendLog("=== FLASHING ${_uiState.value.userdataTarName} ===")
-            flashTarsWithOdin(listOf("USERDATA" to uri))
-
-            odin.shutdown(reboot = _uiState.value.odinAutoReboot)
-            appendLog("Operation completed successfully.")
-        }
-    }
-
     /**
      * One-tap "Format T505N" for a Samsung tablet in Download Mode: flashes ONLY the
      * userdata image from the selected userdata.tar / userdata.img, then closes the
@@ -1104,7 +1198,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(skipSystemFilesInUserdataTar = true) }
 
             appendLog("=== FORMAT T505N: ${_uiState.value.userdataTarName} ===")
-            flashTarsWithOdin(listOf("USERDATA" to uri))
+            flashTarsWithOdin(listOf("USERDATA" to uri), honorSelection = false)
 
             odin.shutdown(reboot = true)
             transport.close()
@@ -1117,6 +1211,12 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLog("Format finished. The tablet is rebooting; the first boot can take a few minutes.")
         }
+    }
+
+    /** T505N tab: the user just picked the userdata file, so select it and format right away. */
+    fun formatT505NWithUri(uri: Uri) {
+        setUserdataTarUri(uri)
+        formatT505N()
     }
 
     fun readAllGptPartitions() {
@@ -1597,9 +1697,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 if (ok) { done = true; break }
             }
             if (done) {
-                appendLog("AT command accepted. The device should switch to $label shortly.")
+                appendLog("AT command accepted. The device is switching to $label; wait a few seconds, it connects automatically.")
             } else {
-                appendLog("The device did not confirm. It may still be switching; if nothing happens, this USB mode has no AT port (on some Samsung phones: *#0808# -> pick a mode with MODEM).")
+                appendLog("No reply and the device stayed on the USB bus. This USB mode probably has no AT port (on some Samsung phones: *#0808# -> pick a mode with MODEM).")
             }
         }
     }
