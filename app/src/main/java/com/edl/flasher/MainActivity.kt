@@ -156,6 +156,7 @@ class MainActivity : ComponentActivity() {
                     onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
                     onRunOdinFlash = viewModel::runOdinFlashSequence,
                     onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
+                    onFormatT505N = viewModel::formatT505N,
                     onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
                     onExitDownloadMode = viewModel::exitDownloadMode,
                     onReadMtpInfo = viewModel::readMtpInfo,
