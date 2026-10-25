@@ -2015,6 +2015,38 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Writes a new Samsung-style serial number (11 characters, A-Z / 0-9) to the device over
+     *  its AT port (MTP mode, no ADB / root needed): the classic 5-step Samsung AT+SERIALNO
+     *  sequence ([AtCommandTransport.changeSerialSequence]), then a normal reboot. */
+    fun changeSamsungSerial(newSerial: String) {
+        val sn = newSerial.trim().uppercase()
+        if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
+            appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
+            return
+        }
+        runTask("Change Serial ($sn)") {
+            appendLog("=== CHANGE SERIAL: $sn ===")
+            val mtpDevices = MtpInfoReader.findMtpDevices(context)
+            if (mtpDevices.isEmpty()) {
+                appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                return@runTask
+            }
+            var done = false
+            for (dev in mtpDevices) {
+                val ok = runCatching {
+                    AtCommandTransport(context).use { it.changeSerialSequence(dev, sn) { m -> appendLog(m) } }
+                }.getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+                if (ok) { done = true; break }
+            }
+            if (done) {
+                appendLog("Serial changed and the device is rebooting. Reconnect and use Read Info to confirm.")
+                _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+            } else {
+                appendLog("Serial was NOT changed: the modem port did not accept the sequence (wrong USB mode, or this firmware does not honor AT+SERIALNO). On Samsung dial *#0808# and pick a mode that includes MODEM, then retry.")
+            }
+        }
+    }
+
     fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->
         at.tryRebootToDownloadMode(dev) { appendLog(it) }
     }
