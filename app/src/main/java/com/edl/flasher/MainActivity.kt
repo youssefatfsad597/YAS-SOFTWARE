@@ -130,6 +130,7 @@ class MainActivity : ComponentActivity() {
                     onStorageSelected = viewModel::setStorageType,
                     onRunSaharaAndFirehose = { viewModel.runSaharaAndConfigureFirehose(autoReadGpt = true) },
                     onReadGpt = viewModel::readAllGptPartitions,
+                    onDiagnoseWrite = viewModel::diagnoseStorageWrite,
                     onLunFilterSelected = viewModel::setLunFilter,
                     onTogglePartSelection = viewModel::togglePartitionSelection,
                     onSelectAllParts = viewModel::selectAllVisiblePartitions,
