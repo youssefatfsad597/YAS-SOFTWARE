@@ -59,6 +59,7 @@ data class EdlUiState(
     val odinConnected: Boolean = false,
     val odinSessionReady: Boolean = false,
     val odinDeviceDescription: String = "No Download-Mode Device Detected",
+    val odinInfoText: String = "",
     val blTarUri: Uri? = null,
     val blTarName: String = "BL (Bootloader) .tar/.md5: Not Selected",
     val apTarUri: Uri? = null,
@@ -955,11 +956,23 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             appendLog("Detected Samsung Download-Mode device (${device.deviceName})")
             val opened = transport.requestPermissionAndOpen(device)
             if (opened) {
+                // Best-effort DID / RAND / TMU_TEMP read, then reopen so the ODIN handshake starts clean.
+                val info = OdinDeviceInfo.probe(transport, ::appendLog)
+                if (!info.isEmpty) {
+                    appendLog("Device info: DID=${info.did} TMU_TEMP=${info.tmuTemp.ifBlank { "NA" }}")
+                }
+                transport.close()
+                val reopened = transport.requestPermissionAndOpen(device)
+                if (!reopened) {
+                    appendLog("ERROR: could not reopen the Download-Mode USB interface.")
+                    return@launch
+                }
                 _uiState.update {
                     it.copy(
                         odinConnected = true,
                         odinSessionReady = false,
                         odinDeviceDescription = "Samsung Download Mode (Odin Protocol)",
+                        odinInfoText = info.toDisplayText(),
                         usbConnected = false,
                         firehoseReady = false
                     )
