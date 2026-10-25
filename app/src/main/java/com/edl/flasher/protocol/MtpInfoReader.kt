@@ -24,6 +24,30 @@ object MtpInfoReader {
         }
     }
 
+    /** Every device that could carry an AT/modem port: MTP devices first, then any device that
+     *  exposes a CDC / vendor serial-style interface (modem or diag USB modes), so the tools also
+     *  work when the phone is NOT in MTP mode. Samsung Download Mode and Qualcomm EDL are excluded. */
+    fun findModemDevices(context: Context): List<UsbDevice> {
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+        val mtp = findMtpDevices(context)
+        val others = usbManager.deviceList.values.filter { dev ->
+            mtp.none { it.deviceName == dev.deviceName } &&
+                !(dev.vendorId == 0x04E8 && (dev.productId == 0x685D || dev.productId == 0x6601)) &&
+                !(dev.vendorId == 0x05C6 && dev.productId == 0x9008) &&
+                (0 until dev.interfaceCount).any { i ->
+                    val intf = dev.getInterface(i)
+                    val eps = (0 until intf.endpointCount).map { intf.getEndpoint(it) }
+                    val bulkPair = eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_IN } &&
+                        eps.any { it.type == UsbConstants.USB_ENDPOINT_XFER_BULK && it.direction == UsbConstants.USB_DIR_OUT }
+                    val isAdb = intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC && intf.interfaceSubclass == 0x42 && intf.interfaceProtocol == 0x01
+                    bulkPair && !isAdb && (intf.interfaceClass == UsbConstants.USB_CLASS_COMM ||
+                        intf.interfaceClass == UsbConstants.USB_CLASS_CDC_DATA ||
+                        intf.interfaceClass == UsbConstants.USB_CLASS_VENDOR_SPEC)
+                }
+        }
+        return mtp + others
+    }
+
     fun describe(context: Context, dev: UsbDevice): String {
         val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
         val hasPermission = usbManager.hasPermission(dev)
