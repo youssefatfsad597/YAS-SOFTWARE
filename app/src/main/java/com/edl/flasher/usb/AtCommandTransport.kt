@@ -165,8 +165,17 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 } else {
                     log("Interface ${intf.id}: no reply (device may already be switching modes).")
                 }
+                if (anySuccess && stopOnSuccess) break
+                // A phone that honors a mode switch drops off the USB bus, usually WITHOUT
+                // printing "OK". Count that as success so the button works on the first tap
+                // (before this, the app said "did not confirm" while the phone was in fact switching).
+                if (waitForDetach(device, 4000)) {
+                    log("USB link dropped after '${cmd.trim()}': the device is switching mode.")
+                    anySuccess = true
+                    if (stopOnSuccess) break
+                }
             }
-            conn.releaseInterface(intf)
+            runCatching { conn.releaseInterface(intf) }
             if (anySuccess && stopOnSuccess) break
         }
 
