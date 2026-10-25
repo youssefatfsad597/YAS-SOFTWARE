@@ -958,7 +958,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         var lastLoggedPct = -1
         try {
             context.contentResolver.openInputStream(uri)?.use { ins ->
-                odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total ->
+                // Normal windowed transfer (same as every other partition) -- a working
+                // third-party Odin tool flashes this same file successfully using normal
+                // windowing, so the single-block path was the cause of the write not sticking.
+                odin.flashImage(part, ins, size, singleSequence = false, tolerateFinalAckWarning = (reason != null)) { done, total ->
                     updateProgress(done, total, start)
                     if (total > 0L) {
                         val pct = ((done * 100L) / total).toInt()
@@ -1084,6 +1087,35 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             odin.shutdown(reboot = _uiState.value.odinAutoReboot)
             appendLog("Operation completed successfully.")
+        }
+    }
+
+    /**
+     * One-tap "Format T505N" for a Samsung tablet in Download Mode: flashes ONLY the
+     * userdata image from the selected userdata.tar / userdata.img, then closes the
+     * session and reboots so Android recreates the data partition.
+     */
+    fun formatT505N() {
+        runTask("Format T505N (Download Mode)") {
+            val uri = _uiState.value.userdataTarUri
+                ?: throw IllegalStateException("Select the userdata.tar / userdata.img first.")
+
+            // Safety: never let a package with extra system images touch anything but userdata.
+            _uiState.update { it.copy(skipSystemFilesInUserdataTar = true) }
+
+            appendLog("=== FORMAT T505N: ${_uiState.value.userdataTarName} ===")
+            flashTarsWithOdin(listOf("USERDATA" to uri))
+
+            odin.shutdown(reboot = true)
+            transport.close()
+            _uiState.update {
+                it.copy(
+                    odinConnected = false,
+                    odinSessionReady = false,
+                    odinDeviceDescription = "No Download-Mode Device Detected"
+                )
+            }
+            appendLog("Format finished. The tablet is rebooting; the first boot can take a few minutes.")
         }
     }
 

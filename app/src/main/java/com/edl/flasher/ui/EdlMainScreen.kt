@@ -680,6 +680,7 @@ fun EdlMainScreen(
     onPickUserdataTar: () -> Unit,
     onRunOdinFlash: () -> Unit,
     onFlashUserdataOnly: () -> Unit,
+    onFormatT505N: () -> Unit,
     onToggleOdinAutoReboot: (Boolean) -> Unit,
     onExitDownloadMode: () -> Unit,
     onReadMtpInfo: () -> Unit,
@@ -794,6 +795,7 @@ fun EdlMainScreen(
                 onClearUserdataTar = onClearUserdataTar,
                 onRunOdinFlash = onRunOdinFlash,
                 onFlashUserdataOnly = onFlashUserdataOnly,
+                onFormatT505N = onFormatT505N,
                 onToggleOdinAutoReboot = onToggleOdinAutoReboot,
                 onExitDownloadMode = onExitDownloadMode,
                 onMtpDownloadAt = onMtpDownloadAt
@@ -2222,10 +2224,25 @@ private fun OdinTab(
     onClearUserdataTar: (() -> Unit)?,
     onRunOdinFlash: () -> Unit,
     onFlashUserdataOnly: () -> Unit,
+    onFormatT505N: () -> Unit,
     onToggleOdinAutoReboot: (Boolean) -> Unit,
     onExitDownloadMode: () -> Unit,
     onMtpDownloadAt: () -> Unit
 ) {
+    var showFormatT505NConfirm by remember { mutableStateOf(false) }
+    if (showFormatT505NConfirm) {
+        YASConfirmDialog(
+            title = "Format T505N?",
+            message = "Flashes only the selected userdata image to the tablet in Download Mode and reboots it. All user data will be erased. FRP / Samsung account lock is not removed by this.",
+            confirmText = "Format",
+            danger = true,
+            onConfirm = {
+                showFormatT505NConfirm = false
+                onFormatT505N()
+            },
+            onDismiss = { showFormatT505NConfirm = false }
+        )
+    }
     val anySlot = state.blTarUri != null || state.apTarUri != null || state.cpTarUri != null ||
         state.cscTarUri != null || state.userdataTarUri != null
 
@@ -2311,6 +2328,15 @@ private fun OdinTab(
                 YASCheck(state.odinAutoReboot, onToggleOdinAutoReboot, enabled = !state.isBusy)
                 YText("Auto-reboot after the operation", size = 12.sp, color = Yas.TextSoft)
             }
+            YASButton(
+                text = "Format T505N (Download Mode)",
+                onClick = { showFormatT505NConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.Danger,
+                enabled = !state.isBusy && state.userdataTarUri != null,
+                large = true
+            )
+            Hint("Format T505N: select userdata.tar above, put the tablet in Download Mode, then tap. Only userdata is written.")
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
