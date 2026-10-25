@@ -2357,10 +2357,6 @@ private fun OdinTab(
             Hint("Connect: opens Odin on a device in Samsung Download Mode. MTP \u2192 Download: sends the device to Download Mode from MTP. Exit: leaves Download Mode.")
         }
 
-        if (state.odinConnected && state.odinInfoText.isNotBlank()) {
-            InfoGridCard("Device info", "DID / RAND / TMU_TEMP", state.odinInfoText)
-        }
-
         YASCard(
             title = "Firmware slots",
             subtitle = "BL \u2192 AP \u2192 CP \u2192 CSC \u2192 USERDATA"
