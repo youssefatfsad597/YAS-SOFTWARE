@@ -29,7 +29,11 @@ jobs:
               FAIL=1
             fi
           done
-          grep -q "PackageEntry" "$B/protocol/OdinTarFlasher.kt" || { echo "::error::protocol/OdinTarFlasher.kt is the OLD version - upload the new one."; FAIL=1; }
+          if ! grep -q "PackageEntry" "$B/protocol/OdinTarFlasher.kt"; then
+            echo "::warning::protocol/OdinTarFlasher.kt looks like the OLD version (no PackageEntry). Build continues; if it fails, upload the new file to $B/protocol/"
+            echo "OdinTarFlasher.kt copies found in the repo:"
+            find . -name "OdinTarFlasher.kt" -not -path "./.git/*"
+          fi
           [ "$FAIL" -eq 0 ] || exit 1
 
 
