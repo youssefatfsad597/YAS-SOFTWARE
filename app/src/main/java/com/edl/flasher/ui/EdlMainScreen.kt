@@ -1361,24 +1361,40 @@ private val X216B_ADB_COMMAND = """
     pm disable-user --user 0 com.samsung.android.sm.devicesecurity
 """.trimIndent().replace("\n", " ")
 
-// NOTE: packages that belong to an external/carrier device-management or lease-protection
-// service (OMA-DM sync agents, managed-provisioning, Knox Guard, MDM clients, attestation/
-// analytics uploaders) are intentionally NOT disabled here. Disabling one of those can trip
-// the device's anti-tamper lock ("Device Services was uninstalled without authorisation"),
-// which then needs the owning service/carrier to unlock -- this list only touches the
-// on-device Knox container/feature packages themselves.
+// NOTE (T505N only): this is every package carrying the Knox name that normally ships on a
+// Samsung tablet -- framework/container, Secure Folder, KLMS licensing, attestation, SE Android
+// policy, KPE core, enterprise routing, container agent/push/zero-touch, network filter and the
+// Knox-managed VPN. Earlier this list was trimmed to just containercore/keychain/securefolder
+// because ".er", ".containeragent", ".pushmanager", ".zt.framework", ".app.networkfilter" and
+// ".vpn.proxyhandler" are the ones that actually talk to an external carrier/lease
+// device-management or device-protection service, and on at least one T505N unit disabling one
+// of those tripped the device's own anti-tamper lock ("Device Services was uninstalled without
+// authorisation"), which then needs the owning carrier/service to unlock. This full list brings
+// those back at the user's request, so that same risk is back too on a unit tied to that kind of
+// service -- if it locks again, Samsung/the carrier's own Knox tools are the way to undo it.
 private val T505N_KNOX_ADB_COMMAND = """
-    pm disable-user --user 0 com.samsung.android.knox.er;
-    pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
-    pm disable-user --user 0 com.knox.vpn.proxyhandler;
-    pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
     pm disable-user --user 0 com.samsung.android.knox.containercore;
     pm disable-user --user 0 com.samsung.android.knox.containeragent;
     pm disable-user --user 0 com.samsung.android.knox.pushmanager;
     pm disable-user --user 0 com.samsung.android.knox.zt.framework;
+    pm disable-user --user 0 com.samsung.android.knox.er;
+    pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
+    pm disable-user --user 0 com.samsung.android.knox.attestation;
+    pm disable-user --user 0 com.samsung.android.knox.analytics.uploader;
+    pm disable-user --user 0 com.samsung.android.knox.kpecore;
     pm disable-user --user 0 com.samsung.knox.keychain;
-    pm disable-user --user 0 com.samsung.knox.securefolder
+    pm disable-user --user 0 com.samsung.knox.securefolder;
+    pm disable-user --user 0 com.samsung.klmsagent;
+    pm disable-user --user 0 com.sec.knox.seandroid;
+    pm disable-user --user 0 com.knox.vpn.proxyhandler;
+    pm disable-user --user 0 com.samsung.android.knox.kpu
 """.trimIndent().replace("\n", " ")
+// Deliberately NOT included: com.samsung.android.kgclient. That package shows on the device
+// as "Device Services" -- it IS the Knox Guard client, Samsung's own docs mark it
+// "safe to disable: never", and its removal/disabling is the exact, documented trigger for the
+// "Device Services was uninstalled without authorisation" lock this button was changed to avoid.
+// It is not a "knox"-named package and pm can't selectively cripple it without producing that
+// same lock, so it stays untouched no matter how this list is widened.
 
 @Composable
 private fun Hint(text: String) {
@@ -2504,7 +2520,7 @@ private fun T505NTab(
     if (showKnoxConfirm) {
         YASConfirmDialog(
             title = "Remove Knox?",
-            message = "Disables Knox, MDM and enterprise container packages over ADB. Needs normal Android with USB debugging on.",
+            message = "Disables every Knox package on the device over ADB (container, Secure Folder, licensing, attestation, enterprise routing, container agent/push/zero-touch, network filter, VPN). On some carrier/lease units this can trip the device's own anti-tamper lock. Needs normal Android with USB debugging on.",
             confirmText = "Remove Knox",
             danger = true,
             onConfirm = {
@@ -2610,7 +2626,7 @@ private fun T505NTab(
                     enabled = !state.isBusy,
                     large = true
                 )
-                Hint("USB debugging on: disables the Knox agent, MDM and enterprise-container packages for the current user.")
+                Hint("USB debugging on: disables every Knox package for the current user, including the ones that talk to an external MDM / lease-protection service -- can trip that service's own anti-tamper lock on some units.")
             }
         }
     }
@@ -2686,6 +2702,29 @@ private fun InfoGridCard(title: String, subtitle: String, text: String) {
     }
 }
 
+// Default page opened by the "Open Browser" button when the URL field is left empty.
+private const val DEFAULT_BROWSER_URL = "https://www.youtube.com"
+
+// Removes Factory Reset Protection over plain ADB: disables the Google account / Setup Wizard
+// check that is what actually puts up the FRP lock screen after a reset, and marks setup as
+// already completed so that check never runs again. Unlike the existing "Erase FRP" (Read GPT
+// tab) and T509 "Format+FRP" buttons -- which erase a raw frp/config/persistent partition over
+// Qualcomm Firehose or Unisoc FDL and so only work on those chipsets -- this is pure pm/settings
+// over the ADB protocol, so it works the same on any chipset (Qualcomm, Samsung Exynos such as
+// the T505N, Unisoc). It must be run from a normal Android session with USB debugging already
+// authorized, BEFORE the device is factory reset -- it cannot reach a device that is already
+// sitting on the FRP/Google-account lock screen, since that screen has no ADB access to begin
+// with (this is a removal done ahead of time, not an unlock of an already-locked screen).
+private val REMOVE_FRP_COMMAND = """
+    pm disable-user --user 0 com.google.android.gsf.login;
+    pm disable-user --user 0 com.google.android.setupwizard;
+    pm disable-user --user 0 com.google.android.gms.setup;
+    pm disable-user --user 0 com.google.android.backuptransport;
+    settings put secure user_setup_complete 1;
+    settings put global device_provisioned 1;
+    settings put secure skip_first_use_hints 1
+""".trimIndent().replace("\n", " ")
+
 @Composable
 private fun AdbMtpTab(
     state: EdlUiState,
@@ -2701,7 +2740,31 @@ private fun AdbMtpTab(
     var shellCmd by remember { mutableStateOf("") }
     var newSerial by remember { mutableStateOf("") }
     var showSerialConfirm by remember { mutableStateOf(false) }
+    var browserUrl by remember { mutableStateOf("") }
+    var showRemoveFrpConfirm by remember { mutableStateOf(false) }
     val serialValid = Regex("^[A-Z0-9]{11}$").matches(newSerial)
+    if (showRemoveFrpConfirm) {
+        YASConfirmDialog(
+            title = "Remove FRP?",
+            message = "Disables the Google account / Setup Wizard FRP check over ADB and marks setup already completed, so a later factory reset won't show the FRP lock screen. Pure ADB protocol -- works on any chipset (Qualcomm, Exynos, Unisoc). Must be run now, while USB debugging is authorized, BEFORE the reset -- it cannot reach a device already stuck on the FRP lock screen.",
+            confirmText = "Remove FRP",
+            danger = true,
+            onConfirm = {
+                showRemoveFrpConfirm = false
+                onAdbShell(REMOVE_FRP_COMMAND)
+            },
+            onDismiss = { showRemoveFrpConfirm = false }
+        )
+    }
+    val openBrowser: () -> Unit = {
+        val typed = browserUrl.trim()
+        val url = when {
+            typed.isEmpty() -> DEFAULT_BROWSER_URL
+            typed.contains("://") -> typed
+            else -> "https://$typed"
+        }
+        onAdbShell("am start -a android.intent.action.VIEW -d \"$url\"")
+    }
     if (showSerialConfirm) {
         YASConfirmDialog(
             title = "Change Serial?",
@@ -2786,6 +2849,37 @@ private fun AdbMtpTab(
                 )
             }
             Hint("ADB (USB debugging on): Read Info reads the device info including SN / IMEI. Download and Recovery reboot into those modes.")
+
+            YDivider()
+            SectionLabel("OPEN BROWSER")
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                YASTextField(
+                    value = browserUrl,
+                    onValueChange = { browserUrl = it },
+                    placeholder = "URL (empty = YouTube)",
+                    modifier = Modifier.weight(1f),
+                    mono = true,
+                    imeAction = ImeAction.Go,
+                    onSubmit = openBrowser
+                )
+                YASButton("Open Browser", openBrowser, style = BtnStyle.Secondary, enabled = !state.isBusy)
+            }
+            Hint("ADB (USB debugging on): opens the typed URL in the device's browser, or YouTube if left empty.")
+
+            YDivider()
+            SectionLabel("REMOVE FRP")
+            YASButton(
+                "Remove FRP",
+                { showRemoveFrpConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.Danger,
+                enabled = !state.isBusy
+            )
+            Hint("Disables the FRP/Google-account check over ADB before a reset. Works on any chipset, Exynos included (unlike the Firehose-based Erase FRP / T509 Format+FRP buttons). Run it now, while still authorized -- not after the device is already on the lock screen.")
         }
 
         YASCard(
