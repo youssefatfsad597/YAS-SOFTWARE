@@ -178,7 +178,8 @@ class MainActivity : ComponentActivity() {
                     onAdbReboot = viewModel::adbRebootTo,
                     onAdbShell = viewModel::runAdbShell,
                     onReadMtpStorage = viewModel::readMtpStorage,
-                    onMtpFormatAt = viewModel::atFormatDevice
+                    onMtpFormatAt = viewModel::atFormatDevice,
+                    onChangeSerial = viewModel::changeSamsungSerial
                 )
             }
         }
