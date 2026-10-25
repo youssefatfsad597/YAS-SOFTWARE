@@ -176,7 +176,9 @@ class MainActivity : ComponentActivity() {
                     onMtpDownloadAt = viewModel::atToDownloadMode,
                     onReadAdbInfo = viewModel::readAdbInfo,
                     onAdbReboot = viewModel::adbRebootTo,
-                    onAdbShell = viewModel::runAdbShell
+                    onAdbShell = viewModel::runAdbShell,
+                    onReadMtpStorage = viewModel::readMtpStorage,
+                    onMtpFormatAt = viewModel::atFormatDevice
                 )
             }
         }
