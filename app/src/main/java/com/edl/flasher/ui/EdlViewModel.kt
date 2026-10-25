@@ -59,6 +59,9 @@ data class EdlUiState(
     val odinConnected: Boolean = false,
     val odinSessionReady: Boolean = false,
     val odinDeviceDescription: String = "No Download-Mode Device Detected",
+    // MODEL / DID / RAND / TMU_TEMP etc. read back from the Download-Mode bootloader via
+    // "Read Device Info". Empty until that button is tapped, or if the bootloader didn't reply.
+    val odinDeviceInfoText: String = "",
     val blTarUri: Uri? = null,
     val blTarName: String = "BL (Bootloader) .tar/.md5: Not Selected",
     val apTarUri: Uri? = null,
@@ -934,6 +937,27 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 )
             }
             appendLog("Operation completed successfully.")
+        }
+    }
+
+    /** Reads MODEL/DID/RAND/TMU_TEMP etc. back from the connected Download-Mode bootloader
+     *  (the RAND field is the per-session random key the bootloader hands out at handshake
+     *  time; it only shows up here once this has actually been read). Connects first if
+     *  needed. Marked experimental in [OdinDeviceInfo.probe] because not every bootloader
+     *  replies to the DVIF request, so the interface is always closed and reopened afterwards
+     *  to leave the session clean for a normal Odin flash. */
+    fun readOdinDeviceInfo() {
+        runTask("Reading Download-Mode Device Info") {
+            openOdinConnectionIfNeeded()
+            val info = OdinDeviceInfo.probe(transport, ::appendLog)
+            transport.close()
+            _uiState.update { it.copy(odinConnected = false, odinSessionReady = false) }
+            if (!info.isEmpty) {
+                _uiState.update { it.copy(odinDeviceInfoText = info.toDisplayText()) }
+                val randNote = if (info.rand.isNotEmpty()) "RAND present" else "RAND not reported by this bootloader"
+                appendLog("Device info: ${info.fields.size} field(s) read ($randNote).")
+            }
+            openOdinConnectionIfNeeded()
         }
     }
 

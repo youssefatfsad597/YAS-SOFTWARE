@@ -593,7 +593,12 @@ private fun connMode(s: EdlUiState): ConnMode = when {
     s.t509BromConnected -> ConnMode("Unisoc BROM", Yas.Success, true)
     s.usbConnected -> ConnMode("9008 EDL", Yas.Success, true)
     s.odinConnected -> ConnMode("Samsung Odin", Color(0xFF60A5FA), true)
-    s.adbConnected || s.usbAny -> ConnMode("MTP + ADB", Yas.SkyText, true)
+    // MTP-only, ADB-only and MTP+ADB are three distinct states and must never collapse into
+    // one label: that's what made the old badge show "MTP + ADB" even when only MTP (no ADB
+    // daemon) was actually connected.
+    s.adbConnected && s.usbAny -> ConnMode("MTP + ADB", Yas.SkyText, true)
+    s.adbConnected -> ConnMode("ADB", Color(0xFFA78BFA), true)
+    s.usbAny -> ConnMode("MTP", Color(0xFFFBBF24), true)
     else -> ConnMode("Disconnected", Yas.Idle, false)
 }
 
@@ -679,6 +684,7 @@ fun EdlMainScreen(
     onPickCpTar: () -> Unit,
     onPickCscTar: () -> Unit,
     onPickUserdataTar: () -> Unit,
+    onReadOdinDeviceInfo: () -> Unit,
     onRunOdinFlash: () -> Unit,
     onToggleOdinSlot: (String) -> Unit,
     onToggleOdinEntry: (String, String) -> Unit,
@@ -708,7 +714,9 @@ fun EdlMainScreen(
     var confirmBatchErase by remember { mutableStateOf(false) }
     var dockExpanded by remember { mutableStateOf(false) }
     var dockTab by remember { mutableIntStateOf(0) }
-    val tabTitles = listOf("X216B Service", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "T505N", "MTP / ADB")
+    // T505N is kept right next to X216B (both are the quick one-tap service tabs); the rest
+    // keep their previous relative order.
+    val tabTitles = listOf("X216B", "T505N", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "MTP / ADB")
 
     confirmEraseTarget?.let { target ->
         YASConfirmDialog(
@@ -747,7 +755,12 @@ fun EdlMainScreen(
                 onFactoryReset = onFactoryReset,
                 onAdbShell = onAdbShell
             )
-            1 -> T509Tab(
+            1 -> T505NTab(
+                state = state,
+                onMtpDownloadAt = onMtpDownloadAt,
+                onFormatT505N = onFormatT505N
+            )
+            2 -> T509Tab(
                 state = state,
                 onSetVariant = onSetT509Variant,
                 onForceBrom = onForceBrom,
@@ -755,7 +768,7 @@ fun EdlMainScreen(
                 onFormatFrp = onT509FormatFrp,
                 onAdbShell = onAdbShell
             )
-            2 -> ReadGptTab(
+            3 -> ReadGptTab(
                 state = state,
                 onProbeChipInfo = onProbeChipInfo,
                 onPickLoader = onPickLoader,
@@ -772,7 +785,7 @@ fun EdlMainScreen(
                 onFlashPartition = onFlashPartition,
                 onRequestErasePartition = { confirmEraseTarget = it }
             )
-            3 -> XmlFlasherTab(
+            4 -> XmlFlasherTab(
                 state = state,
                 onPickRawProgram = onPickRawProgram,
                 onPickPatchXml = onPickPatchXml,
@@ -782,7 +795,7 @@ fun EdlMainScreen(
                 onClearFirmwareDir = onClearFirmwareDir,
                 onFlashFirmwareXml = onFlashFirmwareXml
             )
-            4 -> OdinTab(
+            5 -> OdinTab(
                 state = state,
                 onConnectOdinDevice = onConnectOdinDevice,
                 onPickBlTar = onPickBlTar,
@@ -795,17 +808,13 @@ fun EdlMainScreen(
                 onClearCpTar = onClearCpTar,
                 onClearCscTar = onClearCscTar,
                 onClearUserdataTar = onClearUserdataTar,
+                onReadOdinDeviceInfo = onReadOdinDeviceInfo,
                 onRunOdinFlash = onRunOdinFlash,
                 onToggleOdinSlot = onToggleOdinSlot,
                 onToggleOdinEntry = onToggleOdinEntry,
                 onToggleOdinAutoReboot = onToggleOdinAutoReboot,
                 onExitDownloadMode = onExitDownloadMode,
                 onMtpDownloadAt = onMtpDownloadAt
-            )
-            5 -> T505NTab(
-                state = state,
-                onMtpDownloadAt = onMtpDownloadAt,
-                onFormatT505N = onFormatT505N
             )
             else -> AdbMtpTab(
                 state = state,
@@ -1297,7 +1306,7 @@ private fun ConsolePanel(state: EdlUiState, onClearLogs: () -> Unit, modifier: M
 }
 
 // =====================================================================================
-//  Tab 1 : X216B Service
+//  Tab 0 : X216B
 // =====================================================================================
 
 // ===== X216B tab ADB button: edit the label / command here =====
@@ -1467,7 +1476,7 @@ private fun ServiceTab(
 }
 
 // =====================================================================================
-//  Tab 1b : T509 Service (Unisoc BROM / FDL1-FDL2)
+//  Tab 2 : T509 Service (Unisoc BROM / FDL1-FDL2)
 // =====================================================================================
 
 // ===== T509 tab ADB button: edit the label / command here =====
@@ -1628,7 +1637,7 @@ private fun T509Tab(
 }
 
 // =====================================================================================
-//  Tab 2 : Read GPT (partition manager)
+//  Tab 3 : Read GPT (partition manager)
 // =====================================================================================
 
 @Composable
@@ -2059,7 +2068,7 @@ private fun PartitionRow(
 }
 
 // =====================================================================================
-//  Tab 3 : XML Flasher
+//  Tab 4 : XML Flasher
 // =====================================================================================
 
 @Composable
@@ -2150,7 +2159,7 @@ private fun XmlFlasherTab(
 }
 
 // =====================================================================================
-//  Tab 4 : Samsung Odin
+//  Tab 5 : Samsung Odin
 // =====================================================================================
 
 @Composable
@@ -2293,6 +2302,7 @@ private fun OdinTab(
     onClearCpTar: (() -> Unit)?,
     onClearCscTar: (() -> Unit)?,
     onClearUserdataTar: (() -> Unit)?,
+    onReadOdinDeviceInfo: () -> Unit,
     onRunOdinFlash: () -> Unit,
     onToggleOdinSlot: (String) -> Unit,
     onToggleOdinEntry: (String, String) -> Unit,
@@ -2353,8 +2363,23 @@ private fun OdinTab(
                     style = BtnStyle.Secondary,
                     enabled = !state.isBusy
                 )
+                YASButton(
+                    text = "Read Device Info",
+                    onClick = onReadOdinDeviceInfo,
+                    style = BtnStyle.Secondary,
+                    enabled = !state.isBusy
+                )
             }
-            Hint("Connect: opens Odin on a device in Samsung Download Mode. MTP \u2192 Download: sends the device to Download Mode from MTP. Exit: leaves Download Mode.")
+            Hint("Connect: opens Odin on a device in Samsung Download Mode. MTP \u2192 Download: sends the device to Download Mode from MTP. Exit: leaves Download Mode. Read Device Info: reads MODEL / DID / RAND / TMU_TEMP from the bootloader (not every device replies).")
+            if (state.odinDeviceInfoText.isNotBlank()) {
+                YDivider()
+                YText(
+                    text = state.odinDeviceInfoText,
+                    size = 11.sp,
+                    mono = true,
+                    color = Yas.TextSoft
+                )
+            }
         }
 
         YASCard(
@@ -2412,7 +2437,7 @@ private fun OdinTab(
 }
 
 // =====================================================================================
-//  Tab 5 : T505N (MTP Download + Format by flashing userdata)
+//  Tab 1 : T505N (MTP Download + Format by flashing userdata)
 // =====================================================================================
 
 @Composable
@@ -2476,7 +2501,7 @@ private fun T505NTab(
 }
 
 // =====================================================================================
-//  Tab 5 : MTP / ADB utilities
+//  Tab 6 : MTP / ADB utilities
 // =====================================================================================
 
 @Composable
