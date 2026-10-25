@@ -153,6 +153,7 @@ class MainActivity : ComponentActivity() {
                     onResetDevice = viewModel::resetDevice,
                     onClearLogs = viewModel::clearLogs,
                     onConnectOdinDevice = viewModel::connectSamsungDownloadMode,
+                    onReadOdinDeviceInfo = viewModel::readOdinDeviceInfo,
                     onPickBlTar = { blTarPicker.launch(arrayOf("*/*")) },
                     onPickApTar = { apTarPicker.launch(arrayOf("*/*")) },
                     onPickCpTar = { cpTarPicker.launch(arrayOf("*/*")) },
