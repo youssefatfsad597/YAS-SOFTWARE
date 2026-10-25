@@ -41,17 +41,6 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // Tried in order. After EACH one we check whether the phone actually dropped off the
         // USB bus; an "OK" alone is not proof (AT+CFUN=1,1 often only resets the modem).
         val REBOOT_COMMANDS = listOf("AT+CFUN=1,1\r\n", "AT+CFUN=1,1\r", "AT+RESET\r\n", "AT+CRESET\r\n", "AT+REBOOT\r\n")
-        // Samsung AT "format" (factory reset of /data = userdata), the same unlock steps the serial
-        // sequence uses, then AT+FACTORST. The phone wipes userdata and reboots by itself; the
-        // userdata partition is re-created at its full size on that boot, which is what brings
-        // back the original storage size after a small (quick-format) userdata.img was flashed.
-        val FORMAT_UNLOCK_COMMANDS = listOf(
-            "AT+SWATD=0",
-            "AT+ACTIVATE=0,0,0",
-            "AT+SWATD=1",
-            "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5"
-        )
-        val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
         // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
         const val SERIAL_STEP_DELAY_MS = 1200L
         private const val READ_BUF = 256
@@ -417,66 +406,6 @@ class AtCommandTransport(private val context: Context) : Closeable {
         log("Rebooting normally (no factory reset)...")
         rebootVerified(device, log)
         return ok
-    }
-
-    /**
-     * Formats the phone (wipes userdata / factory reset) over its AT port while it is in MTP
-     * mode, then makes sure it reboots. Steps: unlock commands -> AT+FACTORST -> (if the phone
-     * did not drop off the USB bus by itself) a verified AT reboot.
-     * Returns true when the phone accepted the format command or left the USB bus.
-     * ALL USER DATA IS ERASED.
-     */
-    suspend fun formatAndReboot(device: UsbDevice, log: (String) -> Unit): Boolean {
-        if (!ensurePermission(device)) { log("USB permission denied for AT command interface."); return false }
-        val conn = usbManager.openDevice(device) ?: run { log("Could not open USB device for AT command."); return false }
-        var accepted = false
-        try {
-            val interfaces = candidateInterfaces(device)
-            if (interfaces.isEmpty()) {
-                log("No AT/modem port is exposed in this USB mode. On Samsung dial *#0808# (or *#2767*...) and choose a mode that includes MODEM, then retry.")
-                return false
-            }
-            for (intf in interfaces) {
-                if (!conn.claimInterface(intf, true)) { log("Interface ${intf.id}: could not claim."); continue }
-                try {
-                    val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
-                    val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
-                    assertControlLines(conn, intf)
-                    val probe = exchange(conn, epIn, epOut, "AT")
-                    log("Interface ${intf.id}: probe 'AT' -> '${probe.ifBlank { "(no reply)" }}'")
-                    if (probe.contains("ERROR", true) && probe.length > 40) continue
-
-                    FORMAT_UNLOCK_COMMANDS.forEachIndexed { i, cmd ->
-                        val reply = exchange(conn, epIn, epOut, cmd)
-                        log("[unlock ${i + 1}/${FORMAT_UNLOCK_COMMANDS.size}] $cmd -> ${reply.ifBlank { "OK" }}")
-                        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
-                    }
-                    for (cmd in FORMAT_COMMANDS) {
-                        val reply = exchange(conn, epIn, epOut, cmd)
-                        val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
-                        log("[format] $cmd -> ${reply.ifBlank { "(no reply / OK)" }}" + if (bad) "   <- rejected" else "")
-                        if (!bad) { accepted = true; break }
-                        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
-                    }
-                    if (accepted) break
-                } finally {
-                    runCatching { conn.releaseInterface(intf) }
-                }
-            }
-        } finally {
-            runCatching { conn.close() }
-        }
-        if (!accepted) {
-            log("The phone rejected every format command. This firmware does not honor AT+FACTORST over MTP.")
-            return false
-        }
-        // The phone normally reboots on its own to do the wipe. Give it time, then force a reboot.
-        if (waitForDetach(device, 8000)) {
-            log("USB link dropped: the phone is wiping userdata and rebooting.")
-            return true
-        }
-        log("Format command accepted but the phone is still connected. Sending reboot...")
-        return rebootVerified(device, log)
     }
 
     /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
