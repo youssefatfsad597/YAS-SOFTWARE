@@ -90,6 +90,10 @@ class MainActivity : ComponentActivity() {
                     ActivityResultContracts.OpenDocument()
                 ) { uri -> uri?.let(viewModel::setUserdataTarUri) }
 
+                val t505nFormatPicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.OpenDocument()
+                ) { uri -> uri?.let(viewModel::formatT505NWithUri) }
+
                 val backupSaver = rememberLauncherForActivityResult(
                     ActivityResultContracts.CreateDocument("application/octet-stream")
                 ) { uri ->
@@ -155,8 +159,14 @@ class MainActivity : ComponentActivity() {
                     onPickCscTar = { cscTarPicker.launch(arrayOf("*/*")) },
                     onPickUserdataTar = { userdataTarPicker.launch(arrayOf("*/*")) },
                     onRunOdinFlash = viewModel::runOdinFlashSequence,
-                    onFlashUserdataOnly = viewModel::runFlashUserdataTarOnly,
-                    onFormatT505N = viewModel::formatT505N,
+                    onToggleOdinSlot = viewModel::toggleOdinSlot,
+                    onToggleOdinEntry = viewModel::toggleOdinEntry,
+                    onClearBlTar = viewModel::clearBlTar,
+                    onClearApTar = viewModel::clearApTar,
+                    onClearCpTar = viewModel::clearCpTar,
+                    onClearCscTar = viewModel::clearCscTar,
+                    onClearUserdataTar = viewModel::clearUserdataTar,
+                    onFormatT505N = { t505nFormatPicker.launch(arrayOf("*/*")) },
                     onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
                     onExitDownloadMode = viewModel::exitDownloadMode,
                     onReadMtpInfo = viewModel::readMtpInfo,
