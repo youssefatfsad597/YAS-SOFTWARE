@@ -41,10 +41,24 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // Tried in order. After EACH one we check whether the phone actually dropped off the
         // USB bus; an "OK" alone is not proof (AT+CFUN=1,1 often only resets the modem).
         val REBOOT_COMMANDS = listOf("AT+CFUN=1,1\r\n", "AT+CFUN=1,1\r", "AT+RESET\r\n", "AT+CRESET\r\n", "AT+REBOOT\r\n")
+        // Samsung AT "format" (factory reset of /data = userdata), the same unlock steps the serial
+        // sequence uses, then AT+FACTORST. The phone wipes userdata and reboots by itself; the
+        // userdata partition is re-created at its full size on that boot, which is what brings
+        // back the original storage size after a small (quick-format) userdata.img was flashed.
+        val FORMAT_UNLOCK_COMMANDS = listOf(
+            "AT+SWATD=0",
+            "AT+ACTIVATE=0,0,0",
+            "AT+SWATD=1",
+            "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5"
+        )
+        val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
         // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
         const val SERIAL_STEP_DELAY_MS = 1200L
         private const val READ_BUF = 256
     }
+
+    /** Optional progress callback (0f..1f) so callers can show a loading bar instead of raw command logs. */
+    var onProgress: ((Float) -> Unit)? = null
 
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
     private var connection: UsbDeviceConnection? = null
@@ -120,17 +134,17 @@ class AtCommandTransport(private val context: Context) : Closeable {
      */
     private suspend fun runAtSequence(device: UsbDevice, commands: List<String>, log: (String) -> Unit, stopOnSuccess: Boolean = false): Boolean {
         if (!ensurePermission(device)) {
-            log("USB permission denied for AT command interface.")
+            log("USB permission denied.")
             return false
         }
         val conn = usbManager.openDevice(device) ?: run {
-            log("Could not open USB device for AT command.")
+            log("Could not open the device.")
             return false
         }
         connection = conn
         val interfaces = candidateInterfaces(device)
         if (interfaces.isEmpty()) {
-            log("No CDC/serial-style interface found on this device for AT commands.")
+            log("This device does not expose a modem port, so this method is unavailable.")
             conn.close()
             connection = null
             return false
@@ -151,7 +165,6 @@ class AtCommandTransport(private val context: Context) : Closeable {
             for (cmd in commands) {
                 val bytes = cmd.toByteArray(Charsets.US_ASCII)
                 val sent = conn.bulkTransfer(epOut, bytes, bytes.size, 2000)
-                log("Interface ${intf.id}: wrote '${cmd.trim()}' ($sent bytes)")
                 if (sent < 0) continue
 
                 val buf = ByteArray(READ_BUF)
@@ -159,18 +172,18 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 if (read > 0) {
                     val reply = String(buf, 0, read, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim()
                     val rejected = reply.contains("ERROR", ignoreCase = true) || reply.contains("#NG#")
-                    log("Interface ${intf.id}: reply '$reply'" + if (rejected) "  <- rejected by the device" else "")
+                    if (rejected) log("The device rejected the request.")
                     if (!rejected && reply.contains("OK", ignoreCase = true)) anySuccess = true
                     if (anySuccess && stopOnSuccess) break
                 } else {
-                    log("Interface ${intf.id}: no reply (device may already be switching modes).")
+                    // no reply: the device may already be switching modes
                 }
                 if (anySuccess && stopOnSuccess) break
                 // A phone that honors a mode switch drops off the USB bus, usually WITHOUT
                 // printing "OK". Count that as success so the button works on the first tap
                 // (before this, the app said "did not confirm" while the phone was in fact switching).
                 if (waitForDetach(device, 4000)) {
-                    log("USB link dropped after '${cmd.trim()}': the device is switching mode.")
+                    log("USB link dropped: the device is switching mode.")
                     anySuccess = true
                     if (stopOnSuccess) break
                 }
@@ -305,36 +318,33 @@ class AtCommandTransport(private val context: Context) : Closeable {
      * waits up to 6 s for the phone to disconnect from USB. Only a disconnect counts as success.
      */
     suspend fun rebootVerified(device: UsbDevice, log: (String) -> Unit): Boolean {
-        if (!ensurePermission(device)) { log("USB permission denied for AT command interface."); return false }
-        val conn = usbManager.openDevice(device) ?: run { log("Could not open USB device for AT command."); return false }
+        if (!ensurePermission(device)) { log("USB permission denied."); return false }
+        val conn = usbManager.openDevice(device) ?: run { log("Could not open the device."); return false }
         try {
             val interfaces = candidateInterfaces(device)
             if (interfaces.isEmpty()) {
-                log("No AT/modem port is exposed in this USB mode. On Samsung dial *#0808# (or *#2767*...) and choose a mode that includes MODEM, then retry.")
+                log("No modem port is available in this USB mode. On Samsung dial *#0808# and choose a mode that includes MODEM, then retry.")
                 return false
             }
             for (intf in interfaces) {
-                if (!conn.claimInterface(intf, true)) { log("Interface ${intf.id}: could not claim."); continue }
+                if (!conn.claimInterface(intf, true)) continue
                 try {
                     val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     assertControlLines(conn, intf)
                     // Probe: make sure this really is an AT port before sending anything else.
                     val probe = exchange(conn, epIn, epOut, "AT")
-                    log("Interface ${intf.id}: probe 'AT' -> '${probe.ifBlank { "(no reply)" }}'")
-                    for (cmd in REBOOT_COMMANDS) {
+                    for ((ci, cmd) in REBOOT_COMMANDS.withIndex()) {
+                        onProgress?.invoke(ci.toFloat() / REBOOT_COMMANDS.size)
                         val bytes = cmd.toByteArray(Charsets.US_ASCII)
                         val sent = conn.bulkTransfer(epOut, bytes, bytes.size, 2000)
-                        log("Interface ${intf.id}: wrote '${cmd.trim()}' ($sent bytes)")
-                        if (sent < 0) continue
+                                if (sent < 0) continue
                         val buf = ByteArray(READ_BUF)
                         val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
-                        if (n > 0) log("   reply: '" + String(buf, 0, n, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim() + "'")
-                        if (waitForDetach(device, 6000)) {
-                            log("USB link dropped after '${cmd.trim()}': the device is rebooting.")
+                        if (waitForDetach(device, 10000)) {
+                            log("USB link dropped: the device is rebooting.")
                             return true
                         }
-                        log("   device still connected, trying next command...")
                     }
                 } finally {
                     runCatching { conn.releaseInterface(intf) }
@@ -343,7 +353,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         } finally {
             runCatching { conn.close() }
         }
-        log("The phone never disconnected: no reboot happened. This USB mode/firmware does not honor AT reboot commands.")
+        log("The phone did not reboot. This USB mode does not support a remote reboot.")
         return false
     }
 
@@ -352,9 +362,9 @@ class AtCommandTransport(private val context: Context) : Closeable {
      * Returns the list of "command -> reply" lines. The last command may legitimately get no reply
      * because the phone resets itself.
      */
-    suspend fun runTimedSequence(device: UsbDevice, commands: List<String>, delayMs: Long, log: (String) -> Unit): Boolean {
-        if (!ensurePermission(device)) { log("USB permission denied for AT command interface."); return false }
-        val conn = usbManager.openDevice(device) ?: run { log("Could not open USB device for AT command."); return false }
+    suspend fun runTimedSequence(device: UsbDevice, commands: List<String>, delayMs: Long, log: (String) -> Unit, replies: MutableList<String>? = null): Boolean {
+        if (!ensurePermission(device)) { log("USB permission denied."); return false }
+        val conn = usbManager.openDevice(device) ?: run { log("Could not open the device."); return false }
         try {
             for (intf in candidateInterfaces(device)) {
                 if (!conn.claimInterface(intf, true)) continue
@@ -364,12 +374,13 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     assertControlLines(conn, intf)
                     val probe = exchange(conn, epIn, epOut, "AT")
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
-                    log("Interface ${intf.id}: AT port selected.")
                     var allOk = true
                     commands.forEachIndexed { i, cmd ->
                         val reply = exchange(conn, epIn, epOut, cmd)
+                        replies?.add(reply)
                         val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
-                        log("[${i + 1}/${commands.size}] $cmd  ->  ${reply.ifBlank { "(no reply / OK)" }}" + if (bad) "   <- rejected" else "")
+                        if (bad) log("A step was rejected by the device.")
+                        onProgress?.invoke((i + 1).toFloat() / commands.size)
                         if (bad) allOk = false
                         if (i < commands.size - 1) kotlinx.coroutines.delay(delayMs)
                     }
@@ -381,15 +392,29 @@ class AtCommandTransport(private val context: Context) : Closeable {
         } finally {
             runCatching { conn.close() }
         }
-        log("No usable AT interface found. Enable a USB mode with MODEM (*#0808#) and retry.")
+        log("No usable modem port found. Enable a USB mode with MODEM (*#0808#) and retry.")
         return false
     }
 
-    /** Samsung serial-number rewrite sequence (5 steps, NO factory reset), then a plain reboot. */
+    /** Reads the modem-side serial (SN field of AT+DEVCONINFO), retrying because the modem port
+     *  is often not ready on the first query. Returns "" when unreadable. */
+    suspend fun readModemSerial(device: UsbDevice, attempts: Int = 3): String {
+        repeat(attempts) {
+            val raw = queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty()
+            val sn = Regex("SN\\(([^)]*)\\)").find(raw)?.groupValues?.get(1)?.replace(Regex("\\s+"), "").orEmpty()
+            if (sn.isNotBlank()) return sn
+            kotlinx.coroutines.delay(800)
+        }
+        return ""
+    }
+
+    /**
+     * Samsung serial-number rewrite (5 steps, NO factory reset). Returns true ONLY when the final
+     * AT+SERIALNO step was explicitly acknowledged by the modem (reply contains "OK" and no error).
+     * The reboot is done by the caller afterwards (see [rebootVerified]).
+     */
     suspend fun changeSerialSequence(device: UsbDevice, newSerial: String, log: (String) -> Unit): Boolean {
-        fun snOf(raw: String) = Regex("SN\\(([^)]*)\\)").find(raw)?.groupValues?.get(1)?.trim().orEmpty()
-        val before = snOf(queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty())
-        log("Serial before: ${before.ifBlank { "(unreadable)" }}")
+        val before = readModemSerial(device)
         val cmds = listOf(
             "AT+SWATD=0",
             "AT+ACTIVATE=0,0,0",
@@ -397,15 +422,73 @@ class AtCommandTransport(private val context: Context) : Closeable {
             "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5",
             "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,$newSerial"
         )
-        val ok = runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log)
+        val replies = ArrayList<String>()
+        val sequenceOk = runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log, replies)
+        val last = replies.lastOrNull().orEmpty()
+        val acknowledged = sequenceOk && replies.size == cmds.size &&
+            last.contains("SERIALNO", true) && last.contains("OK", true)
         kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
-        val after = snOf(queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty())
-        log("Serial after write (before reboot): ${after.ifBlank { "(unreadable)" }}")
-        if (after.equals(newSerial, true)) log("Serial matches the requested value.")
-        else log("NOTE: the phone may only show the new serial after a reboot.")
-        log("Rebooting normally (no factory reset)...")
-        rebootVerified(device, log)
-        return ok
+        val after = readModemSerial(device, 2)
+        return acknowledged || after.equals(newSerial, true)
+    }
+
+    /**
+     * Formats the phone (wipes userdata / factory reset) over its AT port while it is in MTP
+     * mode, then makes sure it reboots. Steps: unlock commands -> AT+FACTORST -> (if the phone
+     * did not drop off the USB bus by itself) a verified AT reboot.
+     * Returns true when the phone accepted the format command or left the USB bus.
+     * ALL USER DATA IS ERASED.
+     */
+    suspend fun formatAndReboot(device: UsbDevice, log: (String) -> Unit): Boolean {
+        if (!ensurePermission(device)) { log("USB permission denied."); return false }
+        val conn = usbManager.openDevice(device) ?: run { log("Could not open the device."); return false }
+        var accepted = false
+        try {
+            val interfaces = candidateInterfaces(device)
+            if (interfaces.isEmpty()) {
+                log("No modem port is available in this USB mode. On Samsung dial *#0808# and choose a mode that includes MODEM, then retry.")
+                return false
+            }
+            for (intf in interfaces) {
+                if (!conn.claimInterface(intf, true)) continue
+                try {
+                    val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                    val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                    assertControlLines(conn, intf)
+                    val probe = exchange(conn, epIn, epOut, "AT")
+                    if (probe.contains("ERROR", true) && probe.length > 40) continue
+
+                    FORMAT_UNLOCK_COMMANDS.forEachIndexed { i, cmd ->
+                        val reply = exchange(conn, epIn, epOut, cmd)
+                        onProgress?.invoke(0.5f * (i + 1) / FORMAT_UNLOCK_COMMANDS.size)
+                        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
+                    }
+                    for (cmd in FORMAT_COMMANDS) {
+                        val reply = exchange(conn, epIn, epOut, cmd)
+                        val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
+                        if (bad) log("The device rejected a step, trying another method...") else onProgress?.invoke(0.7f)
+                        if (!bad) { accepted = true; break }
+                        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
+                    }
+                    if (accepted) break
+                } finally {
+                    runCatching { conn.releaseInterface(intf) }
+                }
+            }
+        } finally {
+            runCatching { conn.close() }
+        }
+        if (!accepted) {
+            log("The phone rejected the restore request. This firmware does not support it in MTP mode.")
+            return false
+        }
+        // The phone normally reboots on its own to do the wipe. Give it time, then force a reboot.
+        if (waitForDetach(device, 8000)) {
+            log("The phone is restoring its storage and rebooting.")
+            return true
+        }
+        log("Restore accepted. Rebooting the phone...")
+        return rebootVerified(device, log)
     }
 
     /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
