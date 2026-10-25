@@ -23,13 +23,17 @@ data class OdinDeviceInfo(val fields: LinkedHashMap<String, String>) {
 
     /** "Key: value" lines, the format the app's info cards already understand. */
     fun toDisplayText(): String = buildString {
-        val order = listOf("DID", "RAND", "TMU_TEMP")
+        val order = listOf("MODEL", "VER", "PRODUCT", "SALES", "VENDOR", "CAPA", "FWVER", "UN", "DID", "RAND", "TMU_TEMP")
         order.forEach { k -> fields[k]?.let { append(k).append(": ").append(it).append('\n') } }
         fields.filterKeys { it !in order }.forEach { (k, v) -> append(k).append(": ").append(v).append('\n') }
     }.trimEnd()
 
     companion object {
         private val KEY = Regex("^[A-Z][A-Z0-9_]{1,23}$")
+
+        // Keys seen in a real Download-Mode reply (SM-T505N). Plain "KEY VALUE" lines are only accepted
+        // for these, so ordinary status text such as "Odin session initialised" is never mistaken for a field.
+        private val KNOWN = setOf("MODEL", "UN", "CAPA", "VENDOR", "FWVER", "PRODUCT", "SALES", "VER", "DID", "RAND", "TMU_TEMP")
 
         fun parse(raw: String): OdinDeviceInfo {
             val out = LinkedHashMap<String, String>()
@@ -42,6 +46,8 @@ data class OdinDeviceInfo(val fields: LinkedHashMap<String, String>) {
                     if (sep <= 0) return@forEach
                     val key = line.substring(0, sep).trim().uppercase()
                     val value = line.substring(sep + 1).trim().trimStart('=', ':', ' ', '\t')
+                    val spaceSeparated = line[sep] == ' ' || line[sep] == '\t'
+                    if (spaceSeparated && key !in KNOWN) return@forEach
                     if (KEY.matches(key) && value.isNotEmpty() && key !in out) out[key] = value
                 }
             return OdinDeviceInfo(out)

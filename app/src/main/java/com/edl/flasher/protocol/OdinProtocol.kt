@@ -208,6 +208,10 @@ class OdinProtocol(
 ) {
     private var packetSize: Int = 128 * 1024
 
+    // The bootloader can sit silent for a long time while it flushes/verifies a sequence
+    // (Android Utility visibly pauses at ~92% before continuing), so wait generously.
+    private val XMIT_COMPLETE_TIMEOUT_MS = 180_000
+
     var pitTable: OdinPitTable? = null
         private set
 
@@ -230,9 +234,12 @@ class OdinProtocol(
         return ack
     }
 
-    private fun rpc(id: Int, data: Int, ints: IntArray = IntArray(0), allowNegativeAck: Boolean = false): Int {
+    private fun rpc(
+        id: Int, data: Int, ints: IntArray = IntArray(0), allowNegativeAck: Boolean = false,
+        timeoutMs: Int = 20000
+    ): Int {
         sendRequest(id, data, ints)
-        val ack = recvResponse(id)
+        val ack = recvResponse(id, timeoutMs)
         if (!allowNegativeAck && ack < 0) {
             throw IOException("ODIN command rejected (id=$id data=$data, ack=$ack)")
         }
@@ -357,7 +364,15 @@ class OdinProtocol(
                     filled += r
                 }
                 transport.write(buf, offset = 0, length = pkt.toInt(), timeoutMs = 60000)
-                transport.readFully(ByteArray(OdinWire.RESPONSE_SIZE), timeoutMs = 30000) // per-packet ack
+                val pktAck = ByteArray(OdinWire.RESPONSE_SIZE)
+                transport.readFully(pktAck, timeoutMs = 120000) // per-packet ack; the device may pause here while it writes
+                if (OdinWire.responseId(pktAck) == OdinWire.BOOTLOADER_FAIL_ID) {
+                    val code = OdinWire.responseAck(pktAck)
+                    throw IOException(
+                        "Device rejected the data at packet ${packetOff / pkt + 1} of ${roundedForPackets / pkt} " +
+                            "(${sent + packetOff} bytes sent): ${OdinWire.bootloaderFailText(code)} (ack=$code)"
+                    )
+                }
                 packetOff += pkt
                 onProgress(sent + min(packetOff, actual), totalSize)
             }
@@ -365,12 +380,12 @@ class OdinProtocol(
             val endInts = intArrayOf(0, actual.toInt(), part.binType, part.devType, part.id, if (isLast) 1 else 0, 0, 0)
             if (isLast && tolerateFinalAckWarning) {
                 try {
-                    rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                    rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts, timeoutMs = XMIT_COMPLETE_TIMEOUT_MS)
                 } catch (e: IOException) {
                     logger("WARNING: device returned a post-write check after all $totalSize bytes were sent (${e.message}). Treating as non-fatal and continuing.")
                 }
             } else {
-                rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts)
+                rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts, timeoutMs = XMIT_COMPLETE_TIMEOUT_MS)
             }
 
             sent += actual
