@@ -266,7 +266,26 @@ class SaharaProtocol(
         transport.write(helloRsp.array())
     }
 
+    /** Sahara RESET_REQ (0x07): asks the boot ROM to restart the handshake after a failed transfer. */
+    fun rearmAfterFailure() {
+        pendingHelloPacket = null
+        runCatching {
+            transport.write(ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).apply { putInt(0x07); putInt(8) }.array(), timeoutMs = 3000)
+            // best effort: drain whatever the ROM still had queued, then wait for a fresh HELLO_REQ
+            runCatching { transport.read(ByteArray(4096), timeoutMs = 300) }
+            pendingHelloPacket = readHelloReq()
+        }.onFailure { logger("Sahara re-arm: no new HELLO_REQ (${it.message}).") }
+    }
+
     private fun sendLoaderSlice(loaderBytes: ByteArray, offset: Int, length: Int) {
+        try {
+            sendLoaderSliceRaw(loaderBytes, offset, length)
+        } catch (e: IOException) {
+            throw IOException("Sahara: sending loader bytes offset=$offset len=$length failed (${e.message})")
+        }
+    }
+
+    private fun sendLoaderSliceRaw(loaderBytes: ByteArray, offset: Int, length: Int) {
         if (offset < 0 || offset + length > loaderBytes.size) {
             val padded = ByteArray(length)
             val available = (loaderBytes.size - offset).coerceAtLeast(0)

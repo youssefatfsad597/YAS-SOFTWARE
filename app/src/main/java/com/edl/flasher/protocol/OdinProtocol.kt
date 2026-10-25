@@ -378,11 +378,19 @@ class OdinProtocol(
             }
 
             val endInts = intArrayOf(0, actual.toInt(), part.binType, part.devType, part.id, if (isLast) 1 else 0, 0, 0)
-            if (isLast && tolerateFinalAckWarning) {
+            if (tolerateFinalAckWarning) {
+                // The device issues the same "SW REV CHECK FAIL" / secure-check notice after EVERY
+                // transfer window on some quick-format images, not only the final one (confirmed on
+                // this exact file: the official PC tool keeps going past it too). Only abort here if
+                // the USB link itself actually dropped -- that is a real, unrecoverable failure.
                 try {
                     rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts, timeoutMs = XMIT_COMPLETE_TIMEOUT_MS)
                 } catch (e: IOException) {
-                    logger("WARNING: device returned a post-write check after all $totalSize bytes were sent (${e.message}). Treating as non-fatal and continuing.")
+                    if (!transport.isConnected) throw e
+                    logger(
+                        "WARNING: device returned a post-write check after window ending at " +
+                            "${sent + actual} of $totalSize bytes (${e.message}). Treating as non-fatal and continuing."
+                    )
                 }
             } else {
                 rpc(OdinWire.CMD_XMIT, OdinWire.XMIT_COMPLETE, endInts, timeoutMs = XMIT_COMPLETE_TIMEOUT_MS)
