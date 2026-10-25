@@ -394,7 +394,7 @@ class FirehoseProtocol(
         val sectorSize = storageType.sectorSize
         require(data.isNotEmpty() && data.size % sectorSize == 0) { "buffer must be whole sectors" }
         val numSectors = data.size / sectorSize
-        transport.write(buildXml(programTag(lun, startSector, numSectors.toLong(), fullAttrs)), timeoutMs = timeoutMs)
+        transport.write(buildXml(programTag(lun, startSector, numSectors.toLong(), fullAttrs)).toByteArray(Charsets.UTF_8), timeoutMs = timeoutMs)
         val rsp = waitForResponse(timeoutMs = timeoutMs)
         if (!rsp.ack || !rsp.rawMode) {
             throw IOException("Firehose <program> rejected (LUN $lun, sector $startSector): ${rsp.rawXml.take(300)}")
