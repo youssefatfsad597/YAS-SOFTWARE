@@ -700,6 +700,10 @@ fun EdlMainScreen(
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
+    onAdbScript: ((String, String) -> Unit)? = null,
+    // MTP storage read + AT format ("restore original space"). Optional so older call sites compile.
+    onMtpFormatAt: (() -> Unit)? = null,
+    onChangeSerial: ((String) -> Unit)? = null,
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
     onClearLoader: (() -> Unit)? = null,
@@ -749,6 +753,11 @@ fun EdlMainScreen(
         )
     }
 
+    // Remove-Knox scripts run quietly (loading bar only, commands never shown).
+    val knoxRunner: (String) -> Unit = { cmd ->
+        if (onAdbScript != null) onAdbScript("Remove Knox", cmd) else onAdbShell(cmd)
+    }
+
     val tabContent: @Composable () -> Unit = {
         when (selectedTab) {
             0 -> ServiceTab(
@@ -756,12 +765,14 @@ fun EdlMainScreen(
                 onRunX216BWipeAndWrite = onRunX216BWipeAndWrite,
                 onResetFrp = onResetFrp,
                 onFactoryReset = onFactoryReset,
-                onAdbShell = onAdbShell
+                onAdbShell = knoxRunner
             )
             1 -> T505NTab(
                 state = state,
                 onMtpDownloadAt = onMtpDownloadAt,
-                onFormatT505N = onFormatT505N
+                onFormatT505N = onFormatT505N,
+                onMtpFormatAt = onMtpFormatAt,
+                onAdbShell = knoxRunner
             )
             2 -> T509Tab(
                 state = state,
@@ -769,7 +780,7 @@ fun EdlMainScreen(
                 onForceBrom = onForceBrom,
                 onFixHandshake = onFixHandshake,
                 onFormatFrp = onT509FormatFrp,
-                onAdbShell = onAdbShell
+                onAdbShell = knoxRunner
             )
             3 -> ReadGptTab(
                 state = state,
@@ -827,7 +838,8 @@ fun EdlMainScreen(
                 onMtpDownloadAt = onMtpDownloadAt,
                 onReadAdbInfo = onReadAdbInfo,
                 onAdbReboot = onAdbReboot,
-                onAdbShell = onAdbShell
+                onAdbShell = onAdbShell,
+                onChangeSerial = onChangeSerial
             )
         }
     }
@@ -1114,11 +1126,14 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
             ?.second
             ?.takeIf { it.isNotBlank() && it != "-" }
 
-    val info = state.deviceInfo
     // EDL / BROM / Odin: show only that mode's own info. SN / IMEI and the MTP / ADB fields
-    // appear only after "Read Info" over MTP or ADB.
+    // appear only after "Read Info" over MTP or ADB, and NEVER together with EDL data.
     val lowLevelMode = state.usbConnected || state.t509BromConnected || state.odinConnected
+    // Qualcomm HWID belongs to a live 9008 port only (it used to linger after the mode changed).
+    val info = if (state.usbConnected) state.deviceInfo else null
     val readInfoDone = !lowLevelMode && (state.mtpInfoText.isNotBlank() || state.adbInfoText.isNotBlank())
+    val storageRows = if (readInfoDone || (!lowLevelMode && state.mtpStorageText.isNotBlank()))
+        parseInfoFields(state.mtpStorageText).filter { it.first.startsWith("Storage ") } else emptyList()
     val maker = if (readInfoDone) find("Manufacturer") else null
     val model = if (readInfoDone) find("Model", "Base model") else null
     val deviceTitle = listOfNotNull(
@@ -1137,7 +1152,7 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
     ).mapNotNull { (k, v) -> if (v == null || !readInfoDone) null else k to v }
     val serial = if (readInfoDone) state.infoSerial else ""
     val hasData = deviceTitle.isNotBlank() || serial.isNotBlank() ||
-        imeis.isNotEmpty() || info != null || firmware.isNotEmpty() ||
+        imeis.isNotEmpty() || info != null || firmware.isNotEmpty() || storageRows.isNotEmpty() ||
         state.usbConnected || state.odinConnected
 
     Column(
@@ -1191,6 +1206,12 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
                 YDivider(Modifier.padding(vertical = 2.dp))
                 SectionLabel("FIRMWARE")
                 firmware.forEach { (k, v) -> InspectorRow(k, v) }
+            }
+
+            if (storageRows.isNotEmpty()) {
+                YDivider(Modifier.padding(vertical = 2.dp))
+                SectionLabel("STORAGE")
+                storageRows.forEach { (k, v) -> InspectorRow(k.removePrefix("Storage "), v) }
             }
 
             if (!hasData) {
@@ -1330,6 +1351,29 @@ private val X216B_ADB_COMMAND = """
     pm disable-user --user 0 com.wssyncmldm;
     pm disable-user --user 0 com.sec.android.soagent;
     pm disable-user --user 0 com.android.managedprovisioning
+""".trimIndent().replace("\n", " ")
+
+private val T505N_KNOX_ADB_COMMAND = """
+    pm disable-user --user 0 com.samsung.android.knox.er;
+    pm disable-user --user 0 com.sec.enterprise.knox.cloudmdm.smdms;
+    pm disable-user --user 0 com.samsung.android.knox.app.networkfilter;
+    pm disable-user --user 0 com.knox.vpn.proxyhandler;
+    pm disable-user --user 0 com.samsung.android.bbc.bbcagent;
+    pm disable-user --user 0 com.android.managedprovisioning;
+    pm disable-user --user 0 com.samsung.android.kgclient;
+    pm disable-user --user 0 com.samsung.klmsagent;
+    pm disable-user --user 0 com.samsung.android.mdm;
+    pm disable-user --user 0 com.samsung.android.knox.analytics.uploader;
+    pm disable-user --user 0 com.samsung.android.knox.attestation;
+    pm disable-user --user 0 com.sec.enterprise.knox.attestation;
+    pm disable-user --user 0 com.samsung.android.knox.containercore;
+    pm disable-user --user 0 com.samsung.android.knox.containeragent;
+    pm disable-user --user 0 com.samsung.android.knox.kpecore;
+    pm disable-user --user 0 com.samsung.android.knox.pushmanager;
+    pm disable-user --user 0 com.samsung.android.knox.zt.framework;
+    pm disable-user --user 0 com.samsung.knox.keychain;
+    pm disable-user --user 0 com.sec.enterprise.mdm.services.simpin;
+    pm disable-user --user 0 com.samsung.knox.securefolder
 """.trimIndent().replace("\n", " ")
 
 @Composable
@@ -2455,9 +2499,39 @@ private fun OdinTab(
 private fun T505NTab(
     state: EdlUiState,
     onMtpDownloadAt: () -> Unit,
-    onFormatT505N: () -> Unit
+    onFormatT505N: () -> Unit,
+    onMtpFormatAt: (() -> Unit)? = null,
+    onAdbShell: ((String) -> Unit)? = null
 ) {
     var showFormatConfirm by remember { mutableStateOf(false) }
+    var showRestoreConfirm by remember { mutableStateOf(false) }
+    var showKnoxConfirm by remember { mutableStateOf(false) }
+    if (showKnoxConfirm) {
+        YASConfirmDialog(
+            title = "Remove Knox?",
+            message = "Disables Knox, MDM and enterprise container packages over ADB. Needs normal Android with USB debugging on.",
+            confirmText = "Remove Knox",
+            danger = true,
+            onConfirm = {
+                showKnoxConfirm = false
+                onAdbShell?.invoke(T505N_KNOX_ADB_COMMAND)
+            },
+            onDismiss = { showKnoxConfirm = false }
+        )
+    }
+    if (showRestoreConfirm) {
+        YASConfirmDialog(
+            title = "Restore Storage?",
+            message = "Restore Storage formats the phone over the AT port (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
+            confirmText = "Restore Now",
+            danger = true,
+            onConfirm = {
+                showRestoreConfirm = false
+                onMtpFormatAt?.invoke()
+            },
+            onDismiss = { showRestoreConfirm = false }
+        )
+    }
     if (showFormatConfirm) {
         YASConfirmDialog(
             title = "Format T505N?",
@@ -2489,15 +2563,21 @@ private fun T505NTab(
                 )
             }
         ) {
+            // ---- 1. Download Mode ----
+            SectionLabel("1  \u00B7  DOWNLOAD MODE")
             YASButton(
-                text = "MTP DOWNLOAD",
+                text = "MTP Download",
                 onClick = onMtpDownloadAt,
                 modifier = Modifier.fillMaxWidth(),
                 style = BtnStyle.Warning,
                 enabled = !state.isBusy && !state.odinConnected,
                 large = true
             )
-            Hint("MTP DOWNLOAD: sends the tablet to Download Mode from MTP (normal Android, cable connected).")
+            Hint("Sends the tablet to Download Mode from MTP (normal Android, cable connected).")
+
+            // ---- 2. Format ----
+            YDivider()
+            SectionLabel("2  \u00B7  FORMAT")
             YASButton(
                 text = "Format",
                 onClick = { showFormatConfirm = true },
@@ -2506,7 +2586,37 @@ private fun T505NTab(
                 enabled = !state.isBusy,
                 large = true
             )
-            Hint("Format: asks for the userdata file, then flashes it in Download Mode and reboots. Only userdata is written.")
+            Hint("Asks for the userdata file, then flashes it in Download Mode and reboots. Only userdata is written.")
+
+            // ---- 3. Restore Storage ----
+            if (onMtpFormatAt != null) {
+                YDivider()
+                SectionLabel("3  \u00B7  RESTORE STORAGE")
+                YASButton(
+                    text = "Restore Storage",
+                    onClick = { showRestoreConfirm = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy && !state.odinConnected && !state.usbConnected,
+                    large = true
+                )
+                Hint("MTP mode, cable connected, phone unlocked: formats the phone and reboots it so userdata is rebuilt at its full size. All user data is erased.")
+            }
+
+            // ---- 4. Remove Knox ----
+            if (onAdbShell != null) {
+                YDivider()
+                SectionLabel("4  \u00B7  KNOX")
+                YASButton(
+                    text = "Remove Knox",
+                    onClick = { showKnoxConfirm = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy,
+                    large = true
+                )
+                Hint("USB debugging on: disables the Knox agent, MDM and enterprise-container packages for the current user.")
+            }
         }
     }
 }
@@ -2589,10 +2699,27 @@ private fun AdbMtpTab(
     onMtpDownloadAt: () -> Unit,
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
-    onAdbShell: (String) -> Unit
+    onAdbShell: (String) -> Unit,
+    onChangeSerial: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     var shellCmd by remember { mutableStateOf("") }
+    var newSerial by remember { mutableStateOf("") }
+    var showSerialConfirm by remember { mutableStateOf(false) }
+    val serialValid = Regex("^[A-Z0-9]{11}$").matches(newSerial)
+    if (showSerialConfirm) {
+        YASConfirmDialog(
+            title = "Change Serial?",
+            message = "Change the device serial (SN) to \"$newSerial\" via AT commands (MTP mode). The phone will reboot normally, then the new serial is read back to confirm.",
+            confirmText = "Change",
+            danger = true,
+            onConfirm = {
+                showSerialConfirm = false
+                onChangeSerial?.invoke(newSerial)
+            },
+            onDismiss = { showSerialConfirm = false }
+        )
+    }
     val sendShell: () -> Unit = {
         if (!state.isBusy && shellCmd.isNotBlank()) onAdbShell(shellCmd)
     }
@@ -2610,7 +2737,33 @@ private fun AdbMtpTab(
                 YASButton("Download Mode", onMtpDownloadAt, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy)
                 YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy)
             }
-            Hint("MTP (no USB debugging): Read Info reads the device info including SN / IMEI. Download Mode and Reboot go through the modem port.")
+            Hint("MTP (no USB debugging): Read Info shows the device info including SN / IMEI and the storage size. Download Mode and Reboot go through the modem port.")
+            if (onChangeSerial != null) {
+                YDivider()
+                SectionLabel("CHANGE SERIAL (SAMSUNG)")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    YASTextField(
+                        value = newSerial,
+                        onValueChange = { v ->
+                            newSerial = v.uppercase().filter { it.isLetter() || it.isDigit() }.take(11)
+                        },
+                        placeholder = "11-character SN, e.g. R58N123ABCD",
+                        modifier = Modifier.weight(1f),
+                        mono = true
+                    )
+                    YASButton(
+                        "Change",
+                        { showSerialConfirm = true },
+                        style = BtnStyle.Danger,
+                        enabled = !state.isBusy && serialValid
+                    )
+                }
+                Hint("Via AT commands (MTP mode, cable connected). Must be exactly 11 characters, A-Z and 0-9.")
+            }
             YDivider()
             SectionLabel("ADB  \u00B7  USB debugging")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

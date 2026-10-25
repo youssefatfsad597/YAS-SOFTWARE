@@ -85,6 +85,8 @@ data class EdlUiState(
     val allowSmallUserdata: Boolean = true,
     val adbConnected: Boolean = false,
     val mtpInfoText: String = "",
+    // Storage capacity read over MTP ("Storage Total: ..." lines). Empty until read.
+    val mtpStorageText: String = "",
     val adbInfoText: String = "",
     val infoImei: String = "",
     val infoSerial: String = "",
@@ -254,21 +256,21 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             AtCommandTransport(context).use { at ->
                 for (dev in mtpDevices) {
                     val ok = runCatching { at.tryRebootToBrom(dev) { m -> appendLog(m) } }
-                        .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+                        .getOrElse { e -> appendLog("Could not communicate with the device."); false }
                     if (ok) { sent = true; break }
                 }
             }
             if (!sent) {
-                appendLog("The AT port did not confirm a mode switch. Power the device off, then plug in USB while holding its BROM key combo.")
+                appendLog("The modem port did not confirm a mode switch. Power the device off, then plug in USB while holding its BROM key combo.")
                 return@runTask
             }
 
-            appendLog("AT command accepted -- waiting for the device to re-enumerate as BROM...")
+            appendLog("Request accepted. Waiting for the device to reconnect in BROM mode...")
             repeat(10) {
                 kotlinx.coroutines.delay(500)
                 if (tryOpenBrom()) return@runTask
             }
-            appendLog("Device did not re-enumerate as BROM after the AT command. Power it off and use its BROM key combo instead.")
+            appendLog("Device did not re-enumerate as BROM after the request. Power it off and use its BROM key combo instead.")
         }
     }
 
@@ -520,6 +522,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             // Forget unplugged devices so that plugging them in again counts as a NEW connection.
             knownUsb.retainAll(names)
             publishUsbHeader(devices)
+            syncIdentityWithBus(devices)
 
             if (_uiState.value.isBusy) return
             for (dev in devices) {
@@ -530,6 +533,39 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
         } finally {
             scanMutex.unlock()
+        }
+    }
+
+    /** Keeps "Device Identity" honest: EDL / Odin / BROM data and MTP / ADB data belong to
+     *  DIFFERENT USB modes and must never be shown together, and data of a device that is no
+     *  longer on the bus (or is now in another mode) must disappear. */
+    private fun syncIdentityWithBus(devices: List<UsbDevice>) {
+        val edl = devices.any { isEdlDevice(it) }
+        val download = devices.any { isDownloadDevice(it) }
+        val brom = devices.any { it.vendorId == EdlUsbTransport.SPRD_BROM_VID && it.productId in EdlUsbTransport.SPRD_BROM_PIDS }
+        val lowLevel = edl || download || brom
+        // Same interface test the MTP / ADB readers use, so a device they can read is never
+        // wiped here just because the header label names its mode differently.
+        val normal = devices.filter { !isEdlDevice(it) && !isDownloadDevice(it) }
+        fun ifaces(d: UsbDevice) = (0 until d.interfaceCount).map { d.getInterface(it) }
+        val hasMtp = normal.any { d -> ifaces(d).any { it.interfaceClass == 6 || (it.interfaceClass == 0xFF && it.interfaceSubclass == 0xFF) } }
+        val hasAdb = normal.any { d -> ifaces(d).any { it.interfaceClass == 0xFF && it.interfaceSubclass == 0x42 && it.interfaceProtocol == 0x01 } }
+        _uiState.update { st ->
+            var n = st
+            // Sahara / HWID info only while a 9008 port exists.
+            if (!edl && n.deviceInfo != null) n = n.copy(deviceInfo = null)
+            if (!download && n.odinDeviceInfoText.isNotEmpty()) n = n.copy(odinDeviceInfoText = "")
+            // MTP / ADB info only while that mode is really present and no low-level mode is.
+            val keepMtp = hasMtp && !lowLevel
+            val keepAdb = hasAdb && !lowLevel
+            if (!keepMtp && (n.mtpInfoText.isNotEmpty() || n.mtpStorageText.isNotEmpty())) {
+                n = n.copy(mtpInfoText = "", mtpStorageText = "")
+            }
+            if (!keepAdb && n.adbInfoText.isNotEmpty()) n = n.copy(adbInfoText = "")
+            if (!keepMtp && !keepAdb && (n.infoImei.isNotEmpty() || n.infoSerial.isNotEmpty())) {
+                n = n.copy(infoImei = "", infoSerial = "")
+            }
+            n
         }
     }
 
@@ -1705,6 +1741,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update {
                         it.copy(
                             mtpInfoText = "No MTP device found. Connect the phone in 'File Transfer / MTP' mode.",
+                            mtpStorageText = "",
                             infoImei = "", infoSerial = ""
                         )
                     }
@@ -1712,15 +1749,23 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
                 var serial = ""
+                var storageAll = ""
                 val sections = ArrayList<String>()
                 val imeis = LinkedHashSet<String>()
-                for (dev in devices) {
+                for (listed in devices) {
                     val sb = StringBuilder()
-                    val granted = transport.ensurePermission(dev)
+                    val hadPermission = transport.hasPermission(listed)
+                    val granted = transport.ensurePermission(listed)
+                    // Right after the permission dialog the phone's MTP responder is still
+                    // settling: reading immediately is what made the FIRST read incomplete.
+                    if (granted && !hadPermission) delay(900)
+                    // Use the freshest handle (the device may have re-enumerated meanwhile).
+                    val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
                     var model = ""
                     var maker = ""
                     var firmware = ""
                     var usbSerial = ""
+                    var modemSerial = ""
                     if (granted) {
                         // Real device serial (USB serial-number descriptor) -- the source of truth.
                         usbSerial = runCatching { dev.serialNumber }.getOrNull().orEmpty()
@@ -1737,6 +1782,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             if (usbSerial.isBlank() && mtp.serial.isNotBlank()) usbSerial = mtp.serial
                         }
                     }
+                    // ---- Storage capacity (MTP GetStorageInfo) ----
+                    var storageText = ""
+                    if (granted) {
+                        val storages = runCatching { MtpDeviceInfoReader.readStorage(usbManager, dev) }
+                            .getOrDefault(emptyList())
+                        storageText = MtpDeviceInfoReader.describeStorage(storages)
+                        if (storageText.isNotBlank() && storageAll.isBlank()) storageAll = storageText
+                    }
                     // ---- Modem info over the phone's AT port (IMEI, serial, model, firmware, ...) ----
                     var atText = ""
                     if (granted) {
@@ -1745,8 +1798,17 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             "AT+CGMI", "AT+CGMM", "AT+CGMR", "AT+GMI", "AT+GMM", "AT+GMR",
                             "ATI", "AT+GCAP", "AT+CBC", "AT+CSQ", "AT+CFUN?", "AT+CPIN?"
                         )
-                        val at = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
-                            .getOrDefault(emptyMap())
+                        // The modem port is often not ready on the very first query: retry once.
+                        var atTry: Map<String, String> = emptyMap()
+                        for (attempt in 0 until 2) {
+                            atTry = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
+                                .getOrDefault(emptyMap())
+                            val complete = atTry.containsKey("AT+DEVCONINFO") ||
+                                atTry.keys.any { it.contains("GSN") }
+                            if (complete) break
+                            delay(700)
+                        }
+                        val at: Map<String, String> = atTry
                         if (at.isEmpty()) {
                             atText = "No modem port answered in this USB mode.\n" +
                                 "Some phones only expose it in a modem/diag USB configuration " +
@@ -1779,7 +1841,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                                     .forEach { found.add(it.groupValues[1]) }
                             }
                             imeis.addAll(found)
-                            if (usbSerial.isBlank()) kv["SN"]?.takeIf { it.isNotBlank() }?.let { usbSerial = it }
+                            modemSerial = kv["SN"].orEmpty().takeIf { it.isNotBlank() && it != "NA" && it != "null" }.orEmpty()
 
                             val sbAt = StringBuilder()
                             fun line(label: String, value: String) {
@@ -1832,13 +1894,20 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             atText = sbAt.toString().replace(Regex("\\[[A-Za-z ]+\\]\\n(?=\\n|\\[|$)"), "").replace(Regex("\\n{3,}"), "\n\n").trim().ifBlank { "Modem answered but returned no readable info." }
                         }
                     }
-                    if (usbSerial.isNotBlank()) serial = usbSerial
+                    // The modem serial is what AT+SERIALNO rewrites, so it wins; the USB descriptor serial is the fallback.
+                    val shownSerial = modemSerial.ifBlank { usbSerial }
+                    if (shownSerial.isNotBlank()) serial = shownSerial
                     sb.appendLine("Manufacturer: ${maker.ifBlank { "Unknown" }}")
                     sb.appendLine("Model: ${model.ifBlank { "Unknown" }}")
-                    sb.appendLine("Serial (SN): ${usbSerial.ifBlank { "Unavailable" }}")
+                    sb.appendLine("Serial (SN): ${shownSerial.ifBlank { "Unavailable" }}")
+                    if (modemSerial.isNotBlank() && usbSerial.isNotBlank() && !modemSerial.equals(usbSerial, true)) sb.appendLine("USB descriptor serial: $usbSerial")
                     sb.appendLine("IMEI: ${if (imeis.isEmpty()) "Unavailable" else imeis.joinToString(" / ")}")
                     sb.appendLine("--- Firmware ---")
                     sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
+                    if (storageText.isNotBlank()) {
+                        sb.appendLine("--- Storage ---")
+                        sb.appendLine(storageText)
+                    }
                     sb.appendLine("--- USB ---")
                     sb.append(MtpInfoReader.describe(context, dev).trimEnd())
                     sb.append("\n--- Modem ---\n").append(atText)
@@ -1846,7 +1915,12 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     sections.add(sb.toString())
                 }
                 _uiState.update {
-                    it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = imeis.joinToString("\n"), infoSerial = serial)
+                    it.copy(
+                        mtpInfoText = sections.joinToString("\n\n"),
+                        mtpStorageText = storageAll,
+                        infoImei = imeis.joinToString("\n"),
+                        infoSerial = serial
+                    )
                 }
             } catch (e: Exception) {
                 _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
@@ -1868,13 +1942,13 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 val ok = runCatching {
                     AtCommandTransport(context).use { send(it, dev) }
                 }.getOrElse { e ->
-                    appendLog("AT error: ${e.message}")
+                    appendLog("Could not communicate with the device.")
                     false
                 }
                 if (ok) { done = true; break }
             }
             if (done) {
-                appendLog("AT command accepted. The device is switching to $label; wait a few seconds, it connects automatically.")
+                appendLog("Request accepted. The device is switching to $label; wait a few seconds, it connects automatically.")
             } else {
                 appendLog("No reply and the device stayed on the USB bus. This USB mode probably has no AT port (on some Samsung phones: *#0808# -> pick a mode with MODEM).")
             }
@@ -1890,11 +1964,100 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         var rebooted = false
         for (dev in devices) {
             val ok = runCatching { AtCommandTransport(context).use { it.tryReboot(dev) { m -> appendLog(m) } } }
-                .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+                .getOrElse { e -> appendLog("Could not communicate with the device."); false }
             if (ok) { rebooted = true; break }
         }
         if (rebooted) appendLog("Reboot confirmed (device left the USB bus).")
         else appendLog("Reboot NOT confirmed. Use 'ADB -> Reboot' if USB debugging is on.")
+    }
+
+    /** "Restore Storage": formats the phone (userdata wipe) with AT commands while it is
+     *  in MTP mode and reboots it, so userdata is re-created at the full original size. */
+    fun atFormatDevice() = runTask("Restore Storage") {
+        val devices = MtpInfoReader.findMtpDevices(context)
+        if (devices.isEmpty()) {
+            appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+            return@runTask
+        }
+        appendLog("Restoring storage... all user data will be erased.")
+        var ok = false
+        for (dev in devices) {
+            ok = runCatching { AtCommandTransport(context).use { at -> at.onProgress = { f -> setTaskProgress(f) }; at.formatAndReboot(dev) { m -> appendLog(m) } } }
+                .getOrElse { e -> appendLog("Could not communicate with the device."); false }
+            if (ok) break
+        }
+        if (ok) {
+            setTaskProgress(1f)
+            appendLog("Format started. The phone is rebuilding userdata at its full size and will reboot; the first boot can take a few minutes. Afterwards connect in MTP mode and tap Read Info.")
+            _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+        } else {
+            appendLog("Format NOT confirmed. Make sure the phone is unlocked, USB mode includes MODEM (*#0808# on Samsung), then retry.")
+        }
+    }
+
+    /** Writes a new Samsung-style serial number (11 characters, A-Z / 0-9) to the device over
+     *  its AT port (MTP mode, no ADB / root needed): the classic 5-step Samsung AT+SERIALNO
+     *  sequence ([AtCommandTransport.changeSerialSequence]), then a normal reboot. */
+    fun changeSamsungSerial(newSerial: String) {
+        val sn = newSerial.trim().uppercase()
+        if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
+            appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
+            return
+        }
+        runTask("Change Serial") {
+            appendLog("Changing the serial number...")
+            val mtpDevices = MtpInfoReader.findMtpDevices(context)
+            if (mtpDevices.isEmpty()) {
+                appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                return@runTask
+            }
+            var written = false
+            var rebooted = false
+            for (dev in mtpDevices) {
+                written = runCatching {
+                    AtCommandTransport(context).use { at -> at.onProgress = { f -> setTaskProgress(f * 0.6f) }; at.changeSerialSequence(dev, sn) { m -> appendLog(m) } }
+                }.getOrElse { e -> appendLog("Could not communicate with the device."); false }
+                if (!written) continue
+                appendLog("The modem accepted the new serial. Rebooting...")
+                rebooted = runCatching {
+                    AtCommandTransport(context).use { at -> at.onProgress = { f -> setTaskProgress(0.6f + f * 0.2f) }; at.rebootVerified(dev) { m -> appendLog(m) } }
+                }.getOrElse { e -> appendLog("Could not communicate with the device."); false }
+                break
+            }
+            if (!written) {
+                appendLog("ERROR: Serial was NOT changed. The modem port did not acknowledge the write (wrong USB mode, or this firmware does not allow it). On Samsung dial *#0808#, pick a mode that includes MODEM, then retry.")
+                return@runTask
+            }
+            if (!rebooted) {
+                appendLog("WARNING: The serial was written but the phone did not reboot. Restart it manually (hold Power + Vol Down for 10 s), reconnect in MTP mode and tap Read Info to confirm.")
+                _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+                return@runTask
+            }
+            // Wait for the phone to come back, then read the serial back from the modem to verify.
+            appendLog("Waiting for the phone to come back...")
+            setTaskProgress(0.8f)
+            var verified = ""
+            val deadline = System.currentTimeMillis() + 120_000
+            while (System.currentTimeMillis() < deadline && verified.isEmpty()) {
+                delay(3000)
+                setTaskProgress((0.8f + 0.19f * (1f - (deadline - System.currentTimeMillis()) / 120_000f)).coerceIn(0.8f, 0.99f))
+                val back = MtpInfoReader.findMtpDevices(context)
+                if (back.isEmpty()) continue
+                delay(4000) // let the modem port come up
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                for (listed in back) {
+                    val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
+                    val value = runCatching { AtCommandTransport(context).use { it.readModemSerial(dev, 3) } }.getOrDefault("")
+                    if (value.isNotBlank()) { verified = value; break }
+                }
+            }
+            _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+            when {
+                verified.equals(sn, true) -> appendLog("SUCCESS: serial is now $verified.")
+                verified.isNotBlank() -> appendLog("WARNING: the phone still reports serial $verified instead of $sn. This firmware may not allow changing it.")
+                else -> appendLog("The phone is back but its serial could not be read. Allow USB access, set a USB mode with MODEM (*#0808#), then tap Read Info to check.")
+            }
+        }
     }
 
     fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->
@@ -2018,6 +2181,30 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Runs a multi-step ADB script (e.g. Remove Knox) quietly: the commands are never echoed to the
+     *  console or the shell panel -- the person only sees a loading bar with a percentage. */
+    fun runAdbScript(title: String, script: String) {
+        val steps = script.split(';').map { it.trim() }.filter { it.isNotEmpty() }
+        if (steps.isEmpty()) return
+        runTask(title) {
+            appendLog("$title started. Please wait...")
+            if (!adbClient.connect()) {
+                _uiState.update { it.copy(adbConnected = false) }
+                appendLog("ERROR: Could not connect over USB debugging. Enable USB Debugging and accept the prompt on the device.")
+                return@runTask
+            }
+            _uiState.update { it.copy(adbConnected = true) }
+            var failed = 0
+            steps.forEachIndexed { i, step ->
+                val out = runCatching { adbClient.shell(step, timeoutMs = 20000) }.getOrDefault("")
+                if (!step.startsWith("reboot") && Regex("exception|unknown package|not found|error", RegexOption.IGNORE_CASE).containsMatchIn(out)) failed++
+                setTaskProgress((i + 1).toFloat() / steps.size)
+            }
+            setTaskProgress(1f)
+            appendLog(if (failed == 0) "$title completed successfully." else "$title completed. Some components are not present on this device and were skipped.")
+        }
+    }
+
     /** Reboots the connected device into the requested target mode over ADB.
      *  'target' follows the standard adb reboot targets: "" (normal), "recovery",
      *  "download" (Samsung Odin/Download mode), "edl" (Qualcomm chips that expose it).
@@ -2028,12 +2215,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("ERROR: could not establish ADB connection (is USB Debugging enabled and authorized?).")
                 return@runTask
             }
-            appendLog("Sending 'reboot:$target' ...")
             adbClient.reboot(target)
             appendLog("Reboot command sent. Device should switch to $label shortly.")
             adbClient.close()
             _uiState.update { it.copy(adbConnected = false) }
         }
+    }
+
+    private fun setTaskProgress(f: Float) {
+        _uiState.update { it.copy(progress = f.coerceIn(0f, 1f)) }
     }
 
     private fun updateProgress(doneBytes: Long, totalBytes: Long, startTimeNs: Long) {

@@ -14,12 +14,7 @@ object LogSanitizer {
         "^total bytes", "^applying \\d+ disk patches", "^patches applied", "^embedded .*firmware detected",
         "^using embedded images", "^loading embedded", "^sparse image", "^verifying write", "^erase check",
         "^re-negotiating", "^no reply to", "^usb link dropped", "^recognized:", "^lun \\d+: read",
-        "^found '.*' ->", "^flashing raw userdata", "^reboot command sent\\.?$", "^welcome to .*embedded",
-        // Internal diagnostic trace and the per-window "post-write check" notice that some loaders
-        // print on EVERY transfer window during a quick-format userdata write: it is non-fatal and
-        // already retried/handled internally, so (same as the official PC tool) it never reaches the
-        // technician's console. Genuine failures still surface as a normal ERROR line.
-        "^userdata trace", "^warning: device returned a post-write check"
+        "^found '.*' ->", "^\\[\\d+/\\d+\\]", "^\\[unlock", "^\\[format\\]", "^\\s*reply:", "^wrote ", "^serial (before|after)", "device still connected", "\\bAT[+!#]", "^sending ", "^flashing raw userdata", "^reboot command sent\\.?$", "^welcome to .*embedded"
     ).map { Regex(it, RegexOption.IGNORE_CASE) }
 
     private val rewrites: List<Pair<Regex, String>> = listOf(
@@ -51,6 +46,8 @@ object LogSanitizer {
         "^WARNING: .*[Ee]mbedded.*$" to
             "WARNING: Built-in firmware files are missing from this build, so the one-tap service flow is disabled.",
         "^Skipping '(.*)': no matching PIT entry.*$" to "Skipping '$1': not part of this device's layout.",
+        "^WARNING: device returned a post-write check after all \\d+ bytes were sent \\((.*)\\)\\. Treating as non-fatal and continuing\\.$" to
+            "WARNING: Device check after write -- $1",
         "^Writing '(.*)' -> partition '(.*)'.*$" to "Writing '$1' to '$2'...",
         "^Quick-format mode: sending small '(.*)'.*$" to "Quick-format mode: sending a small '$1' on purpose.",
         "^Quick-format mode: sending small userdata.*$" to "Quick-format mode: sending a small userdata image on purpose."
