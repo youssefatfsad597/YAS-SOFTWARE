@@ -56,6 +56,7 @@ data class EdlUiState(
     val partitions: List<PartitionEntry> = emptyList(),
     val selectedPartKeys: Set<String> = emptySet(),
     val selectedLunFilter: Int = -1,
+    val usbKind: String = "",
     val odinConnected: Boolean = false,
     val odinSessionReady: Boolean = false,
     val odinDeviceDescription: String = "No Download-Mode Device Detected",
@@ -456,17 +457,34 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     private fun usbKindLabel(dev: UsbDevice): String {
         if (isEdlDevice(dev)) return "Qualcomm EDL 9008"
         if (isDownloadDevice(dev)) return "Samsung Download Mode"
+        if (dev.vendorId == EdlUsbTransport.SPRD_BROM_VID && dev.productId in EdlUsbTransport.SPRD_BROM_PIDS) return "Unisoc BROM"
         var adb = false
         var mtp = false
+        var serial = false
+        var vendor = false
         for (i in 0 until dev.interfaceCount) {
             val f = dev.getInterface(i)
-            if (f.interfaceClass == 0xFF && f.interfaceSubclass == 0x42 && f.interfaceProtocol == 0x01) adb = true
-            if (f.interfaceClass == 6 || (f.interfaceClass == 0xFF && f.interfaceSubclass == 0xFF)) mtp = true
+            val name = runCatching { f.name }.getOrNull().orEmpty()
+            val isAdb = f.interfaceClass == 0xFF && f.interfaceSubclass == 0x42 && f.interfaceProtocol == 0x01
+            // Real MTP = still-image class 6/1/1, or the vendor 0xFF/0xFF/0 interface that is NAMED "MTP".
+            // A bare 0xFF/0xFF is also used by modem/diag/BROM ports and must NOT be called MTP.
+            // The interface name is only readable after USB permission, so before it Samsung's own
+            // 0xFF/0xFF/0 interface is accepted as MTP by vendor id.
+            val isMtp = (f.interfaceClass == 6 && f.interfaceSubclass == 1) ||
+                (f.interfaceClass == 0xFF && f.interfaceSubclass == 0xFF && (
+                    name.contains("MTP", ignoreCase = true) ||
+                        (name.isEmpty() && f.interfaceProtocol == 0 && dev.vendorId == EdlUsbTransport.SAMSUNG_VID)))
+            if (isAdb) adb = true
+            else if (isMtp) mtp = true
+            else if (f.interfaceClass == 2 || f.interfaceClass == 0x0A) serial = true
+            else if (f.interfaceClass == 0xFF) vendor = true
         }
         return when {
             adb && mtp -> "MTP + ADB"
             adb -> "ADB"
             mtp -> "MTP"
+            serial -> "Modem / serial port"
+            vendor -> "Vendor USB port"
             else -> "USB Device"
         }
     }
@@ -488,8 +506,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         else devices.joinToString("\n") { describeUsb(it) }
         val any = devices.isNotEmpty()
         _uiState.update {
-            if (it.usbSummary == summary && it.usbAny == any) it
-            else it.copy(usbSummary = summary, usbAny = any)
+            val kind = devices.firstOrNull()?.let { d -> usbKindLabel(d) }.orEmpty()
+            if (it.usbSummary == summary && it.usbAny == any && it.usbKind == kind) it
+            else it.copy(usbSummary = summary, usbAny = any, usbKind = kind)
         }
     }
 
@@ -579,11 +598,29 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun bootFirehoseWithBytes(loaderBytes: ByteArray) {
         val startNs = System.nanoTime()
-        sahara.readInfoAndUploadLoader(
-            loaderBytes = loaderBytes,
-            onDeviceInfoRead = { info -> _uiState.update { it.copy(deviceInfo = info) } },
-            onProgress = { sent, total -> updateProgress(sent, total, startNs) }
-        )
+        try {
+            sahara.readInfoAndUploadLoader(
+                loaderBytes = loaderBytes,
+                onDeviceInfoRead = { info -> _uiState.update { it.copy(deviceInfo = info) } },
+                onProgress = { sent, total -> updateProgress(sent, total, startNs) }
+            )
+        } catch (e: java.io.IOException) {
+            if (!transport.isConnected) {
+                throw java.io.IOException(
+                    "${e.message}. The 9008 port dropped off USB while the loader was being sent: the boot ROM aborted " +
+                        "the session (it only waits a short time for the host, and rejects a loader that does not match " +
+                        "the chip's secure boot). Re-enter EDL and press Upload Loader right after it connects; " +
+                        "if it repeats, the loader does not match this device/binary."
+                )
+            }
+            appendLog("Sahara upload failed (${e.message}); resetting the session and retrying once...")
+            sahara.rearmAfterFailure()
+            sahara.readInfoAndUploadLoader(
+                loaderBytes = loaderBytes,
+                onDeviceInfoRead = { info -> _uiState.update { it.copy(deviceInfo = info) } },
+                onProgress = { sent, total -> updateProgress(sent, total, startNs) }
+            )
+        }
 
         val storage = _uiState.value.selectedStorage
         val configured = firehose.configure(storage)

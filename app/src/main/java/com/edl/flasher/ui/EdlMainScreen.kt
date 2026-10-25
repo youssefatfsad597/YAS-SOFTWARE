@@ -596,9 +596,11 @@ private fun connMode(s: EdlUiState): ConnMode = when {
     // MTP-only, ADB-only and MTP+ADB are three distinct states and must never collapse into
     // one label: that's what made the old badge show "MTP + ADB" even when only MTP (no ADB
     // daemon) was actually connected.
-    s.adbConnected && s.usbAny -> ConnMode("MTP + ADB", Yas.SkyText, true)
+    s.adbConnected && s.usbAny -> ConnMode(
+        if (s.usbKind.contains("MTP")) "MTP + ADB" else "ADB", Yas.SkyText, true
+    )
     s.adbConnected -> ConnMode("ADB", Color(0xFFA78BFA), true)
-    s.usbAny -> ConnMode("MTP", Color(0xFFFBBF24), true)
+    s.usbAny -> ConnMode(s.usbKind.ifBlank { "USB" }, Color(0xFFFBBF24), true)
     else -> ConnMode("Disconnected", Yas.Idle, false)
 }
 
