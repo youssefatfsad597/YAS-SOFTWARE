@@ -20,6 +20,8 @@ data class FirehoseResponse(
     val rawXml: String
 )
 
+private const val ERASE_FALLBACK_MAX_SECTORS = 131072L // 64 MiB at 512 B
+
 class FirehoseProtocol(
     private val transport: EdlUsbTransport,
     private val logger: (String) -> Unit
@@ -32,6 +34,13 @@ class FirehoseProtocol(
 
     /** Payload limit the target mentioned in a <log> line (e.g. "larger than supported 16384"). */
     private var logSupportedPayload: Int? = null
+
+    /** Mirrors the ZlpAwareHost attribute we announce in <configure>; when false no ZLP is sent after a payload. */
+    var zlpAwareHost: Boolean = true
+        private set
+
+    /** Last <log> lines the target printed (cleared by [captureLogs]); used for diagnostics. */
+    private val recentLogs = ArrayList<String>()
 
     /** Read back every write and compare CRCs, so a loader that ACKs without writing can't pass as success. */
     var verifyAfterWrite: Boolean = true
@@ -69,7 +78,7 @@ class FirehoseProtocol(
         val xml = buildXml(
             """<configure MemoryName="${storage.memoryName}" Verbose="0" AlwaysValidate="0" """ +
             """MaxDigestTableSizeInBytes="8192" MaxPayloadSizeToTargetInBytes="$payloadSize" """ +
-            """ZlpAwareHost="1" SkipStorageInit="0" />"""
+            """ZlpAwareHost="${if (zlpAwareHost) 1 else 0}" SkipStorageInit="0" />"""
         )
         transport.write(xml.toByteArray(Charsets.UTF_8))
         return waitForResponse()
@@ -178,7 +187,7 @@ class FirehoseProtocol(
                 }
             }
             transport.write(buffer, 0, targetChunk, timeoutMs = 60000)
-            transport.writeZlp()
+            if (zlpAwareHost) transport.writeZlp()
             crc.update(buffer, 0, targetChunk)
             bytesSent += targetChunk
             bufOffset = 0
@@ -294,7 +303,7 @@ class FirehoseProtocol(
                 off += r
             }
             transport.write(buf, 0, toSend, timeoutMs = 60000)
-            transport.writeZlp()
+            if (zlpAwareHost) transport.writeZlp()
             sent += toSend
             onChunkProgress(sent)
         }
@@ -323,7 +332,7 @@ class FirehoseProtocol(
         while (sent < totalBytes) {
             val toSend = min(maxPayloadSize.toLong(), totalBytes - sent).toInt()
             transport.write(buf, 0, toSend, timeoutMs = 60000)
-            transport.writeZlp()
+            if (zlpAwareHost) transport.writeZlp()
             sent += toSend
         }
         val finalRsp = waitForResponse()
@@ -340,26 +349,159 @@ class FirehoseProtocol(
         transport.write(cmd.toByteArray(Charsets.UTF_8))
         val rsp = waitForResponse()
         if (!rsp.ack) throw IOException("Firehose <erase> failed on LUN $lun, LBA $startSector: ${rsp.rawXml.take(300)}")
-        checkErased(lun, startSector, numSectors)
+        val erased = checkErased(lun, startSector, numSectors)
+        if (erased == false && storageType == StorageType.EMMC) {
+            // Many eMMC programmers ACK <erase> but only issue a discard that leaves data readable.
+            // Writing zeros is what the user actually wants (invalidates FS / crypto footer).
+            val cap = min(numSectors, ERASE_FALLBACK_MAX_SECTORS)
+            logger("Erase had no visible effect on eMMC -> zero-filling $cap sector(s) with <program> instead.")
+            programZeros(lun, startSector, cap)
+            if (checkErased(lun, startSector, cap) == false) {
+                logger("WARNING: zero-fill did not change the data either. The eMMC is ignoring ALL writes (write-protected or read-only). Run 'Test eMMC Write' for a diagnosis.")
+            }
+        }
     }
 
     /** Reads back the start of an erased range so an ACK that did nothing is reported instead of hidden. */
-    private fun checkErased(lun: Int, startSector: Long, numSectors: Long) {
+    private fun checkErased(lun: Int, startSector: Long, numSectors: Long): Boolean? {
         val probe = min(numSectors, 64L)
-        if (probe <= 0) return
+        if (probe <= 0) return null
         val out = java.io.ByteArrayOutputStream()
         if (runCatching { readSectors(lun, startSector, probe, out) }.isFailure) {
             logger("Erase check skipped (read-back failed).")
-            return
+            return null
         }
         val data = out.toByteArray()
-        if (data.isEmpty()) return
+        if (data.isEmpty()) return null
         val first = data[0]
         val uniform = data.all { it == first }
         if (uniform && (first == 0.toByte() || first == 0xFF.toByte())) {
             logger("Erase verified: LUN $lun LBA $startSector reads back as ${if (first == 0.toByte()) "0x00" else "0xFF"}.")
+            return true
+        }
+        logger("WARNING: loader ACKed <erase> but LUN $lun LBA $startSector still contains data. Erase had NO effect.")
+        return false
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // eMMC write diagnostics / loader-variant helpers
+    // ---------------------------------------------------------------------------------------
+
+    /** Programs [data] (must be a whole number of sectors) at [startSector]. [fullAttrs] sends the long
+     *  rawprogram-style attribute set some loaders insist on instead of the minimal one. */
+    @Throws(IOException::class)
+    fun programBuffer(lun: Int, startSector: Long, data: ByteArray, fullAttrs: Boolean = false) {
+        val sectorSize = storageType.sectorSize
+        require(data.isNotEmpty() && data.size % sectorSize == 0) { "buffer must be whole sectors" }
+        val numSectors = data.size / sectorSize
+        transport.write(buildXml(programTag(lun, startSector, numSectors.toLong(), fullAttrs)).toByteArray(Charsets.UTF_8))
+        val rsp = waitForResponse()
+        if (!rsp.ack || !rsp.rawMode) {
+            throw IOException("Firehose <program> rejected (LUN $lun, sector $startSector): ${rsp.rawXml.take(300)}")
+        }
+        var off = 0
+        while (off < data.size) {
+            val n = min(maxPayloadSize, data.size - off)
+            transport.write(data, off, n, timeoutMs = 60000)
+            if (zlpAwareHost) transport.writeZlp()
+            off += n
+        }
+        val fin = waitForResponse()
+        if (!fin.ack) throw IOException("Firehose <program> failed final ACK: ${fin.rawXml.take(300)}")
+    }
+
+    private fun programTag(lun: Int, startSector: Long, numSectors: Long, fullAttrs: Boolean): String {
+        val sectorSize = storageType.sectorSize
+        return if (!fullAttrs) {
+            """<program SECTOR_SIZE_IN_BYTES="$sectorSize" num_partition_sectors="$numSectors" """ +
+                """physical_partition_number="$lun" start_sector="$startSector" />"""
         } else {
-            logger("WARNING: loader ACKed <erase> but LUN $lun LBA $startSector still contains data. Erase had NO effect.")
+            val kb = numSectors * sectorSize / 1024
+            """<program SECTOR_SIZE_IN_BYTES="$sectorSize" file_sector_offset="0" filename="" label="yas" """ +
+                """num_partition_sectors="$numSectors" physical_partition_number="$lun" size_in_KB="$kb" """ +
+                """sparse="false" start_byte_hex="0x${(startSector * sectorSize).toString(16)}" """ +
+                """start_sector="$startSector" read_back_verify="false" />"""
+        }
+    }
+
+    /** Streams [numSectors] zero sectors to [startSector] with one <program> command. */
+    @Throws(IOException::class)
+    fun programZeros(lun: Int, startSector: Long, numSectors: Long) {
+        if (numSectors <= 0) return
+        val sectorSize = storageType.sectorSize
+        transport.write(buildXml(programTag(lun, startSector, numSectors, false)).toByteArray(Charsets.UTF_8))
+        val rsp = waitForResponse()
+        if (!rsp.ack || !rsp.rawMode) throw IOException("Zero-fill <program> rejected: ${rsp.rawXml.take(300)}")
+        val total = numSectors * sectorSize
+        val buf = ByteArray(maxPayloadSize)
+        var sent = 0L
+        while (sent < total) {
+            val n = min(maxPayloadSize.toLong(), total - sent).toInt()
+            transport.write(buf, 0, n, timeoutMs = 60000)
+            if (zlpAwareHost) transport.writeZlp()
+            sent += n
+        }
+        val fin = waitForResponse()
+        if (!fin.ack) throw IOException("Zero-fill failed final ACK: ${fin.rawXml.take(300)}")
+    }
+
+    /** Sends <getstorageinfo> and returns whatever the loader printed (manufacturer, fw_version, total_blocks...). */
+    fun getStorageInfo(lun: Int = 0): List<String> {
+        synchronized(recentLogs) { recentLogs.clear() }
+        drainPendingLogs()
+        return try {
+            transport.write(buildXml("""<getstorageinfo physical_partition_number="$lun" />""").toByteArray(Charsets.UTF_8))
+            waitForResponse(timeoutMs = 8000)
+            synchronized(recentLogs) { recentLogs.toList() }
+        } catch (e: IOException) {
+            logger("getstorageinfo failed: ${e.message}")
+            emptyList()
+        }
+    }
+
+    /** Re-sends <configure> with explicit knobs; used to try loader "dialects". */
+    fun reconfigure(storage: StorageType, payload: Int, zlp: Boolean): Boolean {
+        zlpAwareHost = zlp
+        drainPendingLogs()
+        val rsp = runCatching { sendConfigureXml(storage, payload) }.getOrNull() ?: return false
+        if (rsp.ack) {
+            storageType = storage
+            maxPayloadSize = rsp.maxPayloadSizeToTarget?.takeIf { it in storage.sectorSize..payload } ?: payload
+        }
+        return rsp.ack
+    }
+
+    enum class WriteVerdict { WRITES_WORK, REJECTED, SILENTLY_IGNORED, UNREADABLE, UNEXPECTED }
+
+    data class WriteTestReport(val verdict: WriteVerdict, val detail: String)
+
+    /**
+     * Non-destructive write probe for ONE sector: reads it, writes the bit-inverted copy, reads it back,
+     * then restores the original. Tells apart (a) loader NAKs the write, (b) loader ACKs but the eMMC does
+     * not change (write-protected / read-only eMMC), (c) writes really work.
+     */
+    fun writeSelfTest(lun: Int, sector: Long, fullAttrs: Boolean): WriteTestReport {
+        val ss = storageType.sectorSize
+        fun readOne(): ByteArray? {
+            val out = java.io.ByteArrayOutputStream()
+            return runCatching { readSectors(lun, sector, 1, out); out.toByteArray() }.getOrNull()
+        }
+        val original = readOne() ?: return WriteTestReport(WriteVerdict.UNREADABLE, "could not read sector $sector")
+        if (original.size != ss) return WriteTestReport(WriteVerdict.UNREADABLE, "short read (${original.size} bytes)")
+        val inverted = ByteArray(ss) { (original[it].toInt() xor 0xFF).toByte() }
+        try {
+            programBuffer(lun, sector, inverted, fullAttrs)
+        } catch (e: IOException) {
+            return WriteTestReport(WriteVerdict.REJECTED, e.message.orEmpty())
+        }
+        val after = readOne()
+        // Always try to put the original back, whatever happened.
+        runCatching { programBuffer(lun, sector, original, fullAttrs) }
+        return when {
+            after == null -> WriteTestReport(WriteVerdict.UNREADABLE, "read-back failed after write")
+            after.contentEquals(inverted) -> WriteTestReport(WriteVerdict.WRITES_WORK, "sector changed as expected")
+            after.contentEquals(original) -> WriteTestReport(WriteVerdict.SILENTLY_IGNORED, "loader ACKed the write but the sector is unchanged")
+            else -> WriteTestReport(WriteVerdict.UNEXPECTED, "sector changed to unexpected content")
         }
     }
 
@@ -463,6 +605,7 @@ class FirehoseProtocol(
             val text = match.groupValues[1]
             Regex("""larger than supported (\d+)""").find(text)?.groupValues?.get(1)?.toIntOrNull()
                 ?.let { logSupportedPayload = it }
+            synchronized(recentLogs) { if (recentLogs.size < 200) recentLogs.add(text) }
             logger("[Target] $text")
         }
     }
