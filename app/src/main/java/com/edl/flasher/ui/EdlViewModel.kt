@@ -1736,11 +1736,12 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         runTask("Reading MTP Device Info") {
             // Information reads are silent on purpose: the result goes to the Device Info panel only.
             try {
-                val devices = MtpInfoReader.findMtpDevices(context)
+                val devices = MtpInfoReader.findModemDevices(context)
+                val mtpNames = MtpInfoReader.findMtpDevices(context).map { it.deviceName }.toSet()
                 if (devices.isEmpty()) {
                     _uiState.update {
                         it.copy(
-                            mtpInfoText = "No MTP device found. Connect the phone in 'File Transfer / MTP' mode.",
+                            mtpInfoText = "No device found. Connect the phone by USB (MTP or a mode that includes MODEM).",
                             mtpStorageText = "",
                             infoImei = "", infoSerial = ""
                         )
@@ -1771,7 +1772,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                         usbSerial = runCatching { dev.serialNumber }.getOrNull().orEmpty()
                         maker = runCatching { dev.manufacturerName }.getOrNull().orEmpty()
                         model = runCatching { dev.productName }.getOrNull().orEmpty()
-                        val mtp = runCatching { MtpDeviceInfoReader.read(usbManager, dev) }.getOrNull()
+                        // Only real MTP devices are read over MTP (slow); modem-only modes skip straight to AT.
+                        val mtp = if (dev.deviceName in mtpNames) runCatching { MtpDeviceInfoReader.read(usbManager, dev) }.getOrNull() else null
                         if (mtp != null) {
                             if (mtp.manufacturer.isNotBlank()) maker = mtp.manufacturer
                             if (mtp.model.isNotBlank()) model = mtp.model
@@ -1784,7 +1786,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     // ---- Storage capacity (MTP GetStorageInfo) ----
                     var storageText = ""
-                    if (granted) {
+                    if (granted && dev.deviceName in mtpNames) {
                         val storages = runCatching { MtpDeviceInfoReader.readStorage(usbManager, dev) }
                             .getOrDefault(emptyList())
                         storageText = MtpDeviceInfoReader.describeStorage(storages)
@@ -1932,9 +1934,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  while it is in MTP mode. No ADB needed. */
     private fun runAtModeAction(title: String, label: String, send: suspend (AtCommandTransport, UsbDevice) -> Boolean) {
         runTask(title) {
-            val devices = MtpInfoReader.findMtpDevices(context)
+            val devices = MtpInfoReader.findModemDevices(context)
             if (devices.isEmpty()) {
-                appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
                 return@runTask
             }
             var done = false
@@ -1956,9 +1958,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun atRebootDevice() = runTask("AT Reboot (MTP)") {
-        val devices = MtpInfoReader.findMtpDevices(context)
+        val devices = MtpInfoReader.findModemDevices(context)
         if (devices.isEmpty()) {
-            appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+            appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
             return@runTask
         }
         var rebooted = false
@@ -1974,9 +1976,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     /** "Restore Storage": formats the phone (userdata wipe) with AT commands while it is
      *  in MTP mode and reboots it, so userdata is re-created at the full original size. */
     fun atFormatDevice() = runTask("Restore Storage") {
-        val devices = MtpInfoReader.findMtpDevices(context)
+        val devices = MtpInfoReader.findModemDevices(context)
         if (devices.isEmpty()) {
-            appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+            appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
             return@runTask
         }
         appendLog("Restoring storage... all user data will be erased.")
@@ -2006,9 +2008,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
         runTask("Change Serial") {
             appendLog("Changing the serial number...")
-            val mtpDevices = MtpInfoReader.findMtpDevices(context)
+            val mtpDevices = MtpInfoReader.findModemDevices(context)
             if (mtpDevices.isEmpty()) {
-                appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+                appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
                 return@runTask
             }
             var written = false
@@ -2041,7 +2043,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             while (System.currentTimeMillis() < deadline && verified.isEmpty()) {
                 delay(3000)
                 setTaskProgress((0.8f + 0.19f * (1f - (deadline - System.currentTimeMillis()) / 120_000f)).coerceIn(0.8f, 0.99f))
-                val back = MtpInfoReader.findMtpDevices(context)
+                val back = MtpInfoReader.findModemDevices(context)
                 if (back.isEmpty()) continue
                 delay(4000) // let the modem port come up
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
