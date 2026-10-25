@@ -85,6 +85,8 @@ data class EdlUiState(
     val allowSmallUserdata: Boolean = true,
     val adbConnected: Boolean = false,
     val mtpInfoText: String = "",
+    // Storage capacity read over MTP ("Storage Total: ..." lines). Empty until read.
+    val mtpStorageText: String = "",
     val adbInfoText: String = "",
     val infoImei: String = "",
     val infoSerial: String = "",
@@ -520,6 +522,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             // Forget unplugged devices so that plugging them in again counts as a NEW connection.
             knownUsb.retainAll(names)
             publishUsbHeader(devices)
+            syncIdentityWithBus(devices)
 
             if (_uiState.value.isBusy) return
             for (dev in devices) {
@@ -530,6 +533,39 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
         } finally {
             scanMutex.unlock()
+        }
+    }
+
+    /** Keeps "Device Identity" honest: EDL / Odin / BROM data and MTP / ADB data belong to
+     *  DIFFERENT USB modes and must never be shown together, and data of a device that is no
+     *  longer on the bus (or is now in another mode) must disappear. */
+    private fun syncIdentityWithBus(devices: List<UsbDevice>) {
+        val edl = devices.any { isEdlDevice(it) }
+        val download = devices.any { isDownloadDevice(it) }
+        val brom = devices.any { it.vendorId == EdlUsbTransport.SPRD_BROM_VID && it.productId in EdlUsbTransport.SPRD_BROM_PIDS }
+        val lowLevel = edl || download || brom
+        // Same interface test the MTP / ADB readers use, so a device they can read is never
+        // wiped here just because the header label names its mode differently.
+        val normal = devices.filter { !isEdlDevice(it) && !isDownloadDevice(it) }
+        fun ifaces(d: UsbDevice) = (0 until d.interfaceCount).map { d.getInterface(it) }
+        val hasMtp = normal.any { d -> ifaces(d).any { it.interfaceClass == 6 || (it.interfaceClass == 0xFF && it.interfaceSubclass == 0xFF) } }
+        val hasAdb = normal.any { d -> ifaces(d).any { it.interfaceClass == 0xFF && it.interfaceSubclass == 0x42 && it.interfaceProtocol == 0x01 } }
+        _uiState.update { st ->
+            var n = st
+            // Sahara / HWID info only while a 9008 port exists.
+            if (!edl && n.deviceInfo != null) n = n.copy(deviceInfo = null)
+            if (!download && n.odinDeviceInfoText.isNotEmpty()) n = n.copy(odinDeviceInfoText = "")
+            // MTP / ADB info only while that mode is really present and no low-level mode is.
+            val keepMtp = hasMtp && !lowLevel
+            val keepAdb = hasAdb && !lowLevel
+            if (!keepMtp && (n.mtpInfoText.isNotEmpty() || n.mtpStorageText.isNotEmpty())) {
+                n = n.copy(mtpInfoText = "", mtpStorageText = "")
+            }
+            if (!keepAdb && n.adbInfoText.isNotEmpty()) n = n.copy(adbInfoText = "")
+            if (!keepMtp && !keepAdb && (n.infoImei.isNotEmpty() || n.infoSerial.isNotEmpty())) {
+                n = n.copy(infoImei = "", infoSerial = "")
+            }
+            n
         }
     }
 
@@ -1349,6 +1385,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             )
             val storage = _uiState.value.selectedStorage
             var anyWorks = false
+            var hung = false
             val verdicts = mutableListOf<FirehoseProtocol.WriteVerdict>()
             for (d in dialects) {
                 if (!firehose.reconfigure(storage, d.payload, d.zlp)) {
@@ -1359,18 +1396,36 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 verdicts += r.verdict
                 appendLog("[${d.name}] -> ${r.verdict}: ${r.detail}")
                 if (r.verdict == FirehoseProtocol.WriteVerdict.WRITES_WORK) { anyWorks = true; break }
+                if (r.verdict == FirehoseProtocol.WriteVerdict.HUNG) {
+                    hung = true
+                    appendLog(
+                        "The loader stopped responding after this write attempt -- sending it more commands " +
+                            "would only make things worse, so the remaining dialects are skipped."
+                    )
+                    break
+                }
             }
             appendLog(
                 when {
                     anyWorks -> "RESULT: writes work with the dialect above. Flash using it (the app keeps it configured)."
+                    hung ->
+                        "RESULT: the loader/controller stopped answering the moment a real write command was sent " +
+                            "(the GPT still reads fine, only writes freeze it). That is a hardware-level symptom, not a " +
+                            "protocol or loader-choice problem: either the eMMC itself has failed/is dying, or it is " +
+                            "latched into a write-protected state the chip enforces at the bus level before the loader " +
+                            "even gets a chance to answer. Trying another .elf loader will very likely hang the same way. " +
+                            "The device may need a hard reset (hold Power + Vol Down ~10s) to come back after this. " +
+                            "The only test that can tell write-protect apart from a dead chip is an eMMC ISP tool reading " +
+                            "EXT_CSD (USER_WP / PERM_WP bits, PRE_EOL_INFO, device life-time estimate); either outcome " +
+                            "there means the eMMC needs replacing, not a software fix."
                     verdicts.isNotEmpty() && verdicts.all { it == FirehoseProtocol.WriteVerdict.SILENTLY_IGNORED } ->
                         "RESULT: the loader ACKs every write but the eMMC never changes. That is not a protocol problem: " +
                             "the eMMC is write-protected (power-on/permanent WP) or has dropped into read-only mode " +
                             "(worn-out/failed chip). Erase cannot help. Needs an eMMC ISP tool to read EXT_CSD " +
                             "(USER_WP, PRE_EOL_INFO, life-time estimate); permanent WP / EOL read-only means replacing the eMMC."
                     verdicts.isNotEmpty() && verdicts.all { it == FirehoseProtocol.WriteVerdict.REJECTED } ->
-                        "RESULT: the loader NAKs writes. Likely a restricted/signed programmer or the wrong variant for this " +
-                            "binary: try another SDM662 programmer for the same device/binary."
+                        "RESULT: the loader NAKs writes cleanly and quickly. Likely a restricted/signed programmer or the " +
+                            "wrong variant for this binary: try another SDM662 programmer for the same device/binary."
                     else -> "RESULT: mixed/unclear (${verdicts.joinToString()}). Send me this log."
                 }
             )
@@ -1686,6 +1741,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update {
                         it.copy(
                             mtpInfoText = "No MTP device found. Connect the phone in 'File Transfer / MTP' mode.",
+                            mtpStorageText = "",
                             infoImei = "", infoSerial = ""
                         )
                     }
@@ -1693,11 +1749,18 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
                 var serial = ""
+                var storageAll = ""
                 val sections = ArrayList<String>()
                 val imeis = LinkedHashSet<String>()
-                for (dev in devices) {
+                for (listed in devices) {
                     val sb = StringBuilder()
-                    val granted = transport.ensurePermission(dev)
+                    val hadPermission = transport.hasPermission(listed)
+                    val granted = transport.ensurePermission(listed)
+                    // Right after the permission dialog the phone's MTP responder is still
+                    // settling: reading immediately is what made the FIRST read incomplete.
+                    if (granted && !hadPermission) delay(900)
+                    // Use the freshest handle (the device may have re-enumerated meanwhile).
+                    val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
                     var model = ""
                     var maker = ""
                     var firmware = ""
@@ -1718,6 +1781,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             if (usbSerial.isBlank() && mtp.serial.isNotBlank()) usbSerial = mtp.serial
                         }
                     }
+                    // ---- Storage capacity (MTP GetStorageInfo) ----
+                    var storageText = ""
+                    if (granted) {
+                        val storages = runCatching { MtpDeviceInfoReader.readStorage(usbManager, dev) }
+                            .getOrDefault(emptyList())
+                        storageText = MtpDeviceInfoReader.describeStorage(storages)
+                        if (storageText.isNotBlank() && storageAll.isBlank()) storageAll = storageText
+                    }
                     // ---- Modem info over the phone's AT port (IMEI, serial, model, firmware, ...) ----
                     var atText = ""
                     if (granted) {
@@ -1726,8 +1797,17 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             "AT+CGMI", "AT+CGMM", "AT+CGMR", "AT+GMI", "AT+GMM", "AT+GMR",
                             "ATI", "AT+GCAP", "AT+CBC", "AT+CSQ", "AT+CFUN?", "AT+CPIN?"
                         )
-                        val at = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
-                            .getOrDefault(emptyMap())
+                        // The modem port is often not ready on the very first query: retry once.
+                        var atTry: Map<String, String> = emptyMap()
+                        for (attempt in 0 until 2) {
+                            atTry = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
+                                .getOrDefault(emptyMap())
+                            val complete = atTry.containsKey("AT+DEVCONINFO") ||
+                                atTry.keys.any { it.contains("GSN") }
+                            if (complete) break
+                            delay(700)
+                        }
+                        val at: Map<String, String> = atTry
                         if (at.isEmpty()) {
                             atText = "No modem port answered in this USB mode.\n" +
                                 "Some phones only expose it in a modem/diag USB configuration " +
@@ -1820,6 +1900,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     sb.appendLine("IMEI: ${if (imeis.isEmpty()) "Unavailable" else imeis.joinToString(" / ")}")
                     sb.appendLine("--- Firmware ---")
                     sb.appendLine("MTP device version: ${firmware.ifBlank { "-" }}")
+                    if (storageText.isNotBlank()) {
+                        sb.appendLine("--- Storage ---")
+                        sb.appendLine(storageText)
+                    }
                     sb.appendLine("--- USB ---")
                     sb.append(MtpInfoReader.describe(context, dev).trimEnd())
                     sb.append("\n--- Modem ---\n").append(atText)
@@ -1827,7 +1911,12 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     sections.add(sb.toString())
                 }
                 _uiState.update {
-                    it.copy(mtpInfoText = sections.joinToString("\n\n"), infoImei = imeis.joinToString("\n"), infoSerial = serial)
+                    it.copy(
+                        mtpInfoText = sections.joinToString("\n\n"),
+                        mtpStorageText = storageAll,
+                        infoImei = imeis.joinToString("\n"),
+                        infoSerial = serial
+                    )
                 }
             } catch (e: Exception) {
                 _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
@@ -1876,6 +1965,54 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (rebooted) appendLog("Reboot confirmed (device left the USB bus).")
         else appendLog("Reboot NOT confirmed. Use 'ADB -> Reboot' if USB debugging is on.")
+    }
+
+    /** Reads ONLY the storage capacity over MTP (silent: the result goes to the info panel). */
+    fun readMtpStorage() {
+        runTask("Reading MTP Storage") {
+            val devices = MtpInfoReader.findMtpDevices(context)
+            if (devices.isEmpty()) {
+                _uiState.update { it.copy(mtpStorageText = "No MTP device found. Connect the phone in 'File Transfer / MTP' mode.") }
+                return@runTask
+            }
+            val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+            var text = ""
+            for (listed in devices) {
+                val hadPermission = transport.hasPermission(listed)
+                if (!transport.ensurePermission(listed)) continue
+                if (!hadPermission) delay(900)
+                val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
+                val storages = runCatching { MtpDeviceInfoReader.readStorage(usbManager, dev) }.getOrDefault(emptyList())
+                text = MtpDeviceInfoReader.describeStorage(storages)
+                if (text.isNotBlank()) break
+            }
+            _uiState.update {
+                it.copy(mtpStorageText = text.ifBlank { "Storage could not be read. Unlock the phone and select File Transfer / MTP, then try again." })
+            }
+        }
+    }
+
+    /** "Restore original space": formats the phone (userdata wipe) with AT commands while it is
+     *  in MTP mode and reboots it, so userdata is re-created at the full original size. */
+    fun atFormatDevice() = runTask("AT Format + Reboot (MTP)") {
+        val devices = MtpInfoReader.findMtpDevices(context)
+        if (devices.isEmpty()) {
+            appendLog("ERROR: No MTP device found. Connect the phone in 'File Transfer / MTP' mode.")
+            return@runTask
+        }
+        appendLog("=== RESTORE ORIGINAL SPACE: formatting over the modem port (all user data is erased) ===")
+        var ok = false
+        for (dev in devices) {
+            ok = runCatching { AtCommandTransport(context).use { it.formatAndReboot(dev) { m -> appendLog(m) } } }
+                .getOrElse { e -> appendLog("AT error: ${e.message}"); false }
+            if (ok) break
+        }
+        if (ok) {
+            appendLog("Format started. The phone is rebuilding userdata at its full size and will reboot; the first boot can take a few minutes. Afterwards connect in MTP mode and tap Read Storage.")
+            _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+        } else {
+            appendLog("Format NOT confirmed. Make sure the phone is unlocked, USB mode includes MODEM (*#0808# on Samsung), then retry.")
+        }
     }
 
     fun atToDownloadMode() = runAtModeAction("AT -> Download Mode (MTP)", "Download Mode") { at, dev ->

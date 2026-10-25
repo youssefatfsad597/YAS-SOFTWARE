@@ -700,6 +700,9 @@ fun EdlMainScreen(
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
+    // MTP storage read + AT format ("restore original space"). Optional so older call sites compile.
+    onReadMtpStorage: (() -> Unit)? = null,
+    onMtpFormatAt: (() -> Unit)? = null,
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
     onClearLoader: (() -> Unit)? = null,
@@ -761,7 +764,9 @@ fun EdlMainScreen(
             1 -> T505NTab(
                 state = state,
                 onMtpDownloadAt = onMtpDownloadAt,
-                onFormatT505N = onFormatT505N
+                onFormatT505N = onFormatT505N,
+                onReadMtpStorage = onReadMtpStorage,
+                onMtpFormatAt = onMtpFormatAt
             )
             2 -> T509Tab(
                 state = state,
@@ -827,7 +832,8 @@ fun EdlMainScreen(
                 onMtpDownloadAt = onMtpDownloadAt,
                 onReadAdbInfo = onReadAdbInfo,
                 onAdbReboot = onAdbReboot,
-                onAdbShell = onAdbShell
+                onAdbShell = onAdbShell,
+                onReadMtpStorage = onReadMtpStorage
             )
         }
     }
@@ -1114,11 +1120,14 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
             ?.second
             ?.takeIf { it.isNotBlank() && it != "-" }
 
-    val info = state.deviceInfo
     // EDL / BROM / Odin: show only that mode's own info. SN / IMEI and the MTP / ADB fields
-    // appear only after "Read Info" over MTP or ADB.
+    // appear only after "Read Info" over MTP or ADB, and NEVER together with EDL data.
     val lowLevelMode = state.usbConnected || state.t509BromConnected || state.odinConnected
+    // Qualcomm HWID belongs to a live 9008 port only (it used to linger after the mode changed).
+    val info = if (state.usbConnected) state.deviceInfo else null
     val readInfoDone = !lowLevelMode && (state.mtpInfoText.isNotBlank() || state.adbInfoText.isNotBlank())
+    val storageRows = if (readInfoDone || (!lowLevelMode && state.mtpStorageText.isNotBlank()))
+        parseInfoFields(state.mtpStorageText).filter { it.first.startsWith("Storage ") } else emptyList()
     val maker = if (readInfoDone) find("Manufacturer") else null
     val model = if (readInfoDone) find("Model", "Base model") else null
     val deviceTitle = listOfNotNull(
@@ -1137,7 +1146,7 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
     ).mapNotNull { (k, v) -> if (v == null || !readInfoDone) null else k to v }
     val serial = if (readInfoDone) state.infoSerial else ""
     val hasData = deviceTitle.isNotBlank() || serial.isNotBlank() ||
-        imeis.isNotEmpty() || info != null || firmware.isNotEmpty() ||
+        imeis.isNotEmpty() || info != null || firmware.isNotEmpty() || storageRows.isNotEmpty() ||
         state.usbConnected || state.odinConnected
 
     Column(
@@ -1191,6 +1200,12 @@ private fun DeviceInspector(state: EdlUiState, modifier: Modifier = Modifier) {
                 YDivider(Modifier.padding(vertical = 2.dp))
                 SectionLabel("FIRMWARE")
                 firmware.forEach { (k, v) -> InspectorRow(k, v) }
+            }
+
+            if (storageRows.isNotEmpty()) {
+                YDivider(Modifier.padding(vertical = 2.dp))
+                SectionLabel("STORAGE")
+                storageRows.forEach { (k, v) -> InspectorRow(k.removePrefix("Storage "), v) }
             }
 
             if (!hasData) {
@@ -2455,9 +2470,25 @@ private fun OdinTab(
 private fun T505NTab(
     state: EdlUiState,
     onMtpDownloadAt: () -> Unit,
-    onFormatT505N: () -> Unit
+    onFormatT505N: () -> Unit,
+    onReadMtpStorage: (() -> Unit)? = null,
+    onMtpFormatAt: (() -> Unit)? = null
 ) {
     var showFormatConfirm by remember { mutableStateOf(false) }
+    var showRestoreConfirm by remember { mutableStateOf(false) }
+    if (showRestoreConfirm) {
+        YASConfirmDialog(
+            title = "استعادة المساحة الأصلية؟",
+            message = "سيتم عمل فورمات للجهاز عبر أوامر AT (وضع MTP) ثم إعادة تشغيله. كل بيانات المستخدم ستُمسح، وسيعيد الجهاز إنشاء userdata بالحجم الكامل. لا يُزيل قفل FRP / حساب سامسونج.\n\nRestore original space: formats the phone over the AT port (MTP mode) and reboots. ALL USER DATA IS ERASED.",
+            confirmText = "استعادة الآن",
+            danger = true,
+            onConfirm = {
+                showRestoreConfirm = false
+                onMtpFormatAt?.invoke()
+            },
+            onDismiss = { showRestoreConfirm = false }
+        )
+    }
     if (showFormatConfirm) {
         YASConfirmDialog(
             title = "Format T505N?",
@@ -2507,6 +2538,28 @@ private fun T505NTab(
                 large = true
             )
             Hint("Format: asks for the userdata file, then flashes it in Download Mode and reboots. Only userdata is written.")
+            if (onMtpFormatAt != null) {
+                YDivider()
+                YASButton(
+                    text = "استعادة المساحة الأصلية",
+                    onClick = { showRestoreConfirm = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy && !state.odinConnected && !state.usbConnected,
+                    large = true
+                )
+                Hint("Restore original space (MTP mode, cable connected, phone unlocked): sends the AT format command and reboots the phone so userdata is rebuilt at its full size. All user data is erased.")
+            }
+            if (onReadMtpStorage != null) {
+                YASButton(
+                    text = "Read Storage",
+                    onClick = onReadMtpStorage,
+                    modifier = Modifier.fillMaxWidth(),
+                    style = BtnStyle.Secondary,
+                    enabled = !state.isBusy && !state.odinConnected && !state.usbConnected
+                )
+                if (state.mtpStorageText.isNotBlank()) InfoGrid(state.mtpStorageText)
+            }
         }
     }
 }
@@ -2589,7 +2642,8 @@ private fun AdbMtpTab(
     onMtpDownloadAt: () -> Unit,
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
-    onAdbShell: (String) -> Unit
+    onAdbShell: (String) -> Unit,
+    onReadMtpStorage: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var shellCmd by remember { mutableStateOf("") }
@@ -2610,7 +2664,10 @@ private fun AdbMtpTab(
                 YASButton("Download Mode", onMtpDownloadAt, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy)
                 YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy)
             }
-            Hint("MTP (no USB debugging): Read Info reads the device info including SN / IMEI. Download Mode and Reboot go through the modem port.")
+            if (onReadMtpStorage != null) {
+                YASButton("Read Storage", onReadMtpStorage, Modifier.fillMaxWidth(), style = BtnStyle.Secondary, enabled = !state.isBusy)
+            }
+            Hint("MTP (no USB debugging): Read Info reads the device info including SN / IMEI and the storage size. Download Mode and Reboot go through the modem port.")
             YDivider()
             SectionLabel("ADB  \u00B7  USB debugging")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
