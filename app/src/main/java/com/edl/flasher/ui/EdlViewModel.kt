@@ -1060,7 +1060,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 // Normal windowed transfer (same as every other partition) -- a working
                 // third-party Odin tool flashes this same file successfully using normal
                 // windowing, so the single-block path was the cause of the write not sticking.
-                odin.flashImage(part, ins, size, singleSequence = false, tolerateFinalAckWarning = (reason != null)) { done, total ->
+                odin.flashImage(part, ins, size, singleSequence = (reason != null), tolerateFinalAckWarning = (reason != null)) { done, total ->
                     updateProgress(done, total, start)
                     if (total > 0L) {
                         val pct = ((done * 100L) / total).toInt()
