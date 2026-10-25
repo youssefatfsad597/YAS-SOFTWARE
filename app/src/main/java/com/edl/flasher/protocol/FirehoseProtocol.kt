@@ -390,23 +390,23 @@ class FirehoseProtocol(
     /** Programs [data] (must be a whole number of sectors) at [startSector]. [fullAttrs] sends the long
      *  rawprogram-style attribute set some loaders insist on instead of the minimal one. */
     @Throws(IOException::class)
-    fun programBuffer(lun: Int, startSector: Long, data: ByteArray, fullAttrs: Boolean = false) {
+    fun programBuffer(lun: Int, startSector: Long, data: ByteArray, fullAttrs: Boolean = false, timeoutMs: Int = 60000) {
         val sectorSize = storageType.sectorSize
         require(data.isNotEmpty() && data.size % sectorSize == 0) { "buffer must be whole sectors" }
         val numSectors = data.size / sectorSize
-        transport.write(buildXml(programTag(lun, startSector, numSectors.toLong(), fullAttrs)).toByteArray(Charsets.UTF_8))
-        val rsp = waitForResponse()
+        transport.write(buildXml(programTag(lun, startSector, numSectors.toLong(), fullAttrs)), timeoutMs = timeoutMs)
+        val rsp = waitForResponse(timeoutMs = timeoutMs)
         if (!rsp.ack || !rsp.rawMode) {
             throw IOException("Firehose <program> rejected (LUN $lun, sector $startSector): ${rsp.rawXml.take(300)}")
         }
         var off = 0
         while (off < data.size) {
             val n = min(maxPayloadSize, data.size - off)
-            transport.write(data, off, n, timeoutMs = 60000)
+            transport.write(data, off, n, timeoutMs = timeoutMs)
             if (zlpAwareHost) transport.writeZlp()
             off += n
         }
-        val fin = waitForResponse()
+        val fin = waitForResponse(timeoutMs = timeoutMs)
         if (!fin.ack) throw IOException("Firehose <program> failed final ACK: ${fin.rawXml.take(300)}")
     }
 
@@ -471,7 +471,7 @@ class FirehoseProtocol(
         return rsp.ack
     }
 
-    enum class WriteVerdict { WRITES_WORK, REJECTED, SILENTLY_IGNORED, UNREADABLE, UNEXPECTED }
+    enum class WriteVerdict { WRITES_WORK, REJECTED, HUNG, SILENTLY_IGNORED, UNREADABLE, UNEXPECTED }
 
     data class WriteTestReport(val verdict: WriteVerdict, val detail: String)
 
@@ -482,6 +482,10 @@ class FirehoseProtocol(
      */
     fun writeSelfTest(lun: Int, sector: Long, fullAttrs: Boolean): WriteTestReport {
         val ss = storageType.sectorSize
+        // Short timeout on purpose: a loader that is about to hang gives no useful reply anyway, and
+        // waiting the normal 60s per attempt (x5 dialects) is what froze the device for 5 minutes straight
+        // on the SM-T505N -- every extra command sent to an already-wedged loader only makes it worse.
+        val testTimeoutMs = 6000
         fun readOne(): ByteArray? {
             val out = java.io.ByteArrayOutputStream()
             return runCatching { readSectors(lun, sector, 1, out); out.toByteArray() }.getOrNull()
@@ -489,14 +493,22 @@ class FirehoseProtocol(
         val original = readOne() ?: return WriteTestReport(WriteVerdict.UNREADABLE, "could not read sector $sector")
         if (original.size != ss) return WriteTestReport(WriteVerdict.UNREADABLE, "short read (${original.size} bytes)")
         val inverted = ByteArray(ss) { (original[it].toInt() xor 0xFF).toByte() }
+        val startNs = System.nanoTime()
         try {
-            programBuffer(lun, sector, inverted, fullAttrs)
+            programBuffer(lun, sector, inverted, fullAttrs, timeoutMs = testTimeoutMs)
         } catch (e: IOException) {
-            return WriteTestReport(WriteVerdict.REJECTED, e.message.orEmpty())
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+            // A clean NAK comes back in well under a second. Anything that took most of the timeout
+            // means the loader/controller stopped answering -- a hang, not a rejection.
+            return if (elapsedMs >= testTimeoutMs - 500) {
+                WriteTestReport(WriteVerdict.HUNG, "no reply for ${elapsedMs}ms -- the loader stopped responding")
+            } else {
+                WriteTestReport(WriteVerdict.REJECTED, e.message.orEmpty())
+            }
         }
         val after = readOne()
         // Always try to put the original back, whatever happened.
-        runCatching { programBuffer(lun, sector, original, fullAttrs) }
+        runCatching { programBuffer(lun, sector, original, fullAttrs, timeoutMs = testTimeoutMs) }
         return when {
             after == null -> WriteTestReport(WriteVerdict.UNREADABLE, "read-back failed after write")
             after.contentEquals(inverted) -> WriteTestReport(WriteVerdict.WRITES_WORK, "sector changed as expected")
