@@ -10,6 +10,7 @@ import com.edl.flasher.protocol.*
 import android.content.Context
 import android.hardware.usb.UsbManager
 import com.edl.flasher.usb.MtpDeviceInfoReader
+import com.edl.flasher.usb.UsbAccessoryPopup
 import com.edl.flasher.usb.AtCommandTransport
 import com.edl.flasher.usb.EdlUsbTransport
 import kotlinx.coroutines.Dispatchers
@@ -298,6 +299,27 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Leaves BROM mode on its own, with no format/erase attached: sends the BSL
+     *  "normal reset" command (device reboots into its regular bootloader/Android,
+     *  same as a real Unisoc download tool's "Exit"/"Disconnect" action) and then
+     *  releases the USB handle and clears the BROM-connected flag so the UI reflects
+     *  that the device is no longer sitting in BROM. Safe to call any time the BROM
+     *  port shows connected -- it does not touch FDL, partitions or user data. */
+    fun t509ExitBrom() {
+        runTask("T509 Exit BROM") {
+            if (!_uiState.value.t509BromConnected) {
+                appendLog("Not in BROM mode -- nothing to exit.")
+                return@runTask
+            }
+            appendLog("Sending normal reset to leave BROM mode...")
+            sprdFdl.reset()
+            sprdFdl.resetSession()
+            transport.close()
+            _uiState.update { it.copy(t509BromConnected = false, usbConnected = false, deviceDescription = "") }
+            appendLog("Device released from BROM. It should reboot into its regular bootloader/Android.")
+        }
+    }
+
     /** Full T509/T509N service flow: FDL1 -> FDL2 -> erase userdata/frp/persist -> reset. */
     fun t509FormatFrp() {
         runTask("T509 Format + FRP") {
@@ -320,7 +342,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->
-                sprdFdl.erasePartitionByName(part)
+                // userdata is by far the largest of the three -- give it extra time so a
+                // slow-but-still-in-progress erase isn't mistaken for a hang/failure.
+                val timeout = if (part == "userdata") 180000 else 60000
+                sprdFdl.erasePartitionByName(part, timeoutMs = timeout)
                 _uiState.update { it.copy(progress = (idx + 1).toFloat() / 3f) }
             }
 
@@ -1953,6 +1978,28 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("Request accepted. The device is switching to $label; wait a few seconds, it connects automatically.")
             } else {
                 appendLog("No reply and the device stayed on the USB bus. This USB mode probably has no AT port (on some Samsung phones: *#0808# -> pick a mode with MODEM).")
+            }
+        }
+    }
+
+    /** "Show Info Popup": makes the connected phone display its USB-accessory popup (title +
+     *  "view" button that opens [uri] in the phone's browser). Works over plain USB. */
+    fun showPhoneInfoPopup(uri: String) = runTask("Show Info Popup") {
+        val devices = MtpInfoReader.findModemDevices(context)
+        if (devices.isEmpty()) {
+            appendLog("ERROR: No device found. Connect the phone by USB (MTP / File Transfer mode).")
+            return@runTask
+        }
+        val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+        for (listed in devices) {
+            if (!transport.ensurePermission(listed)) { appendLog("USB permission denied."); continue }
+            val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
+            val result = runCatching { UsbAccessoryPopup.show(usbManager, dev, "YAS SOFTWARE", uri) }
+                .getOrDefault(UsbAccessoryPopup.Result.FAILED)
+            when (result) {
+                UsbAccessoryPopup.Result.SHOWN -> { appendLog("Popup sent. Check the phone screen (the USB connection restarts)."); return@runTask }
+                UsbAccessoryPopup.Result.NOT_SUPPORTED -> appendLog("This device does not support USB accessory mode.")
+                UsbAccessoryPopup.Result.FAILED -> appendLog("Could not send the popup to the device.")
             }
         }
     }

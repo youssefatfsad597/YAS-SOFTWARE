@@ -5,6 +5,7 @@ package com.edl.flasher.ui
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.widget.Toast
@@ -660,6 +661,7 @@ fun EdlMainScreen(
     onSetT509Variant: (T509Variant) -> Unit,
     onForceBrom: () -> Unit,
     onFixHandshake: () -> Unit,
+    onExitBrom: () -> Unit,
     onT509FormatFrp: () -> Unit,
     onStorageSelected: (StorageType) -> Unit,
     onRunSaharaAndFirehose: () -> Unit,
@@ -704,6 +706,7 @@ fun EdlMainScreen(
     // MTP storage read + AT format ("restore original space"). Optional so older call sites compile.
     onMtpFormatAt: (() -> Unit)? = null,
     onChangeSerial: ((String) -> Unit)? = null,
+    onShowInfoPopup: ((String) -> Unit)? = null,
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
     onClearLoader: (() -> Unit)? = null,
@@ -779,6 +782,7 @@ fun EdlMainScreen(
                 onSetVariant = onSetT509Variant,
                 onForceBrom = onForceBrom,
                 onFixHandshake = onFixHandshake,
+                onExitBrom = onExitBrom,
                 onFormatFrp = onT509FormatFrp,
                 onAdbShell = knoxRunner
             )
@@ -839,7 +843,8 @@ fun EdlMainScreen(
                 onReadAdbInfo = onReadAdbInfo,
                 onAdbReboot = onAdbReboot,
                 onAdbShell = onAdbShell,
-                onChangeSerial = onChangeSerial
+                onChangeSerial = onChangeSerial,
+                onShowInfoPopup = onShowInfoPopup
             )
         }
     }
@@ -1574,6 +1579,7 @@ private fun T509Tab(
     onSetVariant: (T509Variant) -> Unit,
     onForceBrom: () -> Unit,
     onFixHandshake: () -> Unit,
+    onExitBrom: () -> Unit,
     onFormatFrp: () -> Unit,
     onAdbShell: (String) -> Unit
 ) {
@@ -1661,7 +1667,14 @@ private fun T509Tab(
                     enabled = !state.isBusy
                 )
             }
-            Hint("Force BROM: puts the device into BROM mode. Fix Handshake: resets USB and retries the BROM handshake.")
+            YASButton(
+                "Exit BROM",
+                onExitBrom,
+                Modifier.fillMaxWidth(),
+                style = BtnStyle.Secondary,
+                enabled = !state.isBusy && state.t509BromConnected
+            )
+            Hint("Force BROM: puts the device into BROM mode. Fix Handshake: resets USB and retries the BROM handshake. Exit BROM: sends a normal reset so the device leaves BROM and boots normally, without touching any data.")
             YASButton(
                 "Format + FRP",
                 { showFormatConfirm = true },
@@ -2734,14 +2747,15 @@ private fun AdbMtpTab(
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
-    onChangeSerial: ((String) -> Unit)? = null
+    onChangeSerial: ((String) -> Unit)? = null,
+    onShowInfoPopup: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     var shellCmd by remember { mutableStateOf("") }
     var newSerial by remember { mutableStateOf("") }
     var showSerialConfirm by remember { mutableStateOf(false) }
-    var browserUrl by remember { mutableStateOf("") }
     var showRemoveFrpConfirm by remember { mutableStateOf(false) }
+
     val serialValid = Regex("^[A-Z0-9]{11}$").matches(newSerial)
     if (showRemoveFrpConfirm) {
         YASConfirmDialog(
@@ -2755,15 +2769,6 @@ private fun AdbMtpTab(
             },
             onDismiss = { showRemoveFrpConfirm = false }
         )
-    }
-    val openBrowser: () -> Unit = {
-        val typed = browserUrl.trim()
-        val url = when {
-            typed.isEmpty() -> DEFAULT_BROWSER_URL
-            typed.contains("://") -> typed
-            else -> "https://$typed"
-        }
-        onAdbShell("am start -a android.intent.action.VIEW -d \"$url\"")
     }
     if (showSerialConfirm) {
         YASConfirmDialog(
@@ -2850,25 +2855,18 @@ private fun AdbMtpTab(
             }
             Hint("ADB (USB debugging on): Read Info reads the device info including SN / IMEI. Download and Recovery reboot into those modes.")
 
-            YDivider()
-            SectionLabel("OPEN BROWSER")
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                YASTextField(
-                    value = browserUrl,
-                    onValueChange = { browserUrl = it },
-                    placeholder = "URL (empty = YouTube)",
-                    modifier = Modifier.weight(1f),
-                    mono = true,
-                    imeAction = ImeAction.Go,
-                    onSubmit = openBrowser
+            if (onShowInfoPopup != null) {
+                YDivider()
+                SectionLabel("INFO POPUP  \u00B7  USB")
+                YASButton(
+                    "Show Info Popup",
+                    { onShowInfoPopup(DEFAULT_BROWSER_URL) },
+                    Modifier.fillMaxWidth(),
+                    style = BtnStyle.Secondary,
+                    enabled = !state.isBusy
                 )
-                YASButton("Open Browser", openBrowser, style = BtnStyle.Secondary, enabled = !state.isBusy)
+                Hint("Plain USB, no USB debugging: the phone shows its own \"No installed apps work with this accessory\" popup with a view button that opens the link in its browser. The USB connection restarts once.")
             }
-            Hint("ADB (USB debugging on): opens the typed URL in the device's browser, or YouTube if left empty.")
 
             YDivider()
             SectionLabel("REMOVE FRP")
