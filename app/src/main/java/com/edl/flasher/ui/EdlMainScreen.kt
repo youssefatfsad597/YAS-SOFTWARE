@@ -844,7 +844,8 @@ fun EdlMainScreen(
                 onAdbReboot = onAdbReboot,
                 onAdbShell = onAdbShell,
                 onChangeSerial = onChangeSerial,
-                onShowInfoPopup = onShowInfoPopup
+                onShowInfoPopup = onShowInfoPopup,
+                onMtpFormatAt = onMtpFormatAt
             )
         }
     }
@@ -1736,17 +1737,21 @@ private fun ReadGptTab(
             BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
                 val stackSelectors = maxWidth < 520.dp
                 val loaderField: @Composable (Modifier) -> Unit = { m ->
-                    FileSelectorField(
-                        label = "PROGRAMMER / LOADER",
-                        value = state.loaderName,
-                        selected = state.loaderUri != null,
-                        onClick = onPickLoader,
-                        modifier = m,
-                        enabled = !state.isBusy,
-                        badge = if (state.loaderUri != null) "LOADED" else "NOT SELECTED",
-                        badgeColor = if (state.loaderUri != null) Yas.Success else Yas.Idle,
-                        onClear = onClearLoader
-                    )
+                    Column(modifier = m, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        SectionLabel("PROGRAMMER / LOADER")
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(Yas.Bg, S6)
+                                .border(1.dp, Yas.Border, S6)
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            YText("X216B.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                            StatusBadge(text = "BUILT-IN", color = Yas.Success)
+                        }
+                    }
                 }
                 val storageSelector: @Composable () -> Unit = {
                     Segmented(
@@ -2748,9 +2753,11 @@ private fun AdbMtpTab(
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
     onChangeSerial: ((String) -> Unit)? = null,
-    onShowInfoPopup: ((String) -> Unit)? = null
+    onShowInfoPopup: ((String) -> Unit)? = null,
+    onMtpFormatAt: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
+    var showFormatMtpConfirm by remember { mutableStateOf(false) }
     var shellCmd by remember { mutableStateOf("") }
     var newSerial by remember { mutableStateOf("") }
     var showSerialConfirm by remember { mutableStateOf(false) }
@@ -2768,6 +2775,19 @@ private fun AdbMtpTab(
                 onAdbShell(REMOVE_FRP_COMMAND)
             },
             onDismiss = { showRemoveFrpConfirm = false }
+        )
+    }
+    if (showFormatMtpConfirm) {
+        YASConfirmDialog(
+            title = "Format MTP?",
+            message = "Formats the phone over the AT port (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
+            confirmText = "Format Now",
+            danger = true,
+            onConfirm = {
+                showFormatMtpConfirm = false
+                onMtpFormatAt?.invoke()
+            },
+            onDismiss = { showFormatMtpConfirm = false }
         )
     }
     if (showSerialConfirm) {
@@ -2793,14 +2813,46 @@ private fun AdbMtpTab(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        YASCard(title = "Quick functions") {
-            SectionLabel("MTP  \u00B7  MODEM PORT")
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                YASButton("Read Info", onReadMtpInfo, Modifier.weight(1f), style = BtnStyle.Primary, enabled = !state.isBusy)
-                YASButton("Download Mode", onMtpDownloadAt, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy)
-                YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy)
+        // ------------------------------- MTP -------------------------------
+        YASCard(
+            title = "MTP",
+            subtitle = "File Transfer mode \u00B7 no USB debugging needed",
+            trailing = {
+                StatusBadge(
+                    text = if (state.mtpInfoText.isNotBlank()) "INFO READ" else "MODEM PORT",
+                    color = if (state.mtpInfoText.isNotBlank()) Yas.Success else Yas.Idle
+                )
             }
-            Hint("MTP (no USB debugging): Read Info shows the device info including SN / IMEI and the storage size. Download Mode and Reboot go through the modem port.")
+        ) {
+            SectionLabel("DEVICE")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                YASButton("Read Info", onReadMtpInfo, Modifier.weight(1f), style = BtnStyle.Primary, enabled = !state.isBusy, large = true)
+                YASButton("Open Browser", { onShowInfoPopup?.invoke(DEFAULT_BROWSER_URL) }, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy && onShowInfoPopup != null, large = true)
+            }
+            Hint("Read Info shows the device info including SN / IMEI and the storage size.")
+
+            YDivider()
+            SectionLabel("MODE")
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                YASButton("Download Mode", onMtpDownloadAt, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy, large = true)
+                YASButton("Reboot", onMtpRebootAt, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy, large = true)
+            }
+            Hint("Both go through the modem port (cable connected).")
+
+            if (onMtpFormatAt != null) {
+                YDivider()
+                SectionLabel("FORMAT")
+                YASButton(
+                    "FORMAT MTP",
+                    { showFormatMtpConfirm = true },
+                    Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy && !state.odinConnected && !state.usbConnected,
+                    large = true
+                )
+                Hint("Phone unlocked, cable connected: formats the phone and reboots it so userdata is rebuilt at its full size. All user data is erased.")
+            }
+
             if (onChangeSerial != null) {
                 YDivider()
                 SectionLabel("CHANGE SERIAL (SAMSUNG)")
@@ -2825,59 +2877,45 @@ private fun AdbMtpTab(
                         enabled = !state.isBusy && serialValid
                     )
                 }
-                Hint("Via AT commands (MTP mode, cable connected). Must be exactly 11 characters, A-Z and 0-9.")
+                Hint("Exactly 11 characters, A-Z and 0-9.")
             }
+        }
+
+        // ------------------------------- ADB -------------------------------
+        YASCard(
+            title = "ADB",
+            subtitle = "USB debugging must be on and authorized",
+            trailing = {
+                StatusBadge(
+                    text = if (state.adbConnected) "ADB" else "IDLE",
+                    color = if (state.adbConnected) Yas.Success else Yas.Idle,
+                    pulsing = state.adbConnected
+                )
+            }
+        ) {
+            SectionLabel("DEVICE")
+            YASButton("Read Info", onReadAdbInfo, Modifier.fillMaxWidth(), style = BtnStyle.Primary, enabled = !state.isBusy, large = true)
+            Hint("Reads the device info including SN / IMEI.")
+
             YDivider()
-            SectionLabel("ADB  \u00B7  USB debugging")
+            SectionLabel("REBOOT TO")
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                YASButton("Read Info", onReadAdbInfo, Modifier.weight(1f), style = BtnStyle.Primary, enabled = !state.isBusy)
-                YASButton(
-                    "Download",
-                    { onAdbReboot("download", "Download Mode") },
-                    Modifier.weight(1f),
-                    style = BtnStyle.Secondary,
-                    enabled = !state.isBusy
-                )
-                YASButton(
-                    "Recovery",
-                    { onAdbReboot("recovery", "Recovery") },
-                    Modifier.weight(1f),
-                    style = BtnStyle.Secondary,
-                    enabled = !state.isBusy
-                )
-                YASButton(
-                    "Reboot",
-                    { onAdbReboot("", "Normal Reboot") },
-                    Modifier.weight(1f),
-                    style = BtnStyle.Warning,
-                    enabled = !state.isBusy
-                )
-            }
-            Hint("ADB (USB debugging on): Read Info reads the device info including SN / IMEI. Download and Recovery reboot into those modes.")
-
-            if (onShowInfoPopup != null) {
-                YDivider()
-                SectionLabel("INFO POPUP  \u00B7  USB")
-                YASButton(
-                    "Show Info Popup",
-                    { onShowInfoPopup(DEFAULT_BROWSER_URL) },
-                    Modifier.fillMaxWidth(),
-                    style = BtnStyle.Secondary,
-                    enabled = !state.isBusy
-                )
-                Hint("Plain USB, no USB debugging: the phone shows its own \"No installed apps work with this accessory\" popup with a view button that opens the link in its browser. The USB connection restarts once.")
+                YASButton("Download", { onAdbReboot("download", "Download Mode") }, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy, large = true)
+                YASButton("Recovery", { onAdbReboot("recovery", "Recovery") }, Modifier.weight(1f), style = BtnStyle.Secondary, enabled = !state.isBusy, large = true)
+                YASButton("Reboot", { onAdbReboot("", "Normal Reboot") }, Modifier.weight(1f), style = BtnStyle.Warning, enabled = !state.isBusy, large = true)
             }
 
             YDivider()
-            SectionLabel("REMOVE FRP")
+            SectionLabel("FRP")
             YASButton(
                 "Remove FRP",
                 { showRemoveFrpConfirm = true },
                 modifier = Modifier.fillMaxWidth(),
                 style = BtnStyle.Danger,
-                enabled = !state.isBusy
+                enabled = !state.isBusy,
+                large = true
             )
-            Hint("Disables the FRP/Google-account check over ADB before a reset. Works on any chipset, Exynos included (unlike the Firehose-based Erase FRP / T509 Format+FRP buttons). Run it now, while still authorized -- not after the device is already on the lock screen.")
+            Hint("Disables the FRP / Google-account check before a reset. Works on any chipset. Run it now, while still authorized.")
         }
 
         YASCard(

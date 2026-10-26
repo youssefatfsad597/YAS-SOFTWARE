@@ -41,7 +41,7 @@ data class EdlUiState(
     val t509FirmwareStatus: String = "Checking embedded assets...",
     val t509BromConnected: Boolean = false,
     val loaderUri: Uri? = null,
-    val loaderName: String = "Select Custom Loader (.elf / .mbn)",
+    val loaderName: String = "X216B.elf (built-in)",
     val frpFileUri: Uri? = null,
     val frpFileName: String = "FRP Image: Not Selected",
     val secEfsFileUri: Uri? = null,
@@ -701,16 +701,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
-        val loaderUri = _uiState.value.loaderUri
-        if (!_uiState.value.firehoseReady && loaderUri == null) {
-            appendLog("ERROR: Select a loader (.elf / .mbn) first.")
+        if (!_uiState.value.firehoseReady && !EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
+            appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
             return
         }
 
         runTask("Booting Firehose & Reading GPT") {
             if (!_uiState.value.firehoseReady) {
-                appendLog("Uploading loader (${_uiState.value.loaderName})...")
-                bootFirehoseInternal(loaderUri!!)
+                // The X216B loader is built into the app: the user never has to pick one.
+                bootFirehoseFromEmbeddedLoader()
             }
             if (_uiState.value.firehoseReady && autoReadGpt) {
                 scanAllGptInternal()
@@ -1984,7 +1983,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     /** "Show Info Popup": makes the connected phone display its USB-accessory popup (title +
      *  "view" button that opens [uri] in the phone's browser). Works over plain USB. */
-    fun showPhoneInfoPopup(uri: String) = runTask("Show Info Popup") {
+    fun showPhoneInfoPopup(uri: String) = runTask("Open Browser") {
         val devices = MtpInfoReader.findModemDevices(context)
         if (devices.isEmpty()) {
             appendLog("ERROR: No device found. Connect the phone by USB (MTP / File Transfer mode).")
@@ -2022,7 +2021,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     /** "Restore Storage": formats the phone (userdata wipe) with AT commands while it is
      *  in MTP mode and reboots it, so userdata is re-created at the full original size. */
-    fun atFormatDevice() = runTask("Restore Storage") {
+    fun atFormatDevice() = runTask("Format MTP") {
         val devices = MtpInfoReader.findModemDevices(context)
         if (devices.isEmpty()) {
             appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
