@@ -31,7 +31,7 @@ class SprdFdlProtocol(
      *  valid). Defaults are the values commonly used for the Unisoc T618 (UMS512) family and are
      *  UNVERIFIED for this exact device -- if upload fails at START_DATA, calibrate them. */
     var fdl1LoadAddr: Int = 0x65000800,
-    var fdl2LoadAddr: Int = 0x9EFFFE00
+    var fdl2LoadAddr: Int = 0x9EFFFE00.toInt()
 ) {
     companion object {
         private const val HDLC_FLAG = 0x7E
