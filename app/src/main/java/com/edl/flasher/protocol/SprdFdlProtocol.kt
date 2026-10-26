@@ -126,11 +126,27 @@ class SprdFdlProtocol(
                 i += 1
             }
         }
-        if (unstuffed.size < 4) throw IOException("BROM: short/garbled response (${unstuffed.size} bytes)")
+        if (unstuffed.size < 6) throw IOException("BROM: short/garbled response (${unstuffed.size} bytes)")
         val id = ((unstuffed[0].toInt() and 0xFF) shl 8) or (unstuffed[1].toInt() and 0xFF)
         val len = ((unstuffed[2].toInt() and 0xFF) shl 8) or (unstuffed[3].toInt() and 0xFF)
-        val payload = ByteArray(len.coerceAtMost((unstuffed.size - 4).coerceAtLeast(0)))
+        val payload = ByteArray(len.coerceAtMost((unstuffed.size - 6).coerceAtLeast(0)))
         for (j in payload.indices) payload[j] = unstuffed[4 + j]
+
+        // The last two de-stuffed bytes are the frame's own checksum. Previously this
+        // was never checked, so a USB glitch that flipped a bit in the id/len/payload
+        // could still be read back as a "valid" REP_ACK and the caller would carry on
+        // as if the device had actually confirmed the command. Recompute it the same
+        // way sendFrame() does and bail out loudly instead of silently trusting noise.
+        val bodyForCrc = unstuffed.subList(0, 4 + payload.size).toByteArray()
+        val gotCrc = ((unstuffed[4 + payload.size].toInt() and 0xFF) shl 8) or
+            (unstuffed[5 + payload.size].toInt() and 0xFF)
+        val wantCrc = checksum(bodyForCrc)
+        if (gotCrc != wantCrc) {
+            throw IOException(
+                "BROM: checksum mismatch on response 0x${id.toString(16)} " +
+                    "(got 0x${gotCrc.toString(16)}, expected 0x${wantCrc.toString(16)}) -- likely a USB glitch, retry"
+            )
+        }
         return id to payload
     }
 
@@ -240,10 +256,14 @@ class SprdFdlProtocol(
 
     /** Erases one partition by name once FDL2 is running (FDL2 understands
      *  partition names the same way fastboot/Odin do -- "userdata", "frp", etc). */
-    fun erasePartitionByName(name: String) {
+    fun erasePartitionByName(name: String, timeoutMs: Int = 60000) {
         log("BROM: erasing '$name'...")
         val nameBytes = name.toByteArray(Charsets.US_ASCII)
-        expectAck(CMD_ERASE_FLASH, nameBytes, timeoutMs = 30000)
+        // "userdata" can be tens of GB on a modern device; 30s was tuned for small
+        // partitions like frp/persist and was timing out (false failure, not a real
+        // erase failure) on bigger ones. Bumped to 60s here and callers can still pass
+        // a larger value explicitly for very large storage.
+        expectAck(CMD_ERASE_FLASH, nameBytes, timeoutMs = timeoutMs)
         log("BROM: '$name' erased.")
     }
 
