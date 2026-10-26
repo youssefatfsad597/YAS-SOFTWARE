@@ -126,6 +126,7 @@ class MainActivity : ComponentActivity() {
                     onSetT509Variant = viewModel::setT509Variant,
                     onForceBrom = viewModel::t509ForceBrom,
                     onFixHandshake = viewModel::t509FixHandshake,
+                    onExitBrom = viewModel::t509ExitBrom,
                     onT509FormatFrp = viewModel::t509FormatFrp,
                     onStorageSelected = viewModel::setStorageType,
                     onRunSaharaAndFirehose = { viewModel.runSaharaAndConfigureFirehose(autoReadGpt = true) },
@@ -179,7 +180,8 @@ class MainActivity : ComponentActivity() {
                     onAdbShell = viewModel::runAdbShell,
                     onAdbScript = viewModel::runAdbScript,
                     onMtpFormatAt = viewModel::atFormatDevice,
-                    onChangeSerial = viewModel::changeSamsungSerial
+                    onChangeSerial = viewModel::changeSamsungSerial,
+                    onShowInfoPopup = viewModel::showPhoneInfoPopup
                 )
             }
         }
