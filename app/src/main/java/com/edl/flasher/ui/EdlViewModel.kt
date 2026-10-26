@@ -41,6 +41,8 @@ data class EdlUiState(
     val t509FirmwareStatus: String = "Checking embedded assets...",
     val t509BromConnected: Boolean = false,
     val loaderUri: Uri? = null,
+    // Read GPT tab: true = X216B.elf bundled in the APK, false = loader picked by the user.
+    val readGptBuiltInLoader: Boolean = true,
     val loaderName: String = "X216B.elf (built-in)",
     val frpFileUri: Uri? = null,
     val frpFileName: String = "FRP Image: Not Selected",
@@ -384,10 +386,20 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(selectedPartKeys = emptySet()) }
     }
 
+    fun setReadGptBuiltInLoader(builtIn: Boolean) {
+        _uiState.update { it.copy(readGptBuiltInLoader = builtIn) }
+        appendLog(if (builtIn) "Read GPT loader: built-in (X216B.elf)." else "Read GPT loader: manual (choose a file).")
+    }
+
+    fun clearLoader() {
+        _uiState.update { it.copy(loaderUri = null, loaderName = "X216B.elf (built-in)") }
+        appendLog("Manual loader cleared.")
+    }
+
     fun setLoaderUri(uri: Uri) {
         val doc = DocumentFile.fromSingleUri(context, uri)
         val name = doc?.name ?: uri.lastPathSegment.orEmpty()
-        _uiState.update { it.copy(loaderUri = uri, loaderName = name) }
+        _uiState.update { it.copy(loaderUri = uri, loaderName = name, readGptBuiltInLoader = false) }
         appendLog("Custom loader selected: $name")
     }
 
@@ -701,15 +713,29 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
-        if (!_uiState.value.firehoseReady && !EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
-            appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
-            return
+        val st = _uiState.value
+        if (!st.firehoseReady) {
+            if (st.readGptBuiltInLoader) {
+                if (!EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
+                    appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
+                    return
+                }
+            } else if (st.loaderUri == null) {
+                appendLog("ERROR: Manual loader mode is selected but no loader file was chosen. Tap 'Choose loader' first.")
+                return
+            }
         }
 
         runTask("Booting Firehose & Reading GPT") {
             if (!_uiState.value.firehoseReady) {
-                // The X216B loader is built into the app: the user never has to pick one.
-                bootFirehoseFromEmbeddedLoader()
+                val cur = _uiState.value
+                if (cur.readGptBuiltInLoader) {
+                    bootFirehoseFromEmbeddedLoader()
+                } else {
+                    val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
+                    appendLog("Uploading manual loader (${cur.loaderName})...")
+                    bootFirehoseInternal(uri)
+                }
             }
             if (_uiState.value.firehoseReady && autoReadGpt) {
                 scanAllGptInternal()

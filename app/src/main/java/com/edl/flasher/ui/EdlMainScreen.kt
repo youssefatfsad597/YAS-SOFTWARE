@@ -710,6 +710,7 @@ fun EdlMainScreen(
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
     onClearLoader: (() -> Unit)? = null,
+    onSetReadGptBuiltInLoader: (Boolean) -> Unit = {},
     onClearRawProgram: (() -> Unit)? = null,
     onClearPatchXml: (() -> Unit)? = null,
     onClearFirmwareDir: (() -> Unit)? = null,
@@ -791,6 +792,7 @@ fun EdlMainScreen(
                 onProbeChipInfo = onProbeChipInfo,
                 onPickLoader = onPickLoader,
                 onClearLoader = onClearLoader,
+                onSetBuiltInLoader = onSetReadGptBuiltInLoader,
                 onStorageSelected = onStorageSelected,
                 onRunSaharaAndFirehose = onRunSaharaAndFirehose,
                 onReadGpt = onReadGpt,
@@ -1719,6 +1721,7 @@ private fun ReadGptTab(
     onProbeChipInfo: () -> Unit,
     onPickLoader: () -> Unit,
     onClearLoader: (() -> Unit)?,
+    onSetBuiltInLoader: (Boolean) -> Unit,
     onStorageSelected: (StorageType) -> Unit,
     onRunSaharaAndFirehose: () -> Unit,
     onReadGpt: () -> Unit,
@@ -1739,6 +1742,13 @@ private fun ReadGptTab(
                 val loaderField: @Composable (Modifier) -> Unit = { m ->
                     Column(modifier = m, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         SectionLabel("PROGRAMMER / LOADER")
+                        Segmented(
+                            options = listOf(true, false),
+                            selected = state.readGptBuiltInLoader,
+                            label = { builtIn -> if (builtIn) "Built-in" else "Manual" },
+                            enabled = !state.isBusy && !state.firehoseReady,
+                            onSelect = onSetBuiltInLoader
+                        )
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -1748,8 +1758,33 @@ private fun ReadGptTab(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            YText("X216B.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                            StatusBadge(text = "BUILT-IN", color = Yas.Success)
+                            if (state.readGptBuiltInLoader) {
+                                YText("X216B.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                StatusBadge(text = "BUILT-IN", color = Yas.Success)
+                            } else {
+                                val picked = state.loaderUri != null
+                                YText(
+                                    if (picked) state.loaderName else "No loader selected",
+                                    size = 13.sp, mono = true, weight = FontWeight.SemiBold,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                YASButton(
+                                    if (picked) "Change" else "Choose loader",
+                                    onPickLoader,
+                                    style = BtnStyle.Secondary,
+                                    compact = true,
+                                    enabled = !state.isBusy && !state.firehoseReady
+                                )
+                                if (picked && onClearLoader != null) {
+                                    YASButton(
+                                        "Clear",
+                                        onClearLoader,
+                                        style = BtnStyle.Secondary,
+                                        compact = true,
+                                        enabled = !state.isBusy && !state.firehoseReady
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -1795,7 +1830,8 @@ private fun ReadGptTab(
                     "Upload Loader + Read GPT",
                     onRunSaharaAndFirehose,
                     style = BtnStyle.Primary,
-                    enabled = state.usbConnected && !state.isBusy
+                    enabled = state.usbConnected && !state.isBusy &&
+                        (state.readGptBuiltInLoader || state.loaderUri != null || state.firehoseReady)
                 )
                 YASButton(
                     "Read GPT (${state.partitions.size})",
