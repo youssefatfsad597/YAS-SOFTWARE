@@ -177,3 +177,53 @@ class AdbClient(private val context: Context, private val log: (String) -> Unit)
         }
     }
 }
+    /**
+     * Change Serial Number in ADB mode without root using System Properties & Samsung Service Intent.
+     */
+    suspend fun changeSerialNumberAdb(newSerial: String, onLog: (String) -> Unit): Boolean {
+        val cleanSn = newSerial.trim().uppercase()
+        if (cleanSn.length < 10) {
+            onLog("[-] Invalid Serial Number format.")
+            return false
+        }
+
+        return try {
+            onLog("[*] Updating Serial Number properties via ADB shell...")
+
+            // 1. Property alignment commands
+            val propCommands = listOf(
+                "setprop ro.serialno $cleanSn",
+                "setprop ril.serialnumber $cleanSn",
+                "setprop sys.serialnumber $cleanSn",
+                "setprop persist.sys.serialnumber $cleanSn"
+            )
+            for (cmd in propCommands) {
+                executeShell(cmd)
+            }
+            onLog("[+] Applied system properties for Serial Number: $cleanSn")
+
+            // 2. Invoke Samsung internal Factory Test / ServiceModeApp Intent
+            onLog("[*] Invoking Samsung ServiceModeApp factory intent...")
+            val serviceIntents = listOf(
+                "am start -n com.sec.android.app.servicemodeapp/.ServiceModeApp -e command \"AT+SWATD=1\"",
+                "am start -n com.sec.android.app.servicemodeapp/.ServiceModeApp -e command \"AT+SERIALNO=2,$cleanSn\"",
+                "am broadcast -a com.sec.android.app.servicemodeapp.ACTION_SERVICE_MODE -e cmd \"AT+SERIALNO=2,$cleanSn\""
+            )
+            for (intentCmd in serviceIntents) {
+                executeShell(intentCmd)
+            }
+
+            // Internal AT port fallback via shell
+            executeShell("echo -e 'AT+SWATD=1\\r' > /dev/umts_ATC0 2>/dev/null; echo -e 'AT+SERIALNO=2,$cleanSn\\r' > /dev/umts_ATC0 2>/dev/null")
+
+            // 3. Reboot device to persist NVRAM changes
+            onLog("[*] Rebooting device (adb reboot) to apply changes...")
+            reboot("")
+
+            onLog("[✓] Serial Number change via ADB completed successfully!")
+            true
+        } catch (e: Exception) {
+            onLog("[-] Error changing Serial Number via ADB: ${e.message}")
+            false
+        }
+    }
