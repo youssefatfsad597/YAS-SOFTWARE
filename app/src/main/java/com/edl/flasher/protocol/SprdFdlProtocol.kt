@@ -26,7 +26,12 @@ import java.io.IOException
  */
 class SprdFdlProtocol(
     private val transport: EdlUsbTransport,
-    private val log: (String) -> Unit
+    private val log: (String) -> Unit,
+    /** Where the boot ROM should place FDL1 / FDL2 in RAM. These are SoC specific (0 is never
+     *  valid). Defaults are the values commonly used for the Unisoc T618 (UMS512) family and are
+     *  UNVERIFIED for this exact device -- if upload fails at START_DATA, calibrate them. */
+    var fdl1LoadAddr: Int = 0x65000800,
+    var fdl2LoadAddr: Int = 0x9EFFFE00
 ) {
     companion object {
         private const val HDLC_FLAG = 0x7E
@@ -40,7 +45,9 @@ class SprdFdlProtocol(
         private const val CMD_END_DATA = 0x0003
         private const val CMD_EXEC_DATA = 0x0004
         private const val CMD_NORMAL_RESET = 0x0005
-        private const val CMD_ERASE_FLASH = 0x0014
+        private const val CMD_ERASE_FLASH = 0x000A
+        private const val CMD_CHECK_BAUD = 0x007E
+        private const val PART_NAME_BYTES = 72 // 36 UTF-16LE chars
 
         // BSL response ids (device -> host)
         private const val REP_ACK = 0x0080
@@ -49,10 +56,26 @@ class SprdFdlProtocol(
         private const val REP_UNKNOWN_CMD = 0x0083
         private const val REP_OPERATION_FAILED = 0x0084
 
-        private const val FDL1_LOAD_ADDR = 0x00000000
-        private const val FDL2_LOAD_ADDR = 0x00000000
-        private const val DATA_CHUNK_SIZE = 4096
+        private const val DATA_CHUNK_SIZE = 1024
     }
+
+    /** BROM frames carry CRC16-CCITT; once FDL1 is running the frames carry the 16-bit
+     *  ones-complement sum instead. */
+    @Volatile private var useCrc16 = true
+
+    private val rxPending = java.io.ByteArrayOutputStream()
+
+    private fun crc16(bytes: ByteArray): Int {
+        var crc = 0
+        for (b in bytes) {
+            crc = crc xor ((b.toInt() and 0xFF) shl 8)
+            repeat(8) { crc = if (crc and 0x8000 != 0) (crc shl 1) xor 0x1021 else crc shl 1 }
+            crc = crc and 0xFFFF
+        }
+        return crc
+    }
+
+    private fun frameCrc(bytes: ByteArray): Int = if (useCrc16) crc16(bytes) else checksum(bytes)
 
     private fun checksum(bytes: ByteArray): Int {
         var sum = 0
@@ -89,31 +112,46 @@ class SprdFdlProtocol(
         body[2] = (payload.size shr 8).toByte()
         body[3] = payload.size.toByte()
         payload.copyInto(body, 4)
-        val crc = checksum(body)
+        val crc = frameCrc(body)
         val full = body + byteArrayOf((crc shr 8).toByte(), crc.toByte())
         transport.write(stuff(full))
     }
 
-    /** Reads one de-stuffed HDLC frame, returning (responseId, payload). */
+    /** Reads one de-stuffed HDLC frame, returning (responseId, payload).
+     *  Reads whole USB packets (a 1-byte bulk read overflows the 512-byte packet and loses
+     *  data) and keeps any bytes after the closing flag for the next call. */
     private fun recvFrame(timeoutMs: Int = 5000): Pair<Int, ByteArray> {
-        val raw = ArrayList<Byte>(256)
-        val buf = ByteArray(1)
-        var started = false
         val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
-            val n = transport.read(buf, timeoutMs = 500)
-            if (n <= 0) continue
-            val v = buf[0].toInt() and 0xFF
-            if (!started) {
-                if (v == HDLC_FLAG) started = true
-                continue
-            }
-            if (v == HDLC_FLAG) {
-                if (raw.isEmpty()) continue // leading flag of this frame
-                break
-            }
-            raw.add(buf[0])
+        val buf = ByteArray(4096)
+        val raw = ArrayList<Byte>(256)
+        var started = false
+        var done = false
+
+        fun consume(v: Int): Boolean {
+            if (!started) { if (v == HDLC_FLAG) started = true; return false }
+            if (v == HDLC_FLAG) return raw.isNotEmpty() // empty = back-to-back flags, keep waiting
+            raw.add(v.toByte()); return false
         }
+
+        // bytes left over from the previous read first
+        val leftover = rxPending.toByteArray(); rxPending.reset()
+        var li = 0
+        while (li < leftover.size && !done) { done = consume(leftover[li++].toInt() and 0xFF) }
+        if (done && li < leftover.size) rxPending.write(leftover, li, leftover.size - li)
+
+        while (!done && System.currentTimeMillis() < deadline) {
+            val n = try {
+                transport.read(buf, timeoutMs = 500)
+            } catch (e: IOException) {
+                if (!transport.isConnected) throw e
+                continue // plain read timeout: keep waiting until the deadline
+            }
+            var i = 0
+            while (i < n && !done) { done = consume(buf[i++].toInt() and 0xFF) }
+            if (done && i < n) rxPending.write(buf, i, n - i)
+        }
+        if (!done) throw IOException("BROM: no response within ${timeoutMs}ms")
+
         val unstuffed = ArrayList<Byte>(raw.size)
         var i = 0
         while (i < raw.size) {
@@ -122,29 +160,21 @@ class SprdFdlProtocol(
                 unstuffed.add(((raw[i + 1].toInt() and 0xFF) xor HDLC_ESCAPE_MASK).toByte())
                 i += 2
             } else {
-                unstuffed.add(raw[i])
-                i += 1
+                unstuffed.add(raw[i]); i += 1
             }
         }
         if (unstuffed.size < 6) throw IOException("BROM: short/garbled response (${unstuffed.size} bytes)")
         val id = ((unstuffed[0].toInt() and 0xFF) shl 8) or (unstuffed[1].toInt() and 0xFF)
         val len = ((unstuffed[2].toInt() and 0xFF) shl 8) or (unstuffed[3].toInt() and 0xFF)
-        val payload = ByteArray(len.coerceAtMost((unstuffed.size - 6).coerceAtLeast(0)))
-        for (j in payload.indices) payload[j] = unstuffed[4 + j]
-
-        // The last two de-stuffed bytes are the frame's own checksum. Previously this
-        // was never checked, so a USB glitch that flipped a bit in the id/len/payload
-        // could still be read back as a "valid" REP_ACK and the caller would carry on
-        // as if the device had actually confirmed the command. Recompute it the same
-        // way sendFrame() does and bail out loudly instead of silently trusting noise.
-        val bodyForCrc = unstuffed.subList(0, 4 + payload.size).toByteArray()
-        val gotCrc = ((unstuffed[4 + payload.size].toInt() and 0xFF) shl 8) or
-            (unstuffed[5 + payload.size].toInt() and 0xFF)
-        val wantCrc = checksum(bodyForCrc)
+        if (unstuffed.size < 6 + len) throw IOException("BROM: truncated response 0x${id.toString(16)} (len=$len, got ${unstuffed.size - 6})")
+        val payload = ByteArray(len) { unstuffed[4 + it] }
+        val bodyForCrc = unstuffed.subList(0, 4 + len).toByteArray()
+        val gotCrc = ((unstuffed[4 + len].toInt() and 0xFF) shl 8) or (unstuffed[5 + len].toInt() and 0xFF)
+        val wantCrc = frameCrc(bodyForCrc)
         if (gotCrc != wantCrc) {
             throw IOException(
                 "BROM: checksum mismatch on response 0x${id.toString(16)} " +
-                    "(got 0x${gotCrc.toString(16)}, expected 0x${wantCrc.toString(16)}) -- likely a USB glitch, retry"
+                    "(got 0x${gotCrc.toString(16)}, expected 0x${wantCrc.toString(16)}, mode=${if (useCrc16) "CRC16" else "SUM"})"
             )
         }
         return id to payload
@@ -154,7 +184,7 @@ class SprdFdlProtocol(
         sendFrame(cmdId, payload)
         val (id, resp) = recvFrame(timeoutMs)
         when (id) {
-            REP_ACK, REP_VER -> return
+            REP_ACK -> return
             REP_INVALID_CMD -> throw IOException("BROM: device reported INVALID_CMD for 0x${cmdId.toString(16)}")
             REP_UNKNOWN_CMD -> throw IOException("BROM: device reported UNKNOWN_CMD for 0x${cmdId.toString(16)}")
             REP_OPERATION_FAILED -> throw IOException("BROM: operation failed for 0x${cmdId.toString(16)}")
@@ -199,14 +229,23 @@ class SprdFdlProtocol(
      *  attempt left the link in a known state -- this is the actual, verifiable fix
      *  for a handshake that got out of sync, as opposed to any specific byte sequence
      *  this app cannot guarantee for every Unisoc baseband. */
+    /** Wakes the ROM/FDL: one 0x7E, answered by a REP_VER frame (version string). */
+    private fun syncBaud(timeoutMs: Int = 1500) {
+        rxPending.reset()
+        transport.write(byteArrayOf(HDLC_FLAG.toByte()))
+        val (id, resp) = recvFrame(timeoutMs)
+        if (id != REP_VER) throw IOException("BROM: sync got 0x${id.toString(16)} instead of VER (${resp.size} bytes)")
+        log("BROM: sync OK (${String(resp, Charsets.US_ASCII).trim { it.code < 32 }}).")
+    }
+
     fun connect(maxAttempts: Int = 3) {
+        useCrc16 = true
         drainStale()
         var lastError: Exception? = null
         for (attempt in 1..maxAttempts) {
             try {
                 log("BROM: sync attempt $attempt/$maxAttempts...")
-                // Classic SPRD wake-up: a burst of lone 0x7E bytes until the chip answers.
-                repeat(8) { transport.write(byteArrayOf(HDLC_FLAG.toByte())) }
+                syncBaud()
                 log("BROM: handshake (CONNECT)...")
                 expectAck(CMD_CONNECT)
                 log("BROM: handshake OK.")
@@ -215,10 +254,7 @@ class SprdFdlProtocol(
             } catch (e: Exception) {
                 lastError = e
                 log("BROM: attempt $attempt failed (${e.message}).")
-                if (attempt < maxAttempts) {
-                    log("BROM: draining stale bytes and retrying...")
-                    drainStale()
-                }
+                if (attempt < maxAttempts) { log("BROM: draining stale bytes and retrying..."); drainStale() }
             }
         }
         isConnected = false
@@ -226,7 +262,7 @@ class SprdFdlProtocol(
     }
 
     private fun uploadStage(label: String, bytes: ByteArray, loadAddr: Int) {
-        log("BROM: uploading $label (${bytes.size} bytes)...")
+        log("BROM: uploading $label (${bytes.size} bytes) to 0x${loadAddr.toUInt().toString(16)}...")
         val startPayload = ByteArray(8)
         startPayload[0] = (loadAddr shr 24).toByte()
         startPayload[1] = (loadAddr shr 16).toByte()
@@ -243,22 +279,38 @@ class SprdFdlProtocol(
             val chunk = bytes.copyOfRange(sent, minOf(sent + DATA_CHUNK_SIZE, bytes.size))
             expectAck(CMD_MIDST_DATA, chunk, timeoutMs = 10000)
             sent += chunk.size
-            if (sent % (DATA_CHUNK_SIZE * 32) == 0) log("BROM: $label ${sent / 1024}KB / ${bytes.size / 1024}KB")
+            if (sent % (DATA_CHUNK_SIZE * 256) == 0) log("BROM: $label ${sent / 1024}KB / ${bytes.size / 1024}KB")
         }
         expectAck(CMD_END_DATA)
         expectAck(CMD_EXEC_DATA)
         log("BROM: $label uploaded and executing.")
     }
 
-    fun uploadFdl1(bytes: ByteArray) = uploadStage("FDL1", bytes, FDL1_LOAD_ADDR)
+    /** Uploads FDL1, then re-syncs with it: FDL1 is a new program with its own link state
+     *  (checksum framing instead of CRC16) and must be CONNECTed again before FDL2. */
+    fun uploadFdl1(bytes: ByteArray) {
+        uploadStage("FDL1", bytes, fdl1LoadAddr)
+        Thread.sleep(500)
+        useCrc16 = false
+        drainStale()
+        var last: Exception? = null
+        repeat(3) {
+            try {
+                syncBaud(); expectAck(CMD_CONNECT); log("BROM: FDL1 handshake OK."); return
+            } catch (e: Exception) { last = e; drainStale() }
+        }
+        throw IOException("FDL1 did not answer after exec: ${last?.message}")
+    }
 
-    fun uploadFdl2(bytes: ByteArray) = uploadStage("FDL2", bytes, FDL2_LOAD_ADDR)
+    fun uploadFdl2(bytes: ByteArray) = uploadStage("FDL2", bytes, fdl2LoadAddr)
 
     /** Erases one partition by name once FDL2 is running (FDL2 understands
      *  partition names the same way fastboot/Odin do -- "userdata", "frp", etc). */
     fun erasePartitionByName(name: String, timeoutMs: Int = 60000) {
         log("BROM: erasing '$name'...")
-        val nameBytes = name.toByteArray(Charsets.US_ASCII)
+        // FDL2 expects the partition name as UTF-16LE in a fixed 72-byte field.
+        val nameBytes = ByteArray(PART_NAME_BYTES)
+        name.toByteArray(Charsets.UTF_16LE).copyInto(nameBytes, 0, 0, minOf(PART_NAME_BYTES - 2, name.length * 2))
         // "userdata" can be tens of GB on a modern device; 30s was tuned for small
         // partitions like frp/persist and was timing out (false failure, not a real
         // erase failure) on bigger ones. Bumped to 60s here and callers can still pass
