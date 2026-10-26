@@ -117,6 +117,8 @@ class MainActivity : ComponentActivity() {
                     onConnectUsb = viewModel::connectUsb,
                     onProbeChipInfo = viewModel::readSaharaDeviceInfo,
                     onPickLoader = { loaderPicker.launch(arrayOf("*/*")) },
+                    onClearLoader = viewModel::clearLoader,
+                    onSetReadGptBuiltInLoader = viewModel::setReadGptBuiltInLoader,
                     onPickFrpFile = { frpFilePicker.launch(arrayOf("*/*")) },
                     onPickSecEfsFile = { secEfsFilePicker.launch(arrayOf("*/*")) },
                     onPickPersistentFile = { persistentFilePicker.launch(arrayOf("*/*")) },
