@@ -4,9 +4,6 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -148,11 +145,8 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
                         isError = isError && password.length < 8,
                         visualTransformation = if (showPassword) VisualTransformation.None else PasswordVisualTransformation(),
                         trailingIcon = {
-                            IconButton(onClick = { showPassword = !showPassword }) {
-                                Icon(
-                                    if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = if (showPassword) "إخفاء كلمة المرور" else "إظهار كلمة المرور"
-                                )
+                            TextButton(onClick = { showPassword = !showPassword }) {
+                                Text(if (showPassword) "إخفاء" else "إظهار")
                             }
                         },
                         modifier = Modifier.fillMaxWidth()
