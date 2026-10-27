@@ -727,7 +727,7 @@ fun EdlMainScreen(
     var dockTab by remember { mutableIntStateOf(0) }
     // T505N is kept right next to X216B (both are the quick one-tap service tabs); the rest
     // keep their previous relative order.
-    val tabTitles = listOf("X216B", "T505N", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "MTP / ADB")
+    val tabTitles = listOf("X216B", "T505N", "T509", "Read GPT", "XML Flasher", "Samsung Odin", "MTP / ADB", "شرح")
 
     confirmEraseTarget?.let { target ->
         YASConfirmDialog(
@@ -837,7 +837,7 @@ fun EdlMainScreen(
                 onExitDownloadMode = onExitDownloadMode,
                 onMtpDownloadAt = onMtpDownloadAt
             )
-            else -> AdbMtpTab(
+            6 -> AdbMtpTab(
                 state = state,
                 onReadMtpInfo = onReadMtpInfo,
                 onMtpRebootAt = onMtpRebootAt,
@@ -849,6 +849,7 @@ fun EdlMainScreen(
                 onShowInfoPopup = onShowInfoPopup,
                 onMtpFormatAt = onMtpFormatAt
             )
+            else -> ExplainTab()
         }
     }
 
@@ -3025,6 +3026,344 @@ private fun AdbMtpTab(
         }
         if (state.adbInfoText.isNotBlank()) {
             InfoGridCard("ADB info", "", state.adbInfoText)
+        }
+    }
+}
+
+// =====================================================================================
+//  Tab : شرح (Help / Explanation)
+// =====================================================================================
+
+private data class ExplainSection(val title: String, val body: String)
+private data class ExplainQA(val q: String, val a: String)
+
+private val EXPLAIN_INTRO = """
+التطبيق ده بيشتغل على عائلة أجهزة Samsung اللي فيها شرائح Qualcomm (X216B / T505N) وشرائح Unisoc (T509 / T509N)، وبيغطي كل حاجة من الدخول في وضع الصيانة لحد الفورمات وإزالة Knox وتفليش فيرموير كامل عن طريق Odin.
+
+قبل ما تبدأ: اقرأ القسم ده مرة واحدة بالكامل، وبعدين ارجعله وقت ما تحتاج خطوة بعينها. كل زرار في التطبيق ليه شرح هنا بنفس اسمه بالظبط عشان تلاقيه بسهولة.
+""".trimIndent()
+
+private val EXPLAIN_EDL = ExplainSection(
+    title = "إيه هو EDL، وإزاي تدخله بالكابل المعدل؟",
+    body = """
+EDL (Emergency Download Mode) هو وضع صيانة جوه شريحة Qualcomm نفسها، أقل مستوى من الأندرويد والبووتلودر خالص. لما الجهاز يدخل EDL، بيظهر على الكمبيوتر باسم "Qualcomm HS-USB QDLoader 9008"، والتطبيق وقتها يقدر يقرأ ويكتب على الذاكرة مباشرة من غير ما يعدي على نظام التشغيل.
+
+بتحتاج EDL لما الجهاز:
+• مش بيفتح خالص (بوت لووب، شاشة سودة، أو مقفول FRP/Knox).
+• عايز Wipe & Write كامل (تبويب X216B).
+• عايز تقرا GPT أو تكتب/تمسح partitions مباشرة (تبويب Read GPT).
+
+إزاي تدخله بالكابل المعدل (Test Point Cable):
+الكابل المعدل ده كابل USB اتعدّل بحيث يوصّل نقطة معينة (Test Point) جوه بورد الجهاز بالأرضي (GND) وقت توصيله بالكمبيوتر، وده بيجبر الشريحة إنها تدخل EDL على طول حتى لو مفيش بووتلودر شغال أصلًا.
+
+الخطوات:
+1. اقطع الكهرباء تمامًا عن الجهاز (افصل الكابل، سيبه كذا لحظات).
+2. حدد نقطة الـ Test Point الصحيحة على بورد الجهاز حسب الموديل (بتختلف من جهاز لآخر).
+3. وصّل الكابل المعدل على نقطة الاختبار دي (أو خلي طرف الكابل يلمسها بملقط/دبوس).
+4. وإنت ماسك الاتصال، وصّل الكابل بمنفذ USB في الكمبيوتر.
+5. لو الجهاز ظهر كـ Qualcomm HS-USB QDLoader 9008، يبقى بقى في EDL، وتقدر تسيب نقطة الاختبار وتكمل من جوه التطبيق.
+6. افتح تبويب X216B أو Read GPT حسب المطلوب، وكمّل.
+""".trimIndent()
+)
+
+private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
+    ExplainSection(
+        title = "تبويب X216B",
+        body = """
+"Wipe & Write · Format + FRP + MDM": الزرار الرئيسي للصيانة الكاملة على EDL (9008). بيعمل كل ده في عملية واحدة: مسح userdata و persistent و metadata و cache و sec_efs و frp، وبعدها كتابة ملفات frp.bin و sec_efs.bin و persistent.bin المدمجة جوه التطبيق تلقائيًا (من غير ما تختار ملفات يدوي). استخدمه لما الجهاز في EDL وعايز تعمل Wipe شامل + تصليح FRP/MDM في خطوة واحدة.
+
+"X216B Remove KNOX" (كارت Remove Knox): بيلغي باكدجات Knox والـ MDM عبر ADB. لازم الجهاز يكون شغال بالأندرويد العادي و USB Debugging مفعّل.
+
+"Erase FRP": بيمسح partition الـ FRP بس، محتاج Firehose شغال (يعني عملت Upload Loader + Read GPT في تبويب Read GPT الأول).
+
+"Factory Reset": بيمسح بيانات المستخدم (userdata) بس عن طريق Firehose، نفس الشرط: لازم Firehose يكون شغال الأول.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب T505N",
+        body = """
+"MTP Download": بيبعت الجهاز لوضع Download Mode وهو شغال عادي بالأندرويد (MTP) عن طريق أوامر AT، من غير ما تحتاج تعمل كومبينيشن الأزرار يدوي.
+
+"Format": بتختار ملف userdata، والتطبيق بيفلشه في Download Mode بس (مفيش حاجة تانية بتتكتب)، وبعدين الجهاز بيعمل reboot تلقائي. البيانات كلها بتتمسح، لكن ده مش بيشيل قفل FRP/حساب سامسونج.
+
+"Restore Storage": بتشتغل بعد ما الجهاز يبقى شغال (مش في Download Mode)، عن طريق منفذ المودم (AT) وهو في وضع MTP. بتعمل فورمات حقيقي للجهاز وبترجّع مساحة الـ userdata لحجمها الكامل (لو الفورمات اللي فات كتب صورة صغيرة)، وبعدين بيعمل reboot لوحده.
+
+"Remove Knox": زي اللي في X216B بالظبط، بس من خلال هالتبويب، ومحتاج ADB شغال (Android عادي + USB Debugging).
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب T509",
+        body = """
+اختيار T509 / T509N: حدد نوع الجهاز بالظبط قبل أي خطوة، عشان التطبيق يستخدم ملفات الـ FDL1/FDL2 الصح.
+
+"Force BROM": بيحاول يدخل الجهاز في وضع BROM بتاع Unisoc (زي EDL بتاع Qualcomm بس لشرائح Unisoc) من غير كومبينيشن أزرار، عن طريق أوامر AT لو الجهاز شغال بوضع MTP.
+
+"Fix Handshake": لو الاتصال بالجهاز وهو في BROM اتعلّق أو مش بيرد، الزرار ده بيعيد فتح الاتصال ويحاول الـ handshake تاني من غير ما يغيّر وضع الجهاز.
+
+"Exit BROM": بيطلع الجهاز من BROM بإعادة تشغيل عادية، من غير ما يمسح أو يكتب أي حاجة.
+
+"Format + FRP": العملية الكاملة — رفع FDL1 و FDL2، بعدين مسح userdata و frp و persist، وبعدين إعادة تشغيل. لازم الجهاز يكون في BROM الأول (زرار Force BROM).
+
+"T509 Remove Knox": زي باقي التبويبات، عن طريق ADB، محتاج Android عادي و USB Debugging.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب Read GPT",
+        body = """
+اختيار اللودر (Built-in X216B / Manual): في وضع Built-in بيستخدم X216B.elf المدمج تلقائيًا من غير ما تختار حاجة. في وضع Manual بتختار ملف .elf/.mbn بنفسك — استخدمه لو عندك لودر تاني شغال أحسن على جهازك.
+
+اختيار نوع التخزين (UFS / eMMC): حدده قبل القراءة عشان حجم الـ sector يتظبط صح (UFS = 4096 بايت، eMMC = 512 بايت).
+
+"Read HWID / PK_HASH": بيقرا هوية الشريحة قبل حتى ما ترفع اللودر — بيشتغل بمجرد ما الجهاز يبقى في EDL (9008)، من غير Firehose.
+
+"Upload Loader + Read GPT": بيرفع اللودر (Firehose) ويقرا جدول الـ partitions كامل في خطوة واحدة. ده أول زرار تضغطه بعد ما الجهاز يبقى في EDL.
+
+"Read GPT": بيعيد قراءة جدول الـ partitions بس، بعد ما Firehose يبقى شغال بالفعل (مفيش داعي ترفع اللودر تاني).
+
+"Test eMMC Write": بيشخّص مشكلة "المسح بينجح من غير تأثير" أو "الكتابة بتعلق" على eMMC. بيجرب أكتر من طريقة كتابة (أحجام مختلفة، مع/من غير ZLP) على سيكتور تجريبي واحد (وبيرجّعه زي ما كان في الآخر)، وبيقولك السبب: اللودر شغال، أو الشريحة فعلاً محمية ضد الكتابة.
+
+جدول الـ partitions: كل partition فيه أزرار Backup (حفظ نسخة كملف)، Flash (كتابة ملف عليه) و Erase (مسحه)، وفوق الجدول فيه اختيار كل الـ partitions ومسحهم مرة واحدة.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب XML Flasher",
+        body = """
+ده لتفليش فيرموير Qualcomm كامل عن طريق ملفات rawprogram.xml و patch.xml زي أدوات QFIL الرسمية بالظبط.
+
+"RAWPROGRAM XML": الملف اللي بيوصف كل partition هيتكتب فين (مطلوب).
+"PATCH XML": ملف تصحيحات إضافي (اختياري، مش كل فيرموير محتاجه).
+"FIRMWARE FOLDER": المجلد اللي فيه كل ملفات الـ .img المذكورة جوه rawprogram.xml (مطلوب).
+
+لازم Firehose يكون شغال الأول (Upload Loader + Read GPT في تبويب Read GPT)، وبعدين زرار الفلاشة بيقرا الـ XML ويكتب كل حاجة بالترتيب.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب Samsung Odin",
+        body = """
+"Connect": بيدوّر على جهاز في Samsung Download Mode ويفتح الاتصال معاه.
+"MTP → Download": بيبعت الجهاز لـ Download Mode وهو شغال عادي، من غير كومبينيشن أزرار.
+"Exit": بيطلع الجهاز من Download Mode برجوعه للوضع العادي.
+"Read Device Info": بيقرا MODEL / DID / RAND / TMU_TEMP من البووتلودر (مش كل جهاز بيرد عليها).
+
+خانات الفيرموير (الترتيب الصح دايمًا BL ← AP ← CP ← CSC ← USERDATA):
+• BL (Bootloader): ملف البووتلودر.
+• AP: نظام التشغيل نفسه (أكبر ملف غالبًا).
+• CP: المودم/الباسباند.
+• CSC: إعدادات الدولة/الشبكة — اختار CSC العادي (مش HOME_CSC) لو عايز فورمات كامل، أو HOME_CSC لو عايز تحافظ على بيانات المستخدم.
+• USERDATA: اختياري، لو معاك ملف userdata منفصل.
+
+"Run Odin Flash": بيبدأ الفلاشة الفعلية بالترتيب الصح، لازم الجهاز يكون متوصل وشايف DOWNLOAD MODE قبل ما تضغطه.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "تبويب MTP / ADB",
+        body = """
+قسم MTP (الجهاز شغال عادي، من غير USB Debugging، عن طريق منفذ المودم):
+• "Read Info": بيقرا معلومات الجهاز (SN / IMEI وحجم التخزين).
+• "Open Browser": بيخلي الجهاز يفتح رابط في المتصفح بتاعه مباشرة (مفيد لما مفيش تطبيقات شغالة على الـ USB).
+• "Download Mode": يبعت الجهاز لوضع التحميل.
+• "Reboot": إعادة تشغيل عادية عن طريق منفذ المودم.
+• "FORMAT MTP": فورمات كامل للجهاز (زي Restore Storage) عن طريق منفذ المودم. كل بيانات المستخدم بتتمسح.
+• "Change Serial" (أجهزة سامسونج): بيغيّر رقم السيريال (11 حرف/رقم) عن طريق أوامر AT.
+
+قسم ADB (لازم Android عادي و USB Debugging شغال):
+• "Read Info": بيقرا SN / IMEI عن طريق ADB.
+• "Download" / "Recovery" / "Reboot": إعادة تشغيل الجهاز للوضع المطلوب.
+• "Remove FRP": بيلغي فحص حساب جوجل/الإعداد الأولي عن طريق ADB، قبل ما تعمل فورمات — ملوش فايدة لو الجهاز واقف على شاشة FRP بالفعل، لازم تتعمل الخطوة دي وإنت لسه داخل بـ USB Debugging.
+""".trimIndent()
+    )
+)
+
+private val EXPLAIN_WORKFLOWS: List<ExplainSection> = listOf(
+    ExplainSection(
+        title = "خطوات كاملة: تهكير جهاز X216B من الأول للآخر",
+        body = """
+1. ادخل الجهاز في EDL بالكابل المعدل (اقرا قسم "إيه هو EDL" فوق لو مش عامل كده قبل كده).
+
+2. افتح تبويب X216B واضغط "Wipe & Write · Format + FRP + MDM". العملية دي هتمسح الذاكرة وتكتب فرمويرات frp/sec_efs/persistent تلقائيًا من غير ما تختار ملف.
+
+3. بعد ما العملية تخلص، اشيل سلك الـ Test Point من على البورد (مفيش داعي ليه بعد كده).
+
+4. سيب الجهاز يكمل أول إقلاع (Setup Wizard) — ده بياخد شوية دقايق وممكن يعمل reboot أكتر من مرة، سيبه لحد ما يوصل لشاشة الترحيب.
+
+5. افتح الجهاز وكمّل الإعداد الأولي العادي (اللغة، إلخ) لحد ما توصل لخطوة الواي-فاي.
+
+6. وصّل الجهاز بشبكة واي-فاي عشان يكمل الإعداد.
+
+7. بعد ما يوصل الجهاز للشاشة الرئيسية، روح للإعدادات ودوّر على خاصية "Auto Blocker" (موجودة في إعدادات Samsung الحديثة، بتمنع تفعيل USB Debugging والتطبيقات الخارجية افتراضيًا) واقفلها (Off).
+
+8. فعّل Developer Options و USB Debugging:
+   • روح Settings ← About tablet ← Software information.
+   • دوس على "Build number" 7 مرات متتالية لحد ما يظهرلك رسالة "You are now a developer".
+   • ارجع لـ Settings ← هتلاقي "Developer options" ظهر (عادة تحت System أو في آخر القائمة).
+   • افتحه وفعّل "USB debugging".
+
+9. وصّل الجهاز بالكمبيوتر، هيظهرلك بوب-أب على شاشة الجهاز يسأل "Allow USB debugging?" — دوس Allow (وممكن تحدد "Always allow from this computer").
+
+10. دلوقتي الجهاز متوصل بـ ADB — روح تبويب X216B واضغط "X216B Remove KNOX" عشان تلغي باكدجات Knox والـ MDM.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "خطوات كاملة: T505 من الأول للآخر",
+        body = """
+1. ادخل الجهاز في Samsung Download Mode — إما بزرار "MTP Download" (لو الجهاز شغال عادي)، أو يدوي بكومبينيشن الأزرار المعروفة بتاعة سامسونج (Volume Up + Volume Down + توصيل الكابل بالكمبيوتر وهو مقفول، ثم Volume Up للتأكيد لو ظهرت رسالة تحذير).
+
+2. في تبويب T505N، اضغط "Format" واختار ملف userdata — التطبيق هيفلشه في Download Mode ويعمل reboot لوحده.
+
+3. سيب الجهاز يشتغل عادي بعد الـ reboot (مش لازم يكمل الإعداد الكامل الأول).
+
+4. بعد ما يشتغل، ارجع لتبويب T505N واضغط "Restore Storage" — دي بتعمل فورمات حقيقي وترجّع مساحة التخزين لحجمها الكامل، وبعدها الجهاز بيعمل reboot تاني لوحده.
+
+5. دلوقتي كمّل الإعداد الأولي (Setup Wizard) زي أي جهاز جديد، لحد ما توصل لخطوة الواي-فاي. في شاشة الواي-فاي هتلاقي خيار "مسح QR Code" (Scan QR) جنب خيار إدخال الشبكة يدوي — دوس عليه ووجّه كاميرا الجهاز على كود QR الخاص بشبكتك (تقدر تولّده من روتر الواي-فاي أو من تطبيق على موبايلك التاني)، وده هيوصل الجهاز بالشبكة من غير ما تكتب الباسورد يدوي.
+
+6. كمّل باقي خطوات الإعداد عادي (تخطي حساب جوجل لو مطلوب، إلخ) لحد ما توصل للشاشة الرئيسية.
+
+7. فعّل Developer Options و USB Debugging (نفس خطوات X216B بالظبط: Settings ← About tablet ← Software information ← دوس على Build number 7 مرات ← ارجع لـ Settings ← Developer options ← فعّل USB debugging)، ووافق على بوب-أب "Allow USB debugging?" لما توصل بالكمبيوتر.
+
+8. دلوقتي الجهاز متوصل بـ ADB — روح تبويب T505N واضغط "Remove Knox".
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "خطوات كاملة: تفليش فيرموير سامسونج عن طريق Odin",
+        body = """
+1. حدد موديل الجهاز بالظبط (مثلًا SM-X216B) ورمز الدولة/الشبكة (CSC)، ونزّل الفيرموير المطابق من موقع متخصص زي SamMobile (دوّر باسم الموديل، واختار CSC المطابق لبلد/شريك الجهاز بالظبط — فيرموير CSC غلط ممكن يعلّق الجهاز أو يرفض الفلاشة).
+
+2. فك ضغط الملف اللي نزلته (عادة .zip)، هتلاقي جواه كذا ملف .tar.md5 منفصلين: BL، AP، CP، CSC (أو HOME_CSC)، وأحيانًا USERDATA.
+
+3. روح تبويب Samsung Odin في التطبيق وحط كل ملف في الخانة بتاعته بالظبط:
+   • BL في خانة Bootloader.
+   • AP في خانة AP.
+   • CP في خانة CP.
+   • CSC أو HOME_CSC في خانة CSC (CSC العادي = فورمات كامل، HOME_CSC = يحافظ على بيانات المستخدم).
+   • USERDATA لو موجود عندك.
+
+4. ادخل الجهاز Download Mode — بزرار "MTP → Download" لو الجهاز شغال، أو يدوي بكومبينيشن الأزرار.
+
+5. اضغط "Connect" في تبويب Odin وتأكد إن الشارة بتاعة الحالة بقت "DOWNLOAD MODE".
+
+6. اضغط "Run Odin Flash" وسيب العملية تخلص من غير ما تفصل الكابل.
+
+تحذيرات مهمة قبل ما تفلش:
+• الفلاشة العادية عن طريق Odin ما بتشيلش قفل FRP ولا حساب سامسونج — دي مش وظيفتها.
+• لو الفيرموير فيه بووتلودر غير أصلي أو معدّل، ممكن يرفع Knox Warranty Bit (0x1) — وده إجراء دائم ومينفعش يترجع، وبيأثر على الضمان.
+• الجهاز بيرفض فلاشة فيرموير بإصدار أقدم من اللي عليه حاليًا (anti-rollback / SW REV CHECK) — لو ظهرلك فشل من النوع ده، يبقى لازم فيرموير بإصدار أحدث أو نفسه.
+• لازم CSC الفيرموير يكون مطابق لموديل/منطقة الجهاز بالظبط، وإلا ممكن تطلع رسالة فشل زي "SECURE CHECK FAIL".
+""".trimIndent()
+    )
+)
+
+private val EXPLAIN_QA: List<ExplainQA> = listOf(
+    ExplainQA(
+        "الجهاز مش بيظهر كـ 9008 وأنا واصل الكابل المعدل؟",
+        "تأكد إن الجهاز مقطوع عنه الكهرباء تمامًا قبل ما تبدأ، وإن نقطة الاختبار صح بالنسبة للموديل ده بالذات (بتختلف من جهاز لآخر)، وإن الاتصال بالـ GND ثابت طول ما بتوصل الكابل بالكمبيوتر."
+    ),
+    ExplainQA(
+        "المسح (Erase) بينجح بس من غير تأثير، والكتابة بتعلّق؟",
+        "استخدم \"Test eMMC Write\" في تبويب Read GPT — بيشخّصلك السبب بالظبط (مشكلة في اللودر، أو الشريحة نفسها محمية ضد الكتابة). لو جرّبت أكتر من لودر .elf في وضع Manual والمشكلة نفسها باقية، يبقى الاحتمال الأكبر إن فيه تعارض بين طريقة الكتابة اللي التطبيق بيستخدمها وده اللي محتاج اللودر ده بالظبط."
+    ),
+    ExplainQA(
+        "إيه الفرق بين FORMAT MTP (تبويب MTP/ADB) و Restore Storage (تبويب T505N)؟",
+        "نفس الفكرة بالظبط (فورمات كامل عن طريق منفذ المودم وهو في وضع MTP) — الاتنين موجودين في مكانين مختلفين في التطبيق براحتك بس، مفيش فرق وظيفي بينهم."
+    ),
+    ExplainQA(
+        "إزاي أفعّل USB Debugging لو مفيش Developer Options في الإعدادات؟",
+        "Developer Options بتكون مخفية لحد ما تفعّلها بنفسك: روح Settings ← About tablet ← Software information ← دوس على \"Build number\" 7 مرات متتالية بسرعة لحد ما تظهرلك رسالة إنك بقيت Developer. بعدها هتلاقيها ظهرت في آخر قائمة Settings."
+    ),
+    ExplainQA(
+        "عملت Remove Knox بس الجهاز اتقفل/ظهرله تحذير أمان؟",
+        "على بعض الأجهزة اللي فيها حماية MDM أو إيجار خارجي (Carrier lease)، إلغاء باكدجات معينة ممكن يفعّل قفل الحماية بتاع الخدمة نفسها، مش التطبيق. القائمة اللي التطبيق بيستخدمها مختارة عشان تتجنب الباكدجات دي، لكن ده ممكن يحصل برضه على أجهزة بعينها."
+    ),
+    ExplainQA(
+        "ليه رفضت الفلاشة بـ Odin برسالة SECURE CHECK FAIL أو SW REV CHECK FAIL؟",
+        "SECURE CHECK FAIL معناها الفيرموير ده مش للموديل/CSC ده بالظبط. SW REV CHECK FAIL معناها الفيرموير ده أقدم من اللي عالجهاز حاليًا (الحماية بتمنع التراجع لإصدار أقدم). في الحالتين، لازم تنزّل الفيرموير الصح من موقع موثوق بنفس الموديل والـ CSC بالظبط."
+    )
+)
+
+@Composable
+private fun ExplainTab() {
+    var openSections by remember { mutableStateOf(setOf<String>()) }
+    var openQa by remember { mutableStateOf(setOf<Int>()) }
+
+    fun toggle(key: String) {
+        openSections = if (key in openSections) openSections - key else openSections + key
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        YASCard(title = "شرح البرنامج", subtitle = "دليل الاستخدام الكامل") {
+            YText(EXPLAIN_INTRO, size = 12.sp, color = Yas.TextSoft)
+        }
+
+        ExplainCard(EXPLAIN_EDL, EXPLAIN_EDL.title in openSections) { toggle(EXPLAIN_EDL.title) }
+
+        SectionLabel("شرح الأزرار حسب التبويب")
+        EXPLAIN_SECTIONS.forEach { sec ->
+            ExplainCard(sec, sec.title in openSections) { toggle(sec.title) }
+        }
+
+        SectionLabel("خطوات كاملة")
+        EXPLAIN_WORKFLOWS.forEach { sec ->
+            ExplainCard(sec, sec.title in openSections) { toggle(sec.title) }
+        }
+
+        SectionLabel("أسئلة شائعة")
+        YASCard {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                EXPLAIN_QA.forEachIndexed { i, qa ->
+                    if (i > 0) YDivider()
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { openQa = if (i in openQa) openQa - i else openQa + i }
+                            .padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        YText(
+                            if (i in openQa) "▾" else "▸",
+                            size = 12.sp,
+                            color = Yas.SkyText,
+                            modifier = Modifier.width(18.dp)
+                        )
+                        YText(qa.q, size = 13.sp, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    }
+                    if (i in openQa) {
+                        YText(
+                            qa.a,
+                            size = 12.sp,
+                            color = Yas.TextSoft,
+                            modifier = Modifier.padding(start = 18.dp, bottom = 8.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ExplainCard(section: ExplainSection, expanded: Boolean, onToggle: () -> Unit) {
+    YASCard {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(role = Role.Button, onClick = onToggle),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            YText(
+                if (expanded) "▾" else "▸",
+                size = 13.sp,
+                color = Yas.SkyText,
+                modifier = Modifier.width(20.dp)
+            )
+            YText(section.title, size = 14.sp, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+        }
+        if (expanded) {
+            Spacer(Modifier.height(6.dp))
+            YText(section.body, size = 12.sp, color = Yas.TextSoft)
         }
     }
 }
