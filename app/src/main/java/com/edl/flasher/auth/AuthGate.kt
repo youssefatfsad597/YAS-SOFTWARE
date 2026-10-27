@@ -14,10 +14,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Email
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.Visibility
-import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -478,7 +475,7 @@ private fun LoginScreen(
                     trailingIcon = {
                         IconButton(onClick = onToggleShowPassword) {
                             Icon(
-                                if (showPassword) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                if (showPassword) YasIcons.VisibilityOff else YasIcons.Visibility,
                                 contentDescription = if (showPassword) "إخفاء كلمة المرور" else "إظهار كلمة المرور",
                                 tint = Yas.Muted
                             )
@@ -507,7 +504,7 @@ private fun LoginScreen(
             AnimatedVisibility(visible = message.isNotBlank()) {
                 Row(verticalAlignment = Alignment.Top, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(
-                        if (isError) Icons.Filled.ErrorOutline else Icons.Filled.CheckCircle,
+                        if (isError) YasIcons.ErrorOutline else Icons.Filled.CheckCircle,
                         contentDescription = null,
                         tint = if (isError) Yas.DangerText else Yas.Success,
                         modifier = Modifier.size(18.dp)

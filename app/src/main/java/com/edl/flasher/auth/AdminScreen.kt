@@ -12,8 +12,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowForward
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -174,7 +172,7 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                                 Surface(shape = RoundedCornerShape(10.dp), color = AdminColors.SurfaceHi, border = BorderStroke(1.dp, AdminColors.Border), modifier = Modifier.fillMaxWidth()) {
                                     Row(Modifier.padding(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Icon(
-                                            if (r.error == null) Icons.Filled.CheckCircle else Icons.Filled.ErrorOutline,
+                                            if (r.error == null) Icons.Filled.CheckCircle else YasIcons.ErrorOutline,
                                             contentDescription = null,
                                             tint = if (r.error == null) AdminColors.Success else AdminColors.DangerText,
                                             modifier = Modifier.size(16.dp)
@@ -186,7 +184,7 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                                         }
                                         if (r.error == null) {
                                             IconButton(onClick = { clipboard.setText(AnnotatedString(credentials)) }) {
-                                                Icon(Icons.Filled.ContentCopy, contentDescription = "نسخ", tint = AdminColors.Muted, modifier = Modifier.size(18.dp))
+                                                Icon(YasIcons.ContentCopy, contentDescription = "نسخ", tint = AdminColors.Muted, modifier = Modifier.size(18.dp))
                                             }
                                         }
                                     }
