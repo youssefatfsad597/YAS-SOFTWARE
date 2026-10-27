@@ -1841,12 +1841,6 @@ private fun ReadGptTab(
                     style = BtnStyle.Secondary,
                     enabled = state.firehoseReady && !state.isBusy
                 )
-                YASButton(
-                    "Test eMMC Write",
-                    onDiagnoseWrite,
-                    style = BtnStyle.Warning,
-                    enabled = state.firehoseReady && state.partitions.isNotEmpty() && !state.isBusy
-                )
                 StatusBadge(
                     text = if (state.firehoseReady) "FIREHOSE READY" else if (state.usbConnected) "9008 CONNECTED" else "NO 9008 DEVICE",
                     color = if (state.firehoseReady) Yas.Success else if (state.usbConnected) Yas.SkyText else Yas.Idle,
@@ -3094,22 +3088,31 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
         title = "تبويب X216B",
         body = """
 ## "Wipe & Write · Format + FRP + MDM"
-الزرار الرئيسي للصيانة الكاملة. لازم الجهاز يكون في EDL (9008).
-1. بيمسح: userdata و persistent و metadata و cache و sec_efs و frp.
-2. بيكتب تلقائيًا الملفات المدمجة في التطبيق: frp.bin و sec_efs.bin و persistent.bin (من غير ما تختار ملفات).
-3. استخدمه لما عايز مسح شامل وتصليح FRP/MDM في عملية واحدة.
+الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM. بيشتغل والجهاز في EDL (9008).
 
 ## "X216B Remove KNOX"
 1. بيلغي باكدجات Knox والـ MDM عن طريق ADB.
 2. الجهاز لازم يكون شغال أندرويد عادي و USB Debugging مفعّل.
 
 ## "Erase FRP"
-1. بيمسح partition الـ FRP بس.
-2. محتاج Firehose شغال: يعني تعمل "Upload Loader + Read GPT" في تبويب Read GPT الأول.
+لإزالة قفل FRP.
+لازم تحدد اللودر الأول، بالخطوات دي:
+1. ادخل الجهاز في EDL (9008) بالكابل المعدل.
+2. افتح تبويب Read GPT.
+3. في اختيار اللودر: لو جهازك X216B اختار "Built-in X216B" (مش محتاج تختار أي ملف).
+4. لو جهازك غير X216B اختار "Manual" واختار ملف اللودر (.elf أو .mbn) المناسب لجهازك.
+5. اضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
+6. ارجع للتبويب اللي كنت فيه واضغط الزرار اللي عايزه.
 
 ## "Factory Reset"
-1. بيمسح userdata بس عن طريق Firehose.
-2. نفس الشرط: لازم Firehose يكون شغال الأول.
+لعمل Factory Reset للجهاز.
+لازم تحدد اللودر الأول، بالخطوات دي:
+1. ادخل الجهاز في EDL (9008) بالكابل المعدل.
+2. افتح تبويب Read GPT.
+3. في اختيار اللودر: لو جهازك X216B اختار "Built-in X216B" (مش محتاج تختار أي ملف).
+4. لو جهازك غير X216B اختار "Manual" واختار ملف اللودر (.elf أو .mbn) المناسب لجهازك.
+5. اضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
+6. ارجع للتبويب اللي كنت فيه واضغط الزرار اللي عايزه.
 """.trimIndent()
     ),
     ExplainSection(
@@ -3119,14 +3122,10 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 بيبعت الجهاز لـ Download Mode وهو شغال عادي بالأندرويد، عن طريق أوامر AT، من غير كومبينيشن أزرار.
 
 ## "Format"
-1. اختار ملف userdata.
-2. التطبيق بيفلشه في Download Mode بس، وبعدها الجهاز بيعمل reboot لوحده.
-! الفورمات بيمسح كل البيانات لكنه مش بيشيل قفل FRP ولا حساب سامسونج.
+بتختاره والجهاز في Download Mode، وبعد ما يخلص الجهاز بيعمل reboot لوحده.
 
 ## "Restore Storage"
-1. بتشتغل والجهاز شغال عادي (مش في Download Mode) في وضع MTP، عن طريق منفذ المودم (AT).
-2. بتعمل فورمات حقيقي وبترجّع مساحة userdata لحجمها الكامل (لو الفورمات اللي فات كتب صورة صغيرة).
-3. بعدها الجهاز بيعمل reboot لوحده.
+بتضغطه والجهاز شغال عادي (مش في Download Mode) بعد زرار "Format". بعده الجهاز بيعمل reboot لوحده.
 
 ## "Remove Knox"
 زي X216B بالظبط، ومحتاج ADB شغال (أندرويد عادي + USB Debugging).
@@ -3145,13 +3144,10 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 لو الاتصال في BROM اتعلّق أو مش بيرد، بيعيد فتح الاتصال ويحاول الـ handshake تاني من غير ما يغيّر وضع الجهاز.
 
 ## "Exit BROM"
-بيطلّع الجهاز من BROM بإعادة تشغيل عادية، ومش بيمسح ولا بيكتب حاجة.
+بيطلّع الجهاز من BROM بإعادة تشغيل عادية.
 
 ## "Format + FRP"
-1. الأول ادخل BROM بزرار "Force BROM".
-2. التطبيق يرفع FDL1 ثم FDL2.
-3. بيمسح userdata و frp و persist.
-4. بعدها بيعيد تشغيل الجهاز.
+بتضغطه بعد ما الجهاز يدخل BROM (بزرار "Force BROM"). بعد ما يخلص الجهاز بيعيد التشغيل.
 
 ## "T509 Remove Knox"
 عن طريق ADB، ومحتاج أندرويد عادي + USB Debugging.
@@ -3173,22 +3169,15 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 بيقرا هوية الشريحة. بيشتغل أول ما الجهاز يبقى في EDL (9008)، من غير ما ترفع اللودر.
 
 ## "Upload Loader + Read GPT"
-بيرفع اللودر (Firehose) ويقرا جدول الـ partitions في خطوة واحدة. ده أول زرار تضغطه بعد دخول EDL.
+بيشغّل اللودر اللي حددته ويقرا جدول الـ partitions. ده أول زرار تضغطه بعد دخول EDL وبعد ما تحدد اللودر (Built-in لو X216B، أو Manual لو غيره).
 
 ## "Read GPT"
-بيعيد قراءة جدول الـ partitions بس، بعد ما Firehose يكون شغال (مفيش داعي ترفع اللودر تاني).
-
-## "Test eMMC Write"
-بيشخّص مشكلة "المسح بينجح من غير تأثير" أو "الكتابة بتعلّق" على eMMC.
-1. بيجرب أكتر من طريقة كتابة (أحجام مختلفة، مع ZLP وبدونه) على سيكتور تجريبي واحد.
-2. في الآخر بيرجّع السيكتور زي ما كان.
-3. بيقولك السبب: اللودر شغال، أو الشريحة محمية ضد الكتابة.
+بيعيد قراءة جدول الـ partitions بس، بعد ما تكون ضغطت "Upload Loader + Read GPT" مرة (مفيش داعي تعيدها).
 
 ## جدول الـ partitions
 • Backup: يحفظ نسخة من الـ partition كملف.
 • Flash: يكتب ملف على الـ partition.
 • Erase: يمسح الـ partition.
-• فوق الجدول تقدر تختار كل الـ partitions وتمسحهم مرة واحدة.
 """.trimIndent()
     ),
     ExplainSection(
@@ -3203,7 +3192,7 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 
 ## الخطوات
 1. ادخل EDL (اقرا قسم "EDL" فوق).
-2. في تبويب Read GPT اضغط "Upload Loader + Read GPT" عشان Firehose يشتغل.
+2. في تبويب Read GPT حدد اللودر: "Built-in X216B" لو X216B، أو "Manual" واختار الملف لو غيره، وبعدها اضغط "Upload Loader + Read GPT".
 3. ارجع لتبويب XML Flasher واختار RAWPROGRAM XML.
 4. اختار PATCH XML لو الفيرموير فيه واحد.
 5. اختار FIRMWARE FOLDER.
@@ -3236,7 +3225,7 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 • "Open Browser": بيخلي الجهاز يفتح رابط في المتصفح مباشرة.
 • "Download Mode": يبعت الجهاز لوضع التحميل.
 • "Reboot": إعادة تشغيل عادية.
-• "FORMAT MTP": فورمات كامل (زي Restore Storage). كل بيانات المستخدم بتتمسح.
+• "FORMAT MTP": نفس وظيفة "Restore Storage" في تبويب T505N، بس من هنا.
 • "Change Serial": بيغيّر رقم السيريال (11 حرف/رقم) عن طريق أوامر AT في أجهزة سامسونج.
 
 ## قسم ADB (لازم أندرويد عادي + USB Debugging شغال)
@@ -3252,58 +3241,55 @@ private val EXPLAIN_WORKFLOWS: List<ExplainSection> = listOf(
     ExplainSection(
         title = "خطوات كاملة: X216B من الأول للآخر",
         body = """
-## المرحلة 1: الدخول في EDL ومسح الجهاز
-1. ادخل الجهاز في EDL بالكابل المعدل (اتبع قسم "EDL" فوق).
-2. افتح تبويب X216B واضغط "Wipe & Write · Format + FRP + MDM".
-3. استنى لحد ما العملية تخلص من غير ما تفصل الكابل.
-4. افصل الكابل وسيب الجهاز يقلع. أول إقلاع بياخد دقايق وممكن يعمل reboot أكتر من مرة.
+## المرحلة 1: التجهيز والدخول في EDL
+1. لو في شريحة (خط) جوه التابلت، شيلها قبل ما تبدأ.
+2. ادخل الجهاز في EDL بالكابل المعدل (اتبع قسم "EDL" فوق).
+3. افتح تبويب X216B واضغط "Wipe & Write · Format + FRP + MDM".
+4. استنى لحد ما العملية تخلص من غير ما تفصل الكابل.
+5. افصل الكابل وسيب الجهاز يقلع. أول إقلاع بياخد دقايق وممكن يعمل reboot أكتر من مرة.
 
-## المرحلة 2: الإعداد الأولي
-5. كمّل الإعداد الأولي (اللغة وغيره) لحد خطوة الواي-فاي.
-6. وصّل الجهاز بشبكة واي-فاي وكمّل لحد الشاشة الرئيسية.
-7. من الإعدادات دوّر على "Auto Blocker" (موجودة في إعدادات Samsung الحديثة وبتمنع أوامر USB) واقفلها Off.
+## المرحلة 2: الإعداد الأولي (من غير واي-فاي)
+6. كمّل الإعداد الأولي (اللغة وغيره).
+7. لما توصل لشاشة الواي-فاي، متوصلش بأي شبكة، واختار تخطي (Skip) وكمّل لحد الشاشة الرئيسية.
+8. من الإعدادات دوّر على "Auto Blocker" (موجودة في إعدادات Samsung الحديثة وبتمنع أوامر USB) واقفلها Off.
 
 ## المرحلة 3: تفعيل USB Debugging
-8. روح Settings > About tablet > Software information.
-9. دوس على "Build number" 7 مرات ورا بعض لحد ما تظهر رسالة إنك بقيت مطوّر (developer).
-10. ارجع لـ Settings وافتح "Developer options" (تحت System أو في آخر القائمة).
-11. فعّل "USB debugging".
-12. وصّل الجهاز بالموبايل اللي عليه التطبيق، وهتظهر على الجهاز رسالة "Allow USB debugging?".
-13. دوس Allow (ممكن تختار "Always allow from this computer").
+9. روح Settings > About tablet > Software information.
+10. دوس على "Build number" 7 مرات ورا بعض لحد ما تظهر رسالة إنك بقيت مطوّر (developer).
+11. ارجع لـ Settings وافتح "Developer options" (تحت System أو في آخر القائمة).
+12. فعّل "USB debugging".
+13. وصّل الجهاز بالموبايل اللي عليه التطبيق، وهتظهر على الجهاز رسالة "Allow USB debugging?".
+14. دوس Allow (ممكن تختار "Always allow from this computer").
 
 ## المرحلة 4: إزالة Knox
-14. ارجع لتبويب X216B واضغط "X216B Remove KNOX".
+15. ارجع لتبويب X216B واضغط "X216B Remove KNOX".
 """.trimIndent()
     ),
     ExplainSection(
         title = "خطوات كاملة: T505N من الأول للآخر",
         body = """
-## المرحلة 1: فورمات
+## المرحلة 1: Format
 1. ادخل Samsung Download Mode بواحدة من الطريقتين:
    • لو الجهاز شغال عادي: اضغط "MTP Download" في التطبيق.
    • لو مقفول: اضغط Volume Up + Volume Down مع بعض ووصّل الكابل، وبعدها Volume Up للتأكيد لو ظهرت رسالة تحذير.
-2. في تبويب T505N اضغط "Format" واختار ملف userdata.
-3. التطبيق هيفلشه ويعمل reboot لوحده.
-4. سيب الجهاز يقلع عادي (مش لازم تكمل الإعداد دلوقتي).
+2. في تبويب T505N اضغط "Format" واختار الملف المطلوب.
+3. استنى لحد ما الجهاز يعمل reboot لوحده، وسيبه يقلع عادي من غير ما تكمل أي إعداد.
 
-## المرحلة 2: استرجاع المساحة
-5. ارجع لتبويب T505N واضغط "Restore Storage".
-6. استنى لحد ما الجهاز يعمل reboot تاني لوحده.
+## المرحلة 2: Restore Storage
+4. ارجع لتبويب T505N واضغط "Restore Storage".
+5. استنى لحد ما الجهاز يعمل reboot تاني لوحده.
 
-## المرحلة 3: الإعداد الأولي
-7. كمّل الإعداد (Setup Wizard) لحد خطوة الواي-فاي.
-8. في شاشة الواي-فاي دوس على خيار مسح QR Code (Scan QR).
-9. وجّه كاميرا الجهاز على كود QR الخاص بشبكتك (من الراوتر أو من تطبيق على موبايل تاني) وهيتوصل من غير كتابة الباسورد.
-10. كمّل باقي الخطوات (تخطي حساب جوجل لو مطلوب) لحد الشاشة الرئيسية.
+## المرحلة 3: تفعيل ADB بالـ QR (من غير إعداد الجهاز)
+6. لما الجهاز يقلع، متكملش الإعداد الأولي.
+7. دوس كذه مرة ورا بعض على الشاشة في أي مكان فاضي، هتفتح الكاميرا.
+8. اعمل Scan لـ QR Code بتاع Alliance Shield (أو أي QR بيفعّل ADB).
+9. الجهاز هيتوصل بالواي-فاي ويفعّل ADB.
+10. لو ADB متفعلش، فعّله يدوي: Settings > About tablet > Software information، دوس على "Build number" 7 مرات، وبعدين Settings > Developer options وفعّل "USB debugging".
 
-## المرحلة 4: تفعيل USB Debugging
-11. روح Settings > About tablet > Software information.
-12. دوس على "Build number" 7 مرات.
-13. ارجع لـ Settings > Developer options وفعّل "USB debugging".
-14. وصّل الجهاز بالموبايل اللي عليه التطبيق ووافق على "Allow USB debugging?".
-
-## المرحلة 5: إزالة Knox
-15. في تبويب T505N اضغط "Remove Knox".
+## المرحلة 4: إزالة Knox
+11. وصّل الجهاز بالموبايل اللي عليه التطبيق، ووافق على رسالة "Allow USB debugging?".
+12. كمّل باقي الخطوات لحد ما توصل للشاشة الرئيسية لو لسه فيه إعداد.
+13. في تبويب T505N اضغط "Remove Knox".
 """.trimIndent()
     ),
     ExplainSection(
@@ -3348,15 +3334,8 @@ private val EXPLAIN_QA: List<ExplainQA> = listOf(
 """.trimIndent()
     ),
     ExplainQA(
-        "المسح (Erase) بينجح بس من غير تأثير، والكتابة بتعلّق؟",
-        """
-استخدم "Test eMMC Write" في تبويب Read GPT، هيشخّص السبب (مشكلة في اللودر، أو الشريحة محمية ضد الكتابة).
-لو جرّبت أكتر من لودر .elf في وضع Manual والمشكلة باقية، يبقى الأرجح إن طريقة الكتابة اللي التطبيق بيستخدمها مش متوافقة مع اللودر ده بالذات.
-""".trimIndent()
-    ),
-    ExplainQA(
         "إيه الفرق بين FORMAT MTP و Restore Storage؟",
-        "نفس الفكرة بالظبط: فورمات كامل عن طريق منفذ المودم والجهاز في وضع MTP. الاتنين في مكانين مختلفين في التطبيق (تبويب MTP / ADB وتبويب T505N) ومفيش فرق في الوظيفة.".trimIndent()
+        "نفس الوظيفة بالظبط. الاتنين في مكانين مختلفين في التطبيق (تبويب MTP / ADB وتبويب T505N).".trimIndent()
     ),
     ExplainQA(
         "مفيش Developer Options في الإعدادات؟",
