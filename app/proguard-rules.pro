@@ -7,6 +7,13 @@
 -keep class androidx.compose.** { *; }
 -dontwarn org.conscrypt.**
 
+# --- Tink (pulled in by androidx.security:security-crypto) references
+# annotation classes (errorprone, javax.annotation) that are not shipped
+# in the APK. Safe to ignore: they are compile-time-only annotations. ---
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.annotation.**
+-dontwarn javax.annotation.concurrent.**
+
 # --- Everything else: obfuscate as aggressively as R8 allows ---
 -allowaccessmodification
 -repackageclasses ''
