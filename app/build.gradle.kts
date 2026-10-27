@@ -16,9 +16,21 @@ android {
     }
 
     buildTypes {
-        release {
-            isMinifyEnabled = false
+        debug {
+            buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
+            buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
         }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
+            buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+        }
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
     }
 
     // Keep firmware assets uncompressed in the APK: this lets AssetFileDescriptor
@@ -56,6 +68,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
     implementation("androidx.activity:activity-compose:1.9.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")

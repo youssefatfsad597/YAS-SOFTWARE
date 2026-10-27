@@ -9,6 +9,8 @@ import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.*
+import com.edl.flasher.auth.AuthGate
+import com.edl.flasher.auth.LicenseService
 import com.edl.flasher.protocol.PartitionEntry
 import com.edl.flasher.ui.EdlMainScreen
 import com.edl.flasher.ui.EdlViewModel
@@ -16,10 +18,12 @@ import com.edl.flasher.ui.EdlViewModel
 class MainActivity : ComponentActivity() {
 
     private val viewModel: EdlViewModel by viewModels()
+    private lateinit var licenseService: LicenseService
+    @Volatile private var licenseAuthorized = false
 
     override fun onResume() {
         super.onResume()
-        viewModel.autoConnect()
+        if (licenseAuthorized) viewModel.autoConnect()
     }
 
     override fun onNewIntent(intent: android.content.Intent) {
@@ -27,14 +31,19 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         // USB_DEVICE_ATTACHED delivered while the app is open: permission may already be
         // granted by the system, so just rescan instead of asking again.
-        viewModel.autoConnect()
+        if (licenseAuthorized) viewModel.autoConnect()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        licenseService = LicenseService(applicationContext)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
+                AuthGate(service = licenseService, onAuthorizationChanged = { allowed ->
+                    licenseAuthorized = allowed
+                    if (allowed) viewModel.autoConnect()
+                }) {
                 val state by viewModel.uiState.collectAsState()
                 var pendingPartition by remember { mutableStateOf<PartitionEntry?>(null) }
 
@@ -185,6 +194,7 @@ class MainActivity : ComponentActivity() {
                     onChangeSerial = viewModel::changeSamsungSerial,
                     onShowInfoPopup = viewModel::showPhoneInfoPopup
                 )
+                }
             }
         }
     }
