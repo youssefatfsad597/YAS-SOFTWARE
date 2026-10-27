@@ -1,0 +1,70 @@
+name: Build Signed Release APK
+
+# Needs these repo secrets set once under
+# Settings -> Secrets and variables -> Actions -> New repository secret:
+#   KEYSTORE_BASE64     the base64 printed by generate-keystore.yml's summary
+#   KEYSTORE_PASSWORD    the store password you chose there
+#   KEY_ALIAS            the alias you chose there (e.g. yas_key)
+#   KEY_PASSWORD          the key password you chose there
+#   SUPABASE_URL          your project's Supabase URL
+#   SUPABASE_ANON_KEY     your project's Supabase publishable/anon key
+#   RELEASE_CERT_SHA256   the SHA-256 fingerprint from generate-keystore.yml's summary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Copy Embedded X216B Firmware Assets From Repository
+        run: |
+          set -e
+          mkdir -p app/src/main/assets/x216b
+          cp firmware/x216b/* app/src/main/assets/x216b/ 2>/dev/null || true
+
+      - name: Copy Embedded T509 / T509N Firmware Assets From Repository
+        run: |
+          set -e
+          for VARIANT in t509 t509n; do
+            mkdir -p "app/src/main/assets/$VARIANT"
+            cp firmware/$VARIANT/* app/src/main/assets/$VARIANT/ 2>/dev/null || true
+          done
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/yas-release.keystore
+
+      - name: Build signed release APK
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PSUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            -PSUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            -PRELEASE_CERT_SHA256="${{ secrets.RELEASE_CERT_SHA256 }}" \
+            -PKEYSTORE_FILE="yas-release.keystore" \
+            -PKEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -PKEY_ALIAS="${{ secrets.KEY_ALIAS }}" \
+            -PKEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
+
+      - name: Remove keystore copy from workspace
+        if: always()
+        run: rm -f app/yas-release.keystore
+
+      - name: Upload Signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAS-SOFTWARE-release-signed
+          path: app/build/outputs/apk/release/app-release.apk
