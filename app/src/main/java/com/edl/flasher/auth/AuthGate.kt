@@ -9,6 +9,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
@@ -17,6 +18,7 @@ import java.util.Locale
 
 @Composable
 fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit, content: @Composable () -> Unit) {
+    val context = LocalContext.current
     var authorized by remember { mutableStateOf(false) }
     var checking by remember { mutableStateOf(true) }
     var registerMode by remember { mutableStateOf(false) }
@@ -24,9 +26,16 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     var password by remember { mutableStateOf("") }
     var message by remember { mutableStateOf("") }
     var license by remember { mutableStateOf<LicenseService.License?>(null) }
+    var tamperBlocked by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
     fun verify() {
+        // Refuse to run against a re-signed/repackaged build or a mismatched applicationId.
+        if (!TamperGuard.verifySigningCertificate(context) || !TamperGuard.applicationIdMatches(context)) {
+            tamperBlocked = true
+            checking = false
+            return
+        }
         checking = true
         scope.launch {
             val result = service.authorize()
@@ -50,6 +59,19 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
             }
         }
     }
+    if (tamperBlocked) {
+        MaterialTheme(colorScheme = darkColorScheme()) {
+            Box(Modifier.fillMaxSize().padding(20.dp), contentAlignment = Alignment.Center) {
+                Text(
+                    "تعذر التحقق: هذه النسخة من التطبيق معدّلة أو موقّعة بشكل غير صحيح. يرجى تثبيت النسخة الرسمية من YAS SOFTWARE.",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+            }
+        }
+        return
+    }
+
     if (authorized) {
         Box(Modifier.fillMaxSize()) {
             content()
