@@ -15,17 +15,37 @@ android {
         versionName = "4.0-YAS-X216B-Odin"
     }
 
+    val hasReleaseSigning = project.hasProperty("KEYSTORE_FILE")
+    if (hasReleaseSigning) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(project.property("KEYSTORE_FILE") as String)
+                storePassword = project.property("KEYSTORE_PASSWORD") as String
+                keyAlias = project.property("KEY_ALIAS") as String
+                keyPassword = project.property("KEY_PASSWORD") as String
+            }
+        }
+    }
+
     buildTypes {
         debug {
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            // Left blank on purpose: the tamper check is skipped for debug builds.
+            buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
         }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            // Fill RELEASE_CERT_SHA256 in gradle.properties with your release keystore's
+            // SHA-256 fingerprint once you have one, so TamperGuard can reject re-signed APKs.
+            buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     buildFeatures {
