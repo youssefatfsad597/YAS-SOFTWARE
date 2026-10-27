@@ -1,5 +1,7 @@
 package com.edl.flasher.auth
 
+import com.edl.flasher.BuildConfig
+
 import android.content.Context
 import android.provider.Settings
 import androidx.security.crypto.EncryptedSharedPreferences
