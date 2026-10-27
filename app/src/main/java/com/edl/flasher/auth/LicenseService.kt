@@ -25,11 +25,25 @@ class LicenseService(context: Context) {
     private val baseUrl = BuildConfig.SUPABASE_URL.trimEnd('/')
     private val anonKey = BuildConfig.SUPABASE_ANON_KEY
 
-    data class License(val active: Boolean, val status: String, val expiresAt: String?, val deviceLimit: Int, val deviceCount: Int, val message: String = "")
+    data class License(val active: Boolean, val status: String, val expiresAt: String?, val message: String = "")
 
     fun hasSession(): Boolean = !prefs.getString("access_token", null).isNullOrBlank()
-    fun clearSession() { prefs.edit().remove("access_token").remove("refresh_token").remove("email").apply() }
+
+    /** Ends the local session only. Called both from an explicit sign-out and whenever
+     *  the app itself is closed, so closing the app always "counts" as a logout and the
+     *  next launch requires signing in again. Saved remember-me credentials are untouched. */
+    fun clearSession() { prefs.edit().remove("access_token").remove("refresh_token").apply() }
+
     fun email(): String = prefs.getString("email", "") ?: ""
+
+    fun rememberEnabled(): Boolean = prefs.getBoolean("remember_me", false)
+    fun savedPassword(): String = if (rememberEnabled()) prefs.getString("saved_password", "") ?: "" else ""
+
+    fun saveCredentials(email: String, password: String, remember: Boolean) {
+        val editor = prefs.edit().putString("email", email.trim()).putBoolean("remember_me", remember)
+        if (remember) editor.putString("saved_password", password) else editor.remove("saved_password")
+        editor.apply()
+    }
 
     private fun deviceId(): String {
         val existing = prefs.getString("device_id", null)
@@ -63,7 +77,7 @@ class LicenseService(context: Context) {
     }
 
     suspend fun authorize(): License = withContext(Dispatchers.IO) {
-        if (!hasSession()) return@withContext License(false, "signed_out", null, 0, 0, "سجّل الدخول أولًا.")
+        if (!hasSession()) return@withContext License(false, "signed_out", null, "سجّل الدخول أولًا.")
         try {
             val body = JSONObject().put("p_device_id", deviceId())
             val result = try {
@@ -79,12 +93,10 @@ class LicenseService(context: Context) {
                 active = result.optBoolean("active", false),
                 status = result.optString("status", "pending"),
                 expiresAt = result.optString("expires_at").takeIf { it.isNotBlank() && it != "null" },
-                deviceLimit = result.optInt("device_limit", 0),
-                deviceCount = result.optInt("device_count", 0),
                 message = result.optString("message", "")
             )
         } catch (e: Exception) {
-            License(false, "offline", null, 0, 0, e.message ?: "تعذر التحقق من الترخيص. تحقق من الإنترنت وإعدادات Supabase.")
+            License(false, "offline", null, e.message ?: "تعذر التحقق من الترخيص. تحقق من الإنترنت وإعدادات Supabase.")
         }
     }
 
