@@ -4,32 +4,238 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>YAS SOFTWARE — إدارة التراخيص</title>
 <style>
-:root{color-scheme:dark;font-family:system-ui,Segoe UI,Tahoma,sans-serif}body{margin:0;background:#0b1020;color:#eef2ff}.wrap{max-width:1150px;margin:auto;padding:24px}.card{background:#151d32;border:1px solid #2a3653;border-radius:16px;padding:18px;margin:14px 0}h1{margin-top:0}input,select,button{font:inherit;border-radius:9px;border:1px solid #394969;padding:10px;background:#0e1629;color:inherit}input{max-width:100%;box-sizing:border-box}button{cursor:pointer;background:#3659cc;border:0;font-weight:650}button.secondary{background:#303c56}button.danger{background:#9d3545}.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.row>*{flex:1;min-width:140px}.hidden{display:none!important}.muted{color:#aab7d3}.msg{white-space:pre-wrap;margin:10px 0}.tablewrap{overflow:auto}table{width:100%;border-collapse:collapse;min-width:850px}th,td{text-align:right;padding:10px;border-bottom:1px solid #2a3653;vertical-align:top}small{display:block;color:#aab7d3;overflow-wrap:anywhere}.device{border:1px solid #34415f;border-radius:9px;padding:8px;margin:6px 0}.tag{padding:3px 8px;border-radius:7px;background:#263858}</style>
+:root{color-scheme:dark;font-family:system-ui,Segoe UI,Tahoma,sans-serif}
+body{margin:0;background:#0b1020;color:#eef2ff}
+.wrap{max-width:1250px;margin:auto;padding:24px}
+.card{background:#151d32;border:1px solid #2a3653;border-radius:16px;padding:18px;margin:14px 0}
+h1{margin-top:0}
+input,select,button{font:inherit;border-radius:9px;border:1px solid #394969;padding:10px;background:#0e1629;color:inherit}
+input{max-width:100%;box-sizing:border-box}
+button{cursor:pointer;background:#3659cc;border:0;font-weight:650}
+button.secondary{background:#303c56}
+button.danger{background:#9d3545}
+button.ghost{background:transparent;border:1px solid #394969;font-weight:500;padding:6px 9px}
+button.chip{background:#20305a;font-weight:600;padding:6px 10px;border-radius:999px;font-size:13px}
+button.chip:hover{background:#2c4078}
+button.chip.active{background:#1f7a4c}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.row>*{flex:1;min-width:140px}
+.hidden{display:none!important}
+.muted{color:#aab7d3}
+.msg{white-space:pre-wrap;margin:10px 0}
+.tablewrap{overflow:auto}
+table{width:100%;border-collapse:collapse;min-width:950px}
+th,td{text-align:right;padding:10px;border-bottom:1px solid #2a3653;vertical-align:top}
+small{display:block;color:#aab7d3;overflow-wrap:anywhere}
+.device{border:1px solid #34415f;border-radius:9px;padding:8px;margin:6px 0}
+.tag{padding:3px 8px;border-radius:7px;background:#263858;display:inline-block}
+.tag.active{background:#1f4a32;color:#8ff0b8}
+.tag.pending{background:#4a3c1f;color:#f0d08f}
+.tag.suspended,.tag.expired{background:#4a1f26;color:#f08f9b}
+.quick{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
+.search-wrap{display:flex;gap:10px;align-items:center;margin:10px 0}
+.search-wrap input{flex:1}
+.count-badge{background:#263858;border-radius:999px;padding:4px 12px;font-size:13px;white-space:nowrap}
+.copybtn{background:none;border:none;color:#8aa0e0;cursor:pointer;font-size:12px;padding:2px 4px}
+</style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body><main class="wrap">
 <h1>YAS SOFTWARE <span class="muted">/ إدارة التراخيص</span></h1>
 <p class="muted">لوحة خاصة بالمدير. لا تضع مفتاح service_role هنا؛ استخدم Project URL ومفتاح anon فقط.</p>
-<section id="config" class="card"><h2>إعداد الاتصال</h2><div class="row"><input id="url" placeholder="https://PROJECT.supabase.co"><input id="key" placeholder="Supabase anon / publishable key"></div><p><button id="connect">الاتصال</button> <button class="secondary" id="saveConfig">حفظ الإعداد على هذا المتصفح</button></p><small>مفتاح anon عام بطبيعته؛ أمان البيانات يعتمد على RLS وصلاحيات SQL. لا تحفظ كلمة مرور حسابك في هذا الملف.</small></section>
-<section id="login" class="card hidden"><h2>دخول المدير</h2><div class="row"><input id="email" type="email" placeholder="البريد الإلكتروني"><input id="password" type="password" placeholder="كلمة المرور"></div><p><button id="signIn">تسجيل الدخول</button></p></section>
-<section id="panel" class="hidden"><div class="card"><div class="row"><div><h2>الحسابات والتراخيص</h2><p class="muted">التفعيل الافتراضي للحسابات الجديدة هو pending.</p></div><div style="text-align:left"><button class="secondary" id="reload">تحديث</button> <button class="danger" id="logout">خروج</button></div></div><div id="message" class="msg"></div><div class="tablewrap"><table><thead><tr><th>الحساب</th><th>الحالة</th><th>انتهاء التفعيل</th><th>حد الأجهزة</th><th>الأجهزة</th><th>إجراءات</th></tr></thead><tbody id="users"></tbody></table></div></div>
-<div class="card"><h2>تفعيل / تعديل حساب</h2><p class="muted">أدخل User ID من الجدول. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p><div class="row"><input id="userId" placeholder="User UUID"><select id="status"><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="suspended">موقوف</option></select><input id="expiry" type="datetime-local"><input id="limit" type="number" min="1" max="100" value="3" placeholder="حد الأجهزة"></div><p><button id="apply">حفظ الترخيص</button></p></div></section>
+
+<section id="config" class="card">
+  <h2>إعداد الاتصال</h2>
+  <div class="row"><input id="url" placeholder="https://PROJECT.supabase.co"><input id="key" placeholder="Supabase anon / publishable key"></div>
+  <p><button id="connect">الاتصال</button> <button class="secondary" id="saveConfig">حفظ الإعداد على هذا المتصفح</button></p>
+  <small>مفتاح anon عام بطبيعته؛ أمان البيانات يعتمد على RLS وصلاحيات SQL. لا تحفظ كلمة مرور حسابك في هذا الملف.</small>
+</section>
+
+<section id="login" class="card hidden">
+  <h2>دخول المدير</h2>
+  <div class="row"><input id="email" type="email" placeholder="البريد الإلكتروني"><input id="password" type="password" placeholder="كلمة المرور"></div>
+  <p><button id="signIn">تسجيل الدخول</button></p>
+</section>
+
+<section id="panel" class="hidden">
+  <div class="card">
+    <div class="row">
+      <div><h2>الحسابات والتراخيص</h2><p class="muted">التفعيل الافتراضي للحسابات الجديدة هو pending. الأزرار السريعة أسفل كل حساب تطبّق فورًا دون الحاجة للنزول للنموذج.</p></div>
+      <div style="text-align:left"><button class="secondary" id="reload">تحديث</button> <button class="danger" id="logout">خروج</button></div>
+    </div>
+    <div class="search-wrap">
+      <input id="search" placeholder="بحث بالبريد أو User ID أو الحالة...">
+      <select id="filterStatus"><option value="">كل الحالات</option><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="expired">منتهي</option><option value="suspended">موقوف</option></select>
+      <span class="count-badge" id="count">0 حساب</span>
+    </div>
+    <div id="message" class="msg"></div>
+    <div class="tablewrap"><table>
+      <thead><tr><th>الحساب</th><th>الحالة</th><th>انتهاء التفعيل</th><th>حد الأجهزة</th><th>الأجهزة</th><th>إجراءات سريعة</th></tr></thead>
+      <tbody id="users"></tbody>
+    </table></div>
+  </div>
+
+  <div class="card">
+    <h2>تفعيل / تعديل حساب (يدوي)</h2>
+    <p class="muted">أدخل User ID من الجدول، أو اضغط "تعديل" في صف الحساب لتعبئته تلقائيًا. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p>
+    <div class="row">
+      <input id="userId" placeholder="User UUID">
+      <select id="status"><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="suspended">موقوف</option></select>
+      <input id="expiry" type="datetime-local">
+      <input id="limit" type="number" min="1" max="100" value="3" placeholder="حد الأجهزة">
+    </div>
+    <p class="muted">تمديد سريع من الآن (يملأ حقل الانتهاء تلقائيًا ويضبط الحالة كـ مفعّل):</p>
+    <div class="quick" id="quickDurations">
+      <button class="chip" data-mins="60">+ ساعة</button>
+      <button class="chip" data-mins="360">+ 6 ساعات</button>
+      <button class="chip" data-mins="720">+ 12 ساعة</button>
+      <button class="chip" data-mins="1440">+ يوم</button>
+      <button class="chip" data-mins="4320">+ 3 أيام</button>
+      <button class="chip" data-mins="10080">+ أسبوع</button>
+      <button class="chip" data-mins="43200">+ شهر</button>
+      <button class="chip" data-mins="129600">+ 3 أشهر</button>
+    </div>
+    <p><button id="apply">حفظ الترخيص</button></p>
+  </div>
+</section>
 </main><script>
-let sb=null;
-const $=id=>document.getElementById(id);const say=t=>{$('message').textContent=t||''};
-function init(){const u=localStorage.getItem('yas_supabase_url')||'https://awsiewfvfdpcwugxvkfu.supabase.co';const k=localStorage.getItem('yas_supabase_anon')||'sb_publishable_MOJvEpcs4ZSf-vvATkay1w_ZOvbTUH-';$('url').value=u;$('key').value=k;if(u&&k)connect(false)}
-function connect(show=true){try{const u=$('url').value.trim(),k=$('key').value.trim();if(!u||!k)throw Error('أدخل URL ومفتاح anon.');sb=window.supabase.createClient(u,k,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});$('login').classList.remove('hidden');if(show)say('تم إعداد الاتصال. سجّل الدخول بحساب المدير.');return true}catch(e){alert(e.message);return false}}
-$('connect').onclick=()=>{if(connect()){} };$('saveConfig').onclick=()=>{localStorage.setItem('yas_supabase_url',$('url').value.trim());localStorage.setItem('yas_supabase_anon',$('key').value.trim());alert('تم حفظ URL ومفتاح anon محليًا في هذا المتصفح فقط.')};
+let sb=null, allUsers=[];
+const $=id=>document.getElementById(id);
+const say=t=>{$('message').textContent=t||''};
+
+function init(){
+  const u=localStorage.getItem('yas_supabase_url')||'https://awsiewfvfdpcwugxvkfu.supabase.co';
+  const k=localStorage.getItem('yas_supabase_anon')||'sb_publishable_MOJvEpcs4ZSf-vvATkay1w_ZOvbTUH-';
+  $('url').value=u;$('key').value=k;if(u&&k)connect(false)
+}
+function connect(show=true){
+  try{
+    const u=$('url').value.trim(),k=$('key').value.trim();
+    if(!u||!k)throw Error('أدخل URL ومفتاح anon.');
+    sb=window.supabase.createClient(u,k,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+    $('login').classList.remove('hidden');
+    if(show)say('تم إعداد الاتصال. سجّل الدخول بحساب المدير.');
+    return true
+  }catch(e){alert(e.message);return false}
+}
+$('connect').onclick=()=>{connect()};
+$('saveConfig').onclick=()=>{localStorage.setItem('yas_supabase_url',$('url').value.trim());localStorage.setItem('yas_supabase_anon',$('key').value.trim());alert('تم حفظ URL ومفتاح anon محليًا في هذا المتصفح فقط.')};
 $('signIn').onclick=async()=>{if(!sb&&!connect())return;const {data,error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error){alert(error.message);return}await loadUsers()};
-$('reload').onclick=loadUsers;$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
+$('reload').onclick=loadUsers;
+$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
+
 function dateInput(v){if(!v)return '';const d=new Date(v);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16)}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function rpc(name,args={}){const {data,error}=await sb.rpc(name,args);if(error)throw error;return data}
-async function loadUsers(){if(!sb)return;try{say('جارٍ تحميل الحسابات...');const users=await rpc('admin_list_users');$('users').innerHTML='';for(const u of users||[]){const tr=document.createElement('tr');const devices=(u.devices||[]).map(d=>`<div class="device"><b>${esc(d.label)}</b><small>${esc(d.device_id)}</small><small>آخر ظهور: ${esc(d.last_seen_at||'—')}</small>${d.revoked_at?'<span class="tag">ملغى</span>':`<button class="danger" data-revoke="${esc(d.id)}">إلغاء الجهاز</button>`}</div>`).join('')||'—';tr.innerHTML=`<td><b>${esc(u.email)}</b><small>${esc(u.user_id)}</small><small>إنشاء: ${esc(u.created_at)}</small></td><td><span class="tag">${esc(u.status)}</span></td><td>${esc(u.expires_at||'—')}</td><td>${esc(u.device_limit)}</td><td>${esc(u.device_count)}<div>${devices}</div></td><td><button data-edit="${esc(u.user_id)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}" data-limit="${esc(u.device_limit)}">تعديل</button></td>`;$('users').appendChild(tr)}
-$('users').querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{$('userId').value=b.dataset.edit;$('status').value=['active','pending','suspended'].includes(b.dataset.status)?b.dataset.status:'pending';$('expiry').value=dateInput(b.dataset.expiry);$('limit').value=b.dataset.limit;window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'})});
-$('users').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{if(!confirm('إلغاء هذا الجهاز؟'))return;try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});await loadUsers()}catch(e){say(e.message)}});
-$('login').classList.add('hidden');$('panel').classList.remove('hidden');say(`تم تحميل ${users.length} حساب.`)
-}catch(e){say(`تعذر تحميل لوحة الإدارة: ${e.message||e}\nتأكد أن حسابك role=admin في yas_profiles وأن schema.sql نُفذ بنجاح.`);$('panel').classList.remove('hidden')}}
-$('apply').onclick=async()=>{try{const userId=$('userId').value.trim(),status=$('status').value,limit=Number($('limit').value);if(!userId)throw Error('أدخل User ID.');let expiry=null;if(status==='active'){if(!$('expiry').value)throw Error('حدد تاريخ انتهاء مستقبليًا.');expiry=new Date($('expiry').value).toISOString()}await rpc('admin_set_license',{p_user_id:userId,p_status:status,p_expires_at:expiry,p_device_limit:limit});say('تم تحديث الترخيص على الخادم.');await loadUsers()}catch(e){say(`فشل تحديث الترخيص: ${e.message||e}`)}};
+
+function statusTag(s){return `<span class="tag ${esc(s)}">${esc(s)}</span>`}
+
+function renderTable(){
+  const q=($('search').value||'').trim().toLowerCase();
+  const fs=$('filterStatus').value;
+  const filtered=allUsers.filter(u=>{
+    const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.user_id||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q);
+    const matchesS=!fs || u.status===fs;
+    return matchesQ && matchesS;
+  });
+  $('count').textContent=`${filtered.length} من ${allUsers.length} حساب`;
+  $('users').innerHTML='';
+  for(const u of filtered){
+    const tr=document.createElement('tr');
+    const devices=(u.devices||[]).map(d=>`<div class="device"><b>${esc(d.label)}</b><small>${esc(d.device_id)}</small><small>آخر ظهور: ${esc(d.last_seen_at||'—')}</small>${d.revoked_at?'<span class="tag">ملغى</span>':`<button class="danger" data-revoke="${esc(d.id)}">إلغاء الجهاز</button>`}</div>`).join('')||'—';
+    tr.innerHTML=`
+      <td><b>${esc(u.email)}</b> <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>${esc(u.user_id)} <button class="copybtn" data-copy="${esc(u.user_id)}" title="نسخ المعرّف">⧉</button></small><small>إنشاء: ${esc(u.created_at)}</small></td>
+      <td>${statusTag(u.status)}</td>
+      <td>${esc(u.expires_at||'—')}</td>
+      <td>${esc(u.device_limit)}</td>
+      <td>${esc(u.device_count)}<div>${devices}</div></td>
+      <td>
+        <div class="quick">
+          <button class="ghost" data-edit="${esc(u.user_id)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}" data-limit="${esc(u.device_limit)}">تعديل</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="1440">+يوم</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="10080">+أسبوع</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="43200">+شهر</button>
+          <button class="danger" data-suspend="${esc(u.user_id)}" data-limit="${esc(u.device_limit)}">إيقاف</button>
+        </div>
+      </td>`;
+    $('users').appendChild(tr);
+  }
+
+  $('users').querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{
+    $('userId').value=b.dataset.edit;
+    $('status').value=['active','pending','suspended'].includes(b.dataset.status)?b.dataset.status:'pending';
+    $('expiry').value=dateInput(b.dataset.expiry);
+    $('limit').value=b.dataset.limit;
+    window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
+  });
+  $('users').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('إلغاء هذا الجهاز؟'))return;
+    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});await loadUsers()}catch(e){say(e.message)}
+  });
+  $('users').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
+    navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
+  });
+  // Row-level quick extend: applies instantly without touching the manual form.
+  $('users').querySelectorAll('[data-quick-user]').forEach(b=>b.onclick=async()=>{
+    try{
+      say('جارٍ التطبيق...');
+      const mins=Number(b.dataset.quickMins);
+      const expiry=new Date(Date.now()+mins*60000).toISOString();
+      await rpc('admin_set_license',{p_user_id:b.dataset.quickUser,p_status:'active',p_expires_at:expiry,p_device_limit:Number(b.dataset.quickLimit)||3});
+      say('تم التمديد.');
+      await loadUsers();
+    }catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-suspend]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('إيقاف هذا الحساب فورًا؟'))return;
+    try{
+      await rpc('admin_set_license',{p_user_id:b.dataset.suspend,p_status:'suspended',p_expires_at:null,p_device_limit:Number(b.dataset.limit)||3});
+      say('تم إيقاف الحساب.');
+      await loadUsers();
+    }catch(e){say(`فشل: ${e.message||e}`)}
+  });
+}
+
+$('search').oninput=renderTable;
+$('filterStatus').onchange=renderTable;
+
+async function loadUsers(){
+  if(!sb)return;
+  try{
+    say('جارٍ تحميل الحسابات...');
+    allUsers=await rpc('admin_list_users')||[];
+    $('login').classList.add('hidden');$('panel').classList.remove('hidden');
+    renderTable();
+    say(`تم تحميل ${allUsers.length} حساب.`);
+  }catch(e){
+    say(`تعذر تحميل لوحة الإدارة: ${e.message||e}\nتأكد أن حسابك role=admin في yas_profiles وأن schema.sql نُفذ بنجاح.`);
+    $('panel').classList.remove('hidden');
+  }
+}
+
+// Quick-duration chips inside the manual form: fill expiry + status=active without applying yet.
+$('quickDurations').querySelectorAll('[data-mins]').forEach(b=>b.onclick=()=>{
+  $('quickDurations').querySelectorAll('[data-mins]').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  $('status').value='active';
+  const mins=Number(b.dataset.mins);
+  $('expiry').value=dateInput(new Date(Date.now()+mins*60000).toISOString());
+});
+
+$('apply').onclick=async()=>{
+  try{
+    const userId=$('userId').value.trim(),status=$('status').value,limit=Number($('limit').value);
+    if(!userId)throw Error('أدخل User ID.');
+    let expiry=null;
+    if(status==='active'){
+      if(!$('expiry').value)throw Error('حدد تاريخ انتهاء مستقبليًا أو استخدم أحد أزرار التمديد السريع.');
+      expiry=new Date($('expiry').value).toISOString();
+    }
+    await rpc('admin_set_license',{p_user_id:userId,p_status:status,p_expires_at:expiry,p_device_limit:limit});
+    say('تم تحديث الترخيص على الخادم.');
+    await loadUsers();
+  }catch(e){say(`فشل تحديث الترخيص: ${e.message||e}`)}
+};
+
 init();
 </script></body></html>
