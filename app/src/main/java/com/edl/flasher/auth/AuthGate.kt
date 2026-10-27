@@ -5,7 +5,6 @@ import androidx.compose.animation.core.*
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -82,6 +81,9 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     var license by remember { mutableStateOf<LicenseService.License?>(null) }
     var tamperBlocked by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val adminService = remember { AdminService(service) }
+    var isAdmin by remember { mutableStateOf(false) }
+    var showAdmin by remember { mutableStateOf(false) }
 
     fun verify() {
         // Refuse to run against a re-signed/repackaged build or a mismatched applicationId.
@@ -104,7 +106,8 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     LaunchedEffect(Unit) { verify() }
     LaunchedEffect(authorized) {
         onAuthorizationChanged(authorized && enteredApp)
-        if (!authorized) enteredApp = false
+        if (!authorized) { enteredApp = false; showAdmin = false; isAdmin = false }
+        if (authorized) isAdmin = adminService.isAdmin()
         while (authorized) {
             delay(60_000)
             val result = service.authorize()
@@ -133,6 +136,11 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
         return
     }
 
+    if (authorized && showAdmin) {
+        AdminScreen(service = adminService, onBack = { showAdmin = false })
+        return
+    }
+
     if (authorized && enteredApp) {
         content()
         return
@@ -141,7 +149,9 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     if (authorized && !enteredApp) {
         SubscriptionGateScreen(
             license = license,
+            isAdmin = isAdmin,
             onEnter = { enteredApp = true },
+            onOpenAdmin = { showAdmin = true },
             onSignOut = {
                 service.clearSession()
                 authorized = false
@@ -239,18 +249,19 @@ private fun GateScaffold(content: @Composable ColumnScope.() -> Unit) {
 
 @Composable
 private fun BrandHeader(subtitle: String) {
-    Box(
-        modifier = Modifier
-            .size(84.dp)
-            .clip(CircleShape)
-            .background(Brush.linearGradient(listOf(Yas.SurfaceHi, Yas.Surface)))
-            .border(1.5.dp, Brush.linearGradient(listOf(Yas.SkyText, Yas.Primary)), CircleShape),
-        contentAlignment = Alignment.Center
-    ) {
+    // The logo artwork already carries its own glow and rounded-square border, so it is
+    // shown large and unclipped — a soft halo behind it adds depth without boxing it in
+    // or cropping it the way an extra circular frame would.
+    Box(contentAlignment = Alignment.Center) {
+        Box(
+            Modifier
+                .size(136.dp)
+                .background(Brush.radialGradient(listOf(Yas.SkyText.copy(alpha = 0.30f), Color.Transparent)))
+        )
         Image(
             painter = painterResource(id = R.drawable.yas_logo),
             contentDescription = "YAS SOFTWARE",
-            modifier = Modifier.size(50.dp)
+            modifier = Modifier.size(108.dp)
         )
     }
     Spacer(Modifier.height(2.dp))
@@ -329,7 +340,13 @@ private fun remainingLabel(raw: String): String = try {
  *  see before the main program opens. There is no in-app exit button — leaving the program
  *  (back button / closing the app) is what ends the session. */
 @Composable
-private fun SubscriptionGateScreen(license: LicenseService.License?, onEnter: () -> Unit, onSignOut: () -> Unit) {
+private fun SubscriptionGateScreen(
+    license: LicenseService.License?,
+    isAdmin: Boolean,
+    onEnter: () -> Unit,
+    onOpenAdmin: () -> Unit,
+    onSignOut: () -> Unit
+) {
     GateScaffold {
         BrandHeader(subtitle = "تم التحقق من حسابك بنجاح")
         TechCard {
@@ -358,6 +375,17 @@ private fun SubscriptionGateScreen(license: LicenseService.License?, onEnter: ()
                 colors = ButtonDefaults.buttonColors(containerColor = Yas.Primary, contentColor = Color.White)
             ) {
                 Text("الدخول إلى البرنامج", fontWeight = FontWeight.Bold, fontSize = 15.sp)
+            }
+            if (isAdmin) {
+                OutlinedButton(
+                    onClick = onOpenAdmin,
+                    modifier = Modifier.fillMaxWidth().height(50.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    border = BorderStroke(1.dp, Yas.SkyText.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Yas.SkyText)
+                ) {
+                    Text("لوحة الإدارة", fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                }
             }
             TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
                 Text("تسجيل الخروج من هذا الحساب", color = Yas.Muted)

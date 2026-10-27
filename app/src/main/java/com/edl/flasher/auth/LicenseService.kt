@@ -100,6 +100,13 @@ class LicenseService(context: Context) {
         }
     }
 
+    /** Low-level escape hatch for AdminService: the same request plumbing used above,
+     *  but it never reads or writes the stored session. This matters for account
+     *  creation in particular — an admin creating accounts for other people must not
+     *  have their own session silently replaced by the new account's tokens. */
+    suspend fun raw(path: String, method: String, body: JSONObject?, authenticated: Boolean): JSONObject =
+        withContext(Dispatchers.IO) { request(path, method, body, authenticated) }
+
     private fun saveSession(result: JSONObject, email: String) {
         val access = result.optString("access_token")
         if (access.isBlank()) throw IllegalStateException(result.optString("msg", result.optString("message", "لم يرجع الخادم جلسة دخول. تأكد من تأكيد البريد.")))
