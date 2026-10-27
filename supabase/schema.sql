@@ -2,13 +2,18 @@
 -- Run in Supabase SQL Editor as project owner. Never put service_role key in the app or browser.
 create extension if not exists pgcrypto with schema extensions;
 
+-- One-time migration for projects created before the single-device policy:
+-- drop the old per-account device_limit column and the old 4-argument
+-- admin_set_license overload (its signature changed when device_limit was removed).
+alter table if exists public.yas_profiles drop column if exists device_limit;
+drop function if exists public.admin_set_license(uuid,text,timestamptz,integer);
+
 create table if not exists public.yas_profiles (
   user_id uuid primary key references auth.users(id) on delete cascade,
   email text not null,
   role text not null default 'user' check (role in ('user','admin')),
   status text not null default 'pending' check (status in ('pending','active','suspended')),
   expires_at timestamptz,
-  device_limit integer not null default 1 check (device_limit between 1 and 100),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
@@ -54,14 +59,20 @@ revoke all on public.yas_devices from anon, authenticated;
 grant select on public.yas_profiles to authenticated;
 grant select on public.yas_devices to authenticated;
 
+-- Single-device policy: only one device may hold an active session per account.
+-- Switching to a different device is allowed only after a 4-hour cool-down since
+-- the previous device's last activity, so sharing one account across devices is
+-- effectively limited to one device at a time.
 create or replace function public.authorize_device(p_device_id text)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_uid uuid := auth.uid();
   p public.yas_profiles%rowtype;
-  v_count integer;
   v_existing public.yas_devices%rowtype;
+  v_other public.yas_devices%rowtype;
   v_status text;
+  v_wait_seconds integer;
+  v_cooldown_seconds constant integer := 4 * 3600; -- 4 hours between sessions on different devices
 begin
   if v_uid is null then raise exception 'يجب تسجيل الدخول.'; end if;
   if p_device_id is null or length(p_device_id) < 8 or length(p_device_id) > 128 then raise exception 'معرّف الجهاز غير صالح.'; end if;
@@ -70,23 +81,39 @@ begin
   v_status := p.status;
   if p.status = 'active' and (p.expires_at is null or p.expires_at <= now()) then v_status := 'expired'; end if;
   if v_status <> 'active' then
-    return jsonb_build_object('active',false,'status',v_status,'expires_at',p.expires_at,'device_limit',p.device_limit,'device_count',(select count(*) from public.yas_devices d where d.user_id=v_uid and d.revoked_at is null),'message',case when v_status='pending' then 'الحساب بانتظار التفعيل من الإدارة.' when v_status='suspended' then 'تم إيقاف هذا الحساب من الإدارة.' else 'انتهت مدة التفعيل أو لم يتم تحديد تاريخ الانتهاء.' end);
+    return jsonb_build_object('active',false,'status',v_status,'expires_at',p.expires_at,'message',case when v_status='pending' then 'الحساب بانتظار التفعيل من الإدارة.' when v_status='suspended' then 'تم إيقاف هذا الحساب من الإدارة.' else 'انتهت مدة التفعيل أو لم يتم تحديد تاريخ الانتهاء.' end);
   end if;
+
   select * into v_existing from public.yas_devices where user_id=v_uid and device_id=p_device_id;
   if found and v_existing.revoked_at is not null then
-    return jsonb_build_object('active',false,'status','device_revoked','expires_at',p.expires_at,'device_limit',p.device_limit,'message','تم إلغاء تسجيل هذا الجهاز. تواصل مع الإدارة.');
+    return jsonb_build_object('active',false,'status','device_revoked','expires_at',p.expires_at,'message','تم إلغاء تسجيل هذا الجهاز. تواصل مع الإدارة.');
   end if;
-  if not found then
-    select count(*) into v_count from public.yas_devices where user_id=v_uid and revoked_at is null;
-    if v_count >= p.device_limit then
-      return jsonb_build_object('active',false,'status','device_limit','expires_at',p.expires_at,'device_limit',p.device_limit,'device_count',v_count,'message','وصل الحساب إلى الحد الأقصى للأجهزة المسجلة.');
-    end if;
-    insert into public.yas_devices(user_id,device_id) values(v_uid,p_device_id);
-  else
+
+  if found then
+    -- Same device continuing its session: no cool-down applies.
     update public.yas_devices set last_seen_at=now() where id=v_existing.id;
+    return jsonb_build_object('active',true,'status','active','expires_at',p.expires_at,'message','الترخيص ساري.');
   end if;
-  select count(*) into v_count from public.yas_devices where user_id=v_uid and revoked_at is null;
-  return jsonb_build_object('active',true,'status','active','expires_at',p.expires_at,'device_limit',p.device_limit,'device_count',v_count,'message','الترخيص ساري.');
+
+  select * into v_other from public.yas_devices where user_id=v_uid and revoked_at is null order by last_seen_at desc limit 1;
+  if found then
+    v_wait_seconds := v_cooldown_seconds - extract(epoch from (now() - v_other.last_seen_at))::integer;
+    if v_wait_seconds > 0 then
+      return jsonb_build_object(
+        'active',false,'status','device_cooldown','expires_at',p.expires_at,'wait_seconds',v_wait_seconds,
+        'message','لا يُسمح إلا بجهاز واحد في المرة الواحدة. يمكنك الدخول من جهاز آخر بعد ' ||
+          case when v_wait_seconds >= 3600
+            then (v_wait_seconds/3600)::text || ' ساعة و' || ((v_wait_seconds%3600)/60)::text || ' دقيقة'
+            else (greatest(v_wait_seconds,60)/60)::text || ' دقيقة'
+          end || '.'
+      );
+    end if;
+    -- Cool-down elapsed: release the old device and hand the session to this one.
+    update public.yas_devices set revoked_at = now() where id = v_other.id;
+  end if;
+
+  insert into public.yas_devices(user_id,device_id) values(v_uid,p_device_id);
+  return jsonb_build_object('active',true,'status','active','expires_at',p.expires_at,'message','تم تسجيل الدخول من جهاز جديد.');
 end; $$;
 
 create or replace function public.admin_list_users()
@@ -95,20 +122,18 @@ begin
   if not exists(select 1 from public.yas_profiles where user_id=auth.uid() and role='admin') then raise exception 'غير مصرح: صلاحية المدير مطلوبة.'; end if;
   return coalesce((select jsonb_agg(jsonb_build_object(
     'user_id',p.user_id,'email',p.email,'role',p.role,'status',case when p.status='active' and (p.expires_at is null or p.expires_at<=now()) then 'expired' else p.status end,
-    'expires_at',p.expires_at,'device_limit',p.device_limit,'created_at',p.created_at,
-    'device_count',(select count(*) from public.yas_devices d where d.user_id=p.user_id and d.revoked_at is null),
+    'expires_at',p.expires_at,'created_at',p.created_at,
     'devices',(select coalesce(jsonb_agg(jsonb_build_object('id',d.id,'device_id',d.device_id,'label',d.label,'first_seen_at',d.first_seen_at,'last_seen_at',d.last_seen_at,'revoked_at',d.revoked_at) order by d.last_seen_at desc),'[]'::jsonb) from public.yas_devices d where d.user_id=p.user_id)
   ) order by p.created_at desc) from public.yas_profiles p),'[]'::jsonb);
 end; $$;
 
-create or replace function public.admin_set_license(p_user_id uuid, p_status text, p_expires_at timestamptz, p_device_limit integer)
+create or replace function public.admin_set_license(p_user_id uuid, p_status text, p_expires_at timestamptz)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 begin
   if not exists(select 1 from public.yas_profiles where user_id=auth.uid() and role='admin') then raise exception 'غير مصرح: صلاحية المدير مطلوبة.'; end if;
   if p_status not in ('pending','active','suspended') then raise exception 'حالة غير صالحة.'; end if;
-  if p_device_limit < 1 or p_device_limit > 100 then raise exception 'حد الأجهزة يجب أن يكون بين 1 و100.'; end if;
   if p_status='active' and (p_expires_at is null or p_expires_at <= now()) then raise exception 'يجب تحديد تاريخ انتهاء مستقبلي للتفعيل.'; end if;
-  update public.yas_profiles set status=p_status, expires_at=p_expires_at, device_limit=p_device_limit where user_id=p_user_id;
+  update public.yas_profiles set status=p_status, expires_at=p_expires_at where user_id=p_user_id;
   if not found then raise exception 'الحساب غير موجود.'; end if;
   return jsonb_build_object('ok',true);
 end; $$;
@@ -126,7 +151,7 @@ revoke all on function public.authorize_device(text) from public, anon;
 grant execute on function public.authorize_device(text) to authenticated;
 revoke all on function public.admin_list_users() from public, anon;
 grant execute on function public.admin_list_users() to authenticated;
-revoke all on function public.admin_set_license(uuid,text,timestamptz,integer) from public, anon;
-grant execute on function public.admin_set_license(uuid,text,timestamptz,integer) to authenticated;
+revoke all on function public.admin_set_license(uuid,text,timestamptz) from public, anon;
+grant execute on function public.admin_set_license(uuid,text,timestamptz) to authenticated;
 revoke all on function public.admin_revoke_device(uuid) from public, anon;
 grant execute on function public.admin_revoke_device(uuid) to authenticated;
