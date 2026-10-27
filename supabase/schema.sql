@@ -138,6 +138,28 @@ begin
   return jsonb_build_object('ok',true);
 end; $$;
 
+-- Cheap "am I an admin" check the app can call right after sign-in to decide
+-- whether to show the admin panel entry point at all.
+create or replace function public.am_i_admin()
+returns jsonb language sql security definer set search_path = '' as $$
+  select jsonb_build_object('is_admin', exists(select 1 from public.yas_profiles where user_id=auth.uid() and role='admin'));
+$$;
+
+-- Activates every currently pending account in one call, all with the same
+-- expiry date, so an admin can approve a whole batch of new sign-ups at once
+-- instead of one at a time.
+create or replace function public.admin_activate_all_pending(p_expires_at timestamptz)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_count integer;
+begin
+  if not exists(select 1 from public.yas_profiles where user_id=auth.uid() and role='admin') then raise exception 'غير مصرح: صلاحية المدير مطلوبة.'; end if;
+  if p_expires_at is null or p_expires_at <= now() then raise exception 'يجب تحديد تاريخ انتهاء مستقبلي للتفعيل.'; end if;
+  update public.yas_profiles set status='active', expires_at=p_expires_at where status='pending';
+  get diagnostics v_count = row_count;
+  return jsonb_build_object('ok',true,'activated_count',v_count);
+end; $$;
+
 create or replace function public.admin_revoke_device(p_device_row_id uuid)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 begin
@@ -155,3 +177,7 @@ revoke all on function public.admin_set_license(uuid,text,timestamptz) from publ
 grant execute on function public.admin_set_license(uuid,text,timestamptz) to authenticated;
 revoke all on function public.admin_revoke_device(uuid) from public, anon;
 grant execute on function public.admin_revoke_device(uuid) to authenticated;
+revoke all on function public.am_i_admin() from public, anon;
+grant execute on function public.am_i_admin() to authenticated;
+revoke all on function public.admin_activate_all_pending(timestamptz) from public, anon;
+grant execute on function public.admin_activate_all_pending(timestamptz) to authenticated;
