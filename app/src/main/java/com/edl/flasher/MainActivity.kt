@@ -26,6 +26,19 @@ class MainActivity : ComponentActivity() {
         if (licenseAuthorized) viewModel.autoConnect()
     }
 
+    // There is no exit/logout button inside the running app. Instead, actually leaving the
+    // app (back button on the root screen, swiping it out of recents, the system reclaiming
+    // it while finishing) is what ends the session: isFinishing() is true only when the
+    // activity itself is going away, not during momentary onStop/onDestroy caused by file
+    // pickers or other transient activities started on top of it. That keeps every close of
+    // the app "counted" as a logout, requiring sign-in again on the next launch.
+    override fun onDestroy() {
+        if (isFinishing && ::licenseService.isInitialized) {
+            licenseService.clearSession()
+        }
+        super.onDestroy()
+    }
+
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
