@@ -57,6 +57,11 @@ class LicenseService(context: Context) {
         authorize()
     }
 
+    suspend fun resetPassword(email: String): String = withContext(Dispatchers.IO) {
+        request("/auth/v1/recover", "POST", JSONObject().put("email", email.trim()), authenticated = false)
+        "إذا كان هذا البريد مسجلاً لدينا، فستصلك رسالة لإعادة تعيين كلمة المرور خلال دقائق."
+    }
+
     suspend fun authorize(): License = withContext(Dispatchers.IO) {
         if (!hasSession()) return@withContext License(false, "signed_out", null, 0, 0, "سجّل الدخول أولًا.")
         try {
