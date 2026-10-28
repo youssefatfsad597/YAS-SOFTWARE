@@ -35,6 +35,18 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
 .tag.active{background:#1f4a32;color:#8ff0b8}
 .tag.pending{background:#4a3c1f;color:#f0d08f}
 .tag.suspended,.tag.expired{background:#4a1f26;color:#f08f9b}
+.device.revoked{border-color:#9a6b1f}
+.device.deleted{opacity:.65;border-style:dashed;border-color:#8a3a4a}
+.dev-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.dev-actions button{padding:5px 9px;font-size:13px}
+button.warn{background:#9a6b1f}
+.tag.dev-active{background:#1f4a32;color:#8ff0b8}
+.tag.dev-revoked{background:#4a3c1f;color:#f0d08f}
+.tag.dev-deleted{background:#4a1f26;color:#f08f9b}
+.ip{direction:ltr;unicode-bidi:embed;display:inline-block;font-family:ui-monospace,Consolas,monospace}
+textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:1px solid #394969;padding:10px;background:#0e1629;color:inherit;direction:ltr;min-height:120px}
+.pw{direction:ltr;unicode-bidi:embed;font-family:ui-monospace,Consolas,monospace}
+.ok{color:#8ff0b8}.bad{color:#f08f9b}
 .tag.admin{background:#3b2a5c;color:#cdb4ff;margin-inline-start:6px}
 .quick{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
 .search-wrap{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
@@ -73,7 +85,9 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
 
     <div class="notice">
       سياسة الجهاز الواحد: كل حساب يعمل على جهاز واحد فقط في نفس الوقت. التبديل إلى جهاز آخر يُسمح به بعد
-      <b>4 ساعات</b> من آخر نشاط للجهاز السابق، أو فورًا إذا ضغطت «إلغاء الجهاز» من هنا.
+      <b>4 ساعات</b> من آخر نشاط للجهاز السابق، أو فورًا بعد «إلغاء» الجهاز من هنا.<br>
+      <b>إلغاء الجهاز</b>: يُمنع هذا الجهاز من الدخول ويبقى ظاهرًا بحالة «ملغي» (ويمكن استعادته).<br>
+      <b>حذف الجهاز</b>: يُزال من الحساب ويبقى في السجل بحالة «محذوف»، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.
     </div>
 
     <div class="bulk">
@@ -84,8 +98,9 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
     </div>
 
     <div class="search-wrap">
-      <input id="search" placeholder="بحث بالبريد أو User ID أو الحالة...">
+      <input id="search" placeholder="بحث بالبريد أو User ID أو الحالة أو اسم الجهاز أو IP...">
       <select id="filterStatus"><option value="">كل الحالات</option><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="expired">منتهي</option><option value="suspended">موقوف</option></select>
+      <label class="muted"><input type="checkbox" id="showDeleted" checked style="width:auto"> إظهار الأجهزة المحذوفة</label>
       <span class="count-badge" id="count">0 حساب</span>
     </div>
     <div id="message" class="msg"></div>
@@ -93,6 +108,46 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
       <thead><tr><th>الحساب</th><th>الحالة</th><th>انتهاء التفعيل</th><th>الجهاز</th><th>إجراءات سريعة</th></tr></thead>
       <tbody id="users"></tbody>
     </table></div>
+  </div>
+
+  <div class="card">
+    <h2>تفعيل عدة حسابات مع بعض</h2>
+    <p class="muted">اكتب الإيميلات (سطر لكل إيميل أو مفصولة بمسافة/فاصلة) وحدّد المدة، وكلها تتفعل بنفس تاريخ الانتهاء.</p>
+    <p><textarea id="actEmails" placeholder="yasoftware1@yas.com&#10;yasoftware2@yas.com"></textarea></p>
+    <div class="row">
+      <label class="muted">مدة التفعيل <input id="actDur" type="number" min="1" value="30" style="width:80px"> <select id="actUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option></select></label>
+      <button class="success" id="activateMany">تفعيل الحسابات</button>
+    </div>
+    <div id="actResult" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h2>الأجهزة المحظورة</h2>
+    <p class="muted">الجهاز المحظور لا يستطيع تشغيل البرنامج نهائيًا: التطبيق يفحص القائمة قبل شاشة الدخول، والسيرفر يرفضه عند التحقق. الحظر يطابق أي معرّف: معرّف التثبيت أو Android ID.</p>
+    <div class="row">
+      <input id="banAid" placeholder="Android ID" style="direction:ltr">
+      <input id="banReason" placeholder="سبب الحظر (اختياري)">
+      <button class="danger" id="banManual">حظر يدوي</button>
+    </div>
+    <div class="tablewrap"><table style="min-width:700px"><thead><tr><th>الجهاز</th><th>المعرّفات</th><th>السبب</th><th>التاريخ</th><th></th></tr></thead><tbody id="bans"></tbody></table></div>
+  </div>
+
+  <div class="card">
+    <h2>إنشاء عدة حسابات بباسوردات عشوائية</h2>
+    <p class="muted">الإيميلات المولّدة بالشكل yasoftware1@yas.com ثم 2 ثم 3... حسب العدد (تُحفظ بحروف صغيرة). اكتب الإيميلات بنفسك أو ولّدها تلقائيًا. كل حساب يأخذ كلمة مرور عشوائية مختلفة، وتظهر لك <b>مرة واحدة فقط</b> بعد الإنشاء فاحفظها أو نزّلها.</p>
+    <div class="row">
+      <input id="genCount" type="number" min="1" max="200" value="5" placeholder="العدد">
+      <input id="genPrefix" value="yasoftware" placeholder="بداية الاسم" style="direction:ltr">
+      <input id="genDomain" value="yas.com" placeholder="الدومين" style="direction:ltr">
+      <button class="secondary" id="genEmails">توليد الإيميلات</button>
+    </div>
+    <p><textarea id="newEmails" placeholder="user1@example.com&#10;user2@example.com"></textarea></p>
+    <div class="row">
+      <label class="muted">طول الباسورد <input id="pwLen" type="number" min="8" max="64" value="12" style="width:80px"></label>
+      <label class="muted">مدة التفعيل (0 = بانتظار التفعيل) <input id="newDur" type="number" min="0" value="30" style="width:80px"> <select id="newUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option></select></label>
+      <button class="success" id="createAccounts">إنشاء الحسابات</button>
+    </div>
+    <div id="createResult"></div>
   </div>
 
   <div class="card">
@@ -159,11 +214,138 @@ function extendedExpiry(currentExpiry,mins){
   return new Date(base+mins*60000).toISOString();
 }
 
+function devState(d){return d.deleted_at?'deleted':(d.revoked_at?'revoked':'active')}
+const DEV_AR={active:'نشط',revoked:'ملغي',deleted:'محذوف'};
+function deviceHtml(d){
+  const st=devState(d);
+  const ip=d.last_ip?`<span class="ip">${esc(d.last_ip)}</span> <button class="copybtn" data-copy="${esc(d.last_ip)}" title="نسخ IP">⧉</button>`:'<span class="muted">غير مسجّل</span>';
+  const firstIp=d.first_ip&&d.first_ip!==d.last_ip?` <small>أول IP: <span class="ip">${esc(d.first_ip)}</span></small>`:'';
+  const name=d.label&&d.label!=='Android installation'?esc(d.label):`${esc(d.label||'جهاز')} <span class="muted">(لم يرسل اسمه بعد)</span>`;
+  const when=st==='deleted'?`<small>حُذف: ${esc(fmt(d.deleted_at))}</small>`:st==='revoked'?`<small>أُلغي: ${esc(fmt(d.revoked_at))}</small>`:'';
+  const id=esc(d.id);
+  const actions=st==='active'
+    ?`<button class="warn" data-revoke="${id}">إلغاء</button><button class="danger" data-delete-dev="${id}">حذف</button>`
+    :st==='revoked'
+    ?`<button class="success" data-restore="${id}">استعادة</button><button class="danger" data-delete-dev="${id}">حذف</button>`
+    :`<button class="success" data-restore="${id}">استعادة</button>`;
+  const banBtn=`<button class="danger" data-ban="${id}" data-name="${esc(d.label||'')}">حظر نهائي</button>`;
+  return `<div class="device ${st==='active'?'current':st}"><b>${name}</b> <span class="tag dev-${st}">${DEV_AR[st]}</span>
+    <small>IP: ${ip}${firstIp}</small><small>معرّف الجهاز: ${esc(d.device_id)}</small>
+    <small>Android ID: <span class="ip">${esc(d.android_id||'—')}</span></small>
+    <small>آخر ظهور: ${esc(fmt(d.last_seen_at))}</small>${when}<div class="dev-actions">${actions}${banBtn}</div></div>`;
+}
+
+function genPassword(n){
+  const cs='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+  const lim=256-(256%cs.length);let out='';const buf=new Uint8Array(64);
+  while(out.length<n){crypto.getRandomValues(buf);for(const b of buf){if(b<lim){out+=cs[b%cs.length];if(out.length===n)break}}}
+  return out;
+}
+let lastCreated=[];
+function expiryFrom(val,unitMins){
+  const n=Number(val);if(!Number.isFinite(n)||n<=0)return null;
+  return new Date(Date.now()+n*Number(unitMins)*60000).toISOString();
+}
+function parseEmails(id='newEmails'){
+  const seen=new Set(),out=[];
+  for(const x of $(id).value.split(/[\s,;]+/)){const e=x.trim().toLowerCase();if(e&&!seen.has(e)){seen.add(e);out.push(e)}}
+  return out;
+}
+$('genEmails').onclick=()=>{
+  const n=Math.min(200,Math.max(1,Number($('genCount').value)||1));
+  const prefix=($('genPrefix').value.trim()||'yasoftware').replace(/[^a-zA-Z0-9._-]/g,'');
+  const domain=($('genDomain').value.trim()||'yas.com').replace(/^@/,'');
+  const taken=new Set(allUsers.map(u=>(u.email||'').toLowerCase()));
+  const list=[];let i=1;
+  while(list.length<n&&i<100000){const e=`${prefix}${i}@${domain}`.toLowerCase();if(!taken.has(e))list.push(e);i++}
+  $('newEmails').value=list.join('\n');
+};
+function csvCell(v){v=String(v??'');if(/^[=+\-@]/.test(v))v="'"+v;return '"'+v.replace(/"/g,'""')+'"'}
+function renderCreated(){
+  const ok=lastCreated.filter(r=>r.ok).length;
+  $('createResult').innerHTML=`<div class="notice">تم إنشاء <b>${ok}</b> من ${lastCreated.length}. ⚠️ كلمات المرور تظهر هنا مرة واحدة فقط — انسخها أو نزّلها الآن.</div>
+    <p><button class="secondary" id="copyCreated">نسخ الكل</button> <button class="secondary" id="csvCreated">تنزيل CSV</button></p>
+    <div class="tablewrap"><table style="min-width:520px"><thead><tr><th>البريد</th><th>كلمة المرور</th><th>النتيجة</th></tr></thead><tbody>${
+      lastCreated.map(r=>`<tr><td class="pw">${esc(r.email)}</td><td class="pw">${r.ok?esc(r.password):'—'}</td><td>${r.ok?'<span class="ok">تم</span>':`<span class="bad">${esc(r.error||'فشل')}</span>`}</td></tr>`).join('')
+    }</tbody></table></div>`;
+  $('copyCreated').onclick=async()=>{
+    const t=lastCreated.filter(r=>r.ok).map(r=>`${r.email}\t${r.password}`).join('\n');
+    try{await navigator.clipboard.writeText(t);say('تم نسخ البريد وكلمة المرور (مفصولين بـ Tab).')}catch{say('تعذر النسخ تلقائيًا؛ استخدم تنزيل CSV.')}
+  };
+  $('csvCreated').onclick=()=>{
+    const rows=['email,password'].concat(lastCreated.filter(r=>r.ok).map(r=>`${csvCell(r.email)},${csvCell(r.password)}`));
+    const blob=new Blob(['\ufeff'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='yas-new-accounts.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  };
+}
+$('createAccounts').onclick=async()=>{
+  const emails=parseEmails();
+  if(!emails.length){say('اكتب إيميل واحد على الأقل أو اضغط «توليد الإيميلات».');return}
+  if(emails.length>200){say('الحد الأقصى 200 حساب في المرة الواحدة.');return}
+  const bad=emails.filter(e=>!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
+  if(bad.length){say('بريد غير صالح: '+bad.slice(0,5).join('، '));return}
+  const len=Math.min(64,Math.max(8,Number($('pwLen').value)||12));
+  const expiry=expiryFrom($('newDur').value,$('newUnit').value);
+  const durTxt=`${Number($('newDur').value)||0} ${$('newUnit').selectedOptions[0].textContent}`;
+  if(!confirm(`إنشاء ${emails.length} حساب${expiry?` وتفعيلها لمدة ${durTxt}`:' (بانتظار التفعيل)'}؟`))return;
+  const btn=$('createAccounts');btn.disabled=true;
+  try{
+    say('جارٍ إنشاء الحسابات...');
+    const accounts=emails.map(email=>({email,password:genPassword(len)}));
+    const pwByEmail=Object.fromEntries(accounts.map(a=>[a.email,a.password]));
+    const r=await rpc('admin_create_users',{p_accounts:accounts,p_expires_at:expiry});
+    lastCreated=((r&&r.results)||[]).map(x=>({email:x.email,ok:!!x.ok,error:x.error,password:pwByEmail[x.email]}));
+    renderCreated();
+    await loadUsers();
+    say(`تم إنشاء ${lastCreated.filter(x=>x.ok).length} من ${lastCreated.length} حساب.`);
+  }catch(e){say(`فشل: ${e.message||e}`)}
+  finally{btn.disabled=false}
+};
+
+$('activateMany').onclick=async()=>{
+  const emails=parseEmails('actEmails');
+  if(!emails.length){$('actResult').textContent='اكتب إيميل واحد على الأقل.';return}
+  const expiry=expiryFrom($('actDur').value,$('actUnit').value);
+  if(!expiry){$('actResult').textContent='حدّد مدة تفعيل صحيحة.';return}
+  if(!confirm(`تفعيل ${emails.length} حساب لمدة ${Number($('actDur').value)} ${$('actUnit').selectedOptions[0].textContent}؟`))return;
+  const btn=$('activateMany');btn.disabled=true;
+  try{
+    const r=await rpc('admin_activate_users',{p_emails:emails,p_expires_at:expiry});
+    const nf=(r&&r.not_found)||[];
+    $('actResult').textContent=`تم تفعيل ${r.activated_count} حساب.`+(nf.length?`\nغير موجودة (${nf.length}): ${nf.join('، ')}`:'');
+    await loadUsers();
+  }catch(e){$('actResult').textContent=`فشل: ${e.message||e}`}
+  finally{btn.disabled=false}
+};
+
+let allBans=[];
+async function loadBans(){
+  try{allBans=await rpc('admin_list_bans')||[];renderBans()}catch(e){say(`تعذر تحميل المحظورين: ${e.message||e}`)}
+}
+function renderBans(){
+  $('bans').innerHTML=allBans.map(b=>`<tr><td><b>${esc(b.label||'جهاز')}</b>${b.last_ip?`<small>IP: <span class="ip">${esc(b.last_ip)}</span></small>`:''}</td>
+    <td><small>Android ID: <span class="ip">${esc(b.android_id||'—')}</span></small><small>معرّف التثبيت: ${esc(b.device_id||'—')}</small></td>
+    <td>${esc(b.reason||'—')}</td><td>${esc(fmt(b.banned_at))}</td>
+    <td><button class="success" data-unban="${esc(b.id)}">رفع الحظر</button></td></tr>`).join('')||'<tr><td colspan="5" class="muted">لا توجد أجهزة محظورة.</td></tr>';
+  $('bans').querySelectorAll('[data-unban]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('رفع الحظر عن هذا الجهاز؟ (الجهاز يبقى «ملغي» حتى تستعيده).'))return;
+    try{await rpc('admin_unban',{p_ban_id:b.dataset.unban});say('تم رفع الحظر.');await loadBans();await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+}
+$('banManual').onclick=async()=>{
+  const aid=$('banAid').value.trim();
+  if(!aid){say('أدخل Android ID.');return}
+  if(!confirm('حظر هذا الجهاز نهائيًا؟'))return;
+  try{await rpc('admin_ban_manual',{p_android_id:aid,p_reason:$('banReason').value.trim()||null});
+    $('banAid').value=$('banReason').value='';say('تم الحظر.');await loadBans()}catch(e){say(`فشل: ${e.message||e}`)}
+};
+
 function renderTable(){
   const q=($('search').value||'').trim().toLowerCase();
   const fs=$('filterStatus').value;
   const filtered=allUsers.filter(u=>{
-    const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.user_id||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q);
+    const devText=(u.devices||[]).map(d=>`${d.label||''} ${d.last_ip||''} ${d.first_ip||''} ${d.android_id||''}`).join(' ').toLowerCase();
+    const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.user_id||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q) || devText.includes(q);
     const matchesS=!fs || u.status===fs;
     return matchesQ && matchesS;
   });
@@ -173,9 +355,12 @@ function renderTable(){
   for(const u of filtered){
     const tr=document.createElement('tr');
     const devs=u.devices||[];
-    const live=devs.filter(d=>!d.revoked_at);
-    const old=devs.length-live.length;
-    const devices=live.map(d=>`<div class="device current"><b>${esc(d.label)}</b><small>${esc(d.device_id)}</small><small>آخر ظهور: ${esc(fmt(d.last_seen_at))}</small><button class="danger" data-revoke="${esc(d.id)}">إلغاء الجهاز</button></div>`).join('')||'<span class="muted">لا يوجد جهاز نشط</span>';
+    const nActive=devs.filter(d=>devState(d)==='active').length;
+    const nRevoked=devs.filter(d=>devState(d)==='revoked').length;
+    const nDeleted=devs.filter(d=>devState(d)==='deleted').length;
+    const shown=devs.filter(d=>$('showDeleted').checked||devState(d)!=='deleted');
+    const devices=(shown.map(deviceHtml).join('')||'<span class="muted">لا يوجد أجهزة</span>')+
+      `<small>نشطة: ${nActive} • ملغاة: ${nRevoked} • محذوفة: ${nDeleted}</small>`;
     tr.innerHTML=`
       <td><b>${esc(u.email)}</b>${u.role==='admin'?'<span class="tag admin">admin</span>':''} <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>${esc(u.user_id)} <button class="copybtn" data-copy="${esc(u.user_id)}" title="نسخ المعرّف">⧉</button></small><small>إنشاء: ${esc(fmt(u.created_at))}</small></td>
       <td>${statusTag(u.status)}</td>
@@ -188,6 +373,7 @@ function renderTable(){
           <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="10080">+أسبوع</button>
           <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="43200">+شهر</button>
           <button class="danger" data-suspend="${esc(u.user_id)}">إيقاف</button>
+          ${u.role==='admin'?'':`<button class="danger" data-delete-user="${esc(u.user_id)}" data-email="${esc(u.email)}">حذف الحساب نهائيًا</button>`}
         </div>
       </td>`;
     $('users').appendChild(tr);
@@ -200,8 +386,28 @@ function renderTable(){
     window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
   });
   $('users').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('إلغاء هذا الجهاز؟ سيتمكن الحساب من الدخول من جهاز جديد فورًا.'))return;
-    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});say('تم إلغاء الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+    if(!confirm('إلغاء هذا الجهاز؟ سيُمنع من الدخول ويبقى ظاهرًا بحالة «ملغي»، وسيتمكن الحساب من الدخول من جهاز جديد فورًا.'))return;
+    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});say('تم إلغاء الجهاز (ما زال ظاهرًا بحالة ملغي).');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-delete-dev]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('حذف هذا الجهاز من الحساب؟ سيظهر في السجل بحالة «محذوف»، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.'))return;
+    try{await rpc('admin_delete_device',{p_device_row_id:b.dataset.deleteDev});say('تم حذف الجهاز (ظاهر بحالة محذوف).');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-ban]').forEach(b=>b.onclick=async()=>{
+    if(!confirm(`حظر هذا الجهاز نهائيًا${b.dataset.name?` (${b.dataset.name})`:''}؟\nلن يستطيع تشغيل البرنامج حتى لو دخل بحساب آخر أو أعاد تثبيت التطبيق (طالما Android ID كما هو).`))return;
+    const reason=prompt('سبب الحظر (اختياري):','')||'';
+    try{await rpc('admin_ban_device',{p_device_row_id:b.dataset.ban,p_reason:reason});say('تم حظر الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('استعادة هذا الجهاز كجهاز نشط؟ أي جهاز نشط آخر لنفس الحساب سيتم إلغاؤه.'))return;
+    try{await rpc('admin_restore_device',{p_device_row_id:b.dataset.restore});say('تمت استعادة الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=async()=>{
+    const email=b.dataset.email||'';
+    const typed=prompt(`⚠️ حذف نهائي لا يمكن التراجع عنه: سيُحذف الحساب وكل أجهزته من المنصة.\nللتأكيد اكتب البريد بالضبط:\n${email}`);
+    if(typed===null)return;
+    if(typed.trim().toLowerCase()!==email.toLowerCase()){say('لم يتم الحذف: البريد المكتوب لا يطابق.');return}
+    try{await rpc('admin_delete_user',{p_user_id:b.dataset.deleteUser});say(`تم حذف الحساب ${email} نهائيًا.`);await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
   });
   $('users').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
     navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
@@ -227,6 +433,7 @@ function renderTable(){
 
 $('search').oninput=renderTable;
 $('filterStatus').onchange=renderTable;
+$('showDeleted').onchange=renderTable;
 
 $('activateAll').onclick=async()=>{
   const days=Number($('bulkDays').value);
@@ -251,6 +458,7 @@ async function loadUsers(){
     allUsers=await rpc('admin_list_users')||[];
     $('login').classList.add('hidden');$('panel').classList.remove('hidden');
     renderTable();
+    loadBans();
     say(`تم تحميل ${allUsers.length} حساب.`);
   }catch(e){
     say(`تعذر تحميل لوحة الإدارة: ${e.message||e}\nتأكد أن حسابك role=admin في yas_profiles وأن schema.sql نُفذ بنجاح.`);
