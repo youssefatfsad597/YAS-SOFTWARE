@@ -108,7 +108,8 @@ class LicenseService(context: Context) {
 
     suspend fun resetPassword(email: String): String = withContext(Dispatchers.IO) {
         try {
-            request("/auth/v1/recover", "POST", JSONObject().put("email", email.trim()), authenticated = false)
+            request("/auth/v1/recover?redirect_to=" + java.net.URLEncoder.encode(BuildConfig.RESET_REDIRECT_URL, "UTF-8"),
+                "POST", JSONObject().put("email", email.trim()), authenticated = false)
         } catch (e: Exception) {
             val reason = e.message.orEmpty().lowercase()
             if (reason.contains("error sending recovery email") || reason.contains("error sending confirmation") ||
@@ -122,6 +123,24 @@ class LicenseService(context: Context) {
             throw e
         }
         "إذا كان هذا البريد مسجلاً لدينا، فستصلك رسالة لإعادة تعيين كلمة المرور خلال دقائق."
+    }
+
+    /** Finishes a password reset opened from the e-mail link: uses the short-lived recovery
+     *  access token from the deep link (never stored as a session) to set the new password. */
+    suspend fun completePasswordReset(recoveryToken: String, newPassword: String): String = withContext(Dispatchers.IO) {
+        if (newPassword.length < 8) throw IllegalStateException("كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف.")
+        val result = try {
+            request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true, bearerOverride = recoveryToken)
+        } catch (e: Exception) {
+            val r = e.message.orEmpty().lowercase()
+            if (r.contains("jwt") || r.contains("expired") || r.contains("invalid")) {
+                throw IllegalStateException("رابط الاستعادة منتهي أو مستخدم من قبل. اطلب رابطًا جديدًا من \"نسيت كلمة المرور؟\".")
+            }
+            throw e
+        }
+        val mail = result.optString("email")
+        if (mail.isNotBlank() && rememberEnabled() && mail.equals(email(), ignoreCase = true)) saveCredentials(mail, newPassword, true)
+        "تم تغيير كلمة المرور بنجاح. سجّل الدخول بالباسورد الجديد."
     }
 
     /** Self-service password change for a signed-in user who still remembers their current
@@ -199,7 +218,7 @@ class LicenseService(context: Context) {
         saveSession(result, email())
     }
 
-    private fun request(path: String, method: String, body: JSONObject?, authenticated: Boolean): JSONObject {
+    private fun request(path: String, method: String, body: JSONObject?, authenticated: Boolean, bearerOverride: String? = null): JSONObject {
         if (baseUrl.contains("YOUR_PROJECT") || anonKey == "YOUR_SUPABASE_ANON_KEY") {
             throw IllegalStateException("لم يتم إعداد Supabase بعد. اتبع ملف SETUP.md وأضف SUPABASE_URL وSUPABASE_ANON_KEY.")
         }
@@ -210,7 +229,7 @@ class LicenseService(context: Context) {
             setRequestProperty("apikey", anonKey)
             setRequestProperty("Accept", "application/json")
             if (authenticated) {
-                val token = prefs.getString("access_token", null) ?: ""
+                val token = bearerOverride ?: prefs.getString("access_token", null) ?: ""
                 setRequestProperty("Authorization", "Bearer $token")
             } else setRequestProperty("Authorization", "Bearer $anonKey")
             if (body != null) {
