@@ -62,7 +62,14 @@ private object Yas {
 }
 
 @Composable
-fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit, content: @Composable () -> Unit) {
+fun AuthGate(
+    service: LicenseService,
+    recoveryToken: String? = null,
+    recoveryError: String? = null,
+    onRecoveryDone: () -> Unit = {},
+    onAuthorizationChanged: (Boolean) -> Unit,
+    content: @Composable () -> Unit
+) {
     val context = LocalContext.current
     var authorized by remember { mutableStateOf(false) }
     var enteredApp by remember { mutableStateOf(false) }
@@ -152,6 +159,24 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
                 textAlign = TextAlign.Center
             )
         }
+        return
+    }
+
+    // Opened from the password-reset e-mail link: ask for the new password.
+    if (recoveryToken != null || recoveryError != null) {
+        ResetPasswordScreen(
+            token = recoveryToken,
+            initialError = recoveryError,
+            onSubmit = { newPw -> service.completePasswordReset(recoveryToken.orEmpty(), newPw) },
+            onDone = { msg ->
+                // The old session (if any) belongs to the old password: force a fresh sign-in.
+                service.clearSession()
+                authorized = false; enteredApp = false; license = null; forgotMode = false; registerMode = false
+                message = msg; isError = false
+                onRecoveryDone()
+            },
+            onCancel = onRecoveryDone
+        )
         return
     }
 
@@ -545,6 +570,69 @@ private fun ChangePasswordDialog(
             TextButton(onClick = { if (!loading) onDismiss() }) { Text("إلغاء", color = Yas.Muted) }
         }
     )
+}
+
+@Composable
+private fun ResetPasswordScreen(
+    token: String?,
+    initialError: String?,
+    onSubmit: suspend (String) -> String,
+    onDone: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var newPw by remember { mutableStateOf("") }
+    var confirmPw by remember { mutableStateOf("") }
+    var show by remember { mutableStateOf(false) }
+    var loading by remember { mutableStateOf(false) }
+    var error by remember { mutableStateOf(initialError.orEmpty()) }
+    val scope = rememberCoroutineScope()
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = Yas.SkyText, unfocusedBorderColor = Yas.Border,
+        focusedLabelColor = Yas.SkyText, unfocusedLabelColor = Yas.Muted, cursorColor = Yas.SkyText,
+        focusedTextColor = Yas.Text, unfocusedTextColor = Yas.Text,
+        focusedContainerColor = Yas.SurfaceHi, unfocusedContainerColor = Yas.SurfaceHi
+    )
+    val mismatch = confirmPw.isNotBlank() && confirmPw != newPw
+    GateScaffold {
+        BrandHeader("تعيين كلمة مرور جديدة")
+        if (token != null) {
+            OutlinedTextField(
+                value = newPw, onValueChange = { newPw = it; error = "" },
+                label = { Text("كلمة المرور الجديدة (8 أحرف على الأقل)") }, singleLine = true,
+                visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { show = !show }) {
+                        Icon(if (show) YasIcons.VisibilityOff else YasIcons.Visibility, contentDescription = null, tint = Yas.Muted)
+                    }
+                },
+                shape = RoundedCornerShape(14.dp), colors = fieldColors, modifier = Modifier.fillMaxWidth()
+            )
+            OutlinedTextField(
+                value = confirmPw, onValueChange = { confirmPw = it; error = "" },
+                label = { Text("تأكيد كلمة المرور الجديدة") }, singleLine = true, isError = mismatch,
+                visualTransformation = if (show) VisualTransformation.None else PasswordVisualTransformation(),
+                shape = RoundedCornerShape(14.dp), colors = fieldColors, modifier = Modifier.fillMaxWidth()
+            )
+            if (mismatch) Text("كلمتا المرور غير متطابقتين.", color = Yas.DangerText, style = MaterialTheme.typography.bodySmall)
+        }
+        if (error.isNotBlank()) Text(error, color = Yas.DangerText, style = MaterialTheme.typography.bodyMedium, textAlign = TextAlign.Center)
+        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)), color = Yas.SkyText, trackColor = Yas.SurfaceHi)
+        if (token != null) {
+            Button(
+                enabled = !loading && newPw.length >= 8 && newPw == confirmPw,
+                onClick = {
+                    loading = true; error = ""
+                    scope.launch {
+                        try { onDone(onSubmit(newPw)) } catch (e: Exception) { error = e.message ?: "حدث خطأ." }
+                        loading = false
+                    }
+                },
+                colors = ButtonDefaults.buttonColors(containerColor = Yas.Primary, contentColor = Color.White),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("حفظ كلمة المرور") }
+        }
+        TextButton(onClick = { if (!loading) onCancel() }) { Text("رجوع لتسجيل الدخول", color = Yas.SkyText) }
+    }
 }
 
 @Composable
