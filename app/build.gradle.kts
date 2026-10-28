@@ -60,7 +60,10 @@ android {
     // files such as sec_efs.bin be streamed directly without loading them fully
     // into memory first.
     androidResources {
-        noCompress += listOf("elf", "bin")
+        // "enc" = the AES-256-CTR encrypted firmware assets (see FirmwareCipher). Encrypted
+        // bytes are already high-entropy so compression wouldn't shrink them anyway; keeping
+        // them uncompressed preserves the exact-length guarantee AssetFileDescriptor needs.
+        noCompress += listOf("elf", "bin", "enc")
     }
 
     compileOptions {
