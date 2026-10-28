@@ -1402,20 +1402,34 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             firehose.getStorageInfo(target.lun)
 
-            data class Dialect(val name: String, val payload: Int, val zlp: Boolean, val full: Boolean)
+            data class Dialect(val name: String, val payload: Int, val zlp: Boolean, val full: Boolean, val skipStorageInit: Boolean = false)
             val dialects = listOf(
                 Dialect("default (ZLP, 64K, minimal)", 65536, true, false),
                 Dialect("ZLP, 16K, minimal", 16384, true, false),
                 Dialect("no-ZLP, 16K, minimal", 16384, false, false),
                 Dialect("ZLP, 16K, full attributes", 16384, true, true),
-                Dialect("no-ZLP, 4K, full attributes", 4096, false, true)
+                Dialect("no-ZLP, 4K, full attributes", 4096, false, true),
+                // Some Samsung-signed loaders reject/ignore the very first <program> after <configure>
+                // unless storage init is explicitly skipped (it was already done by the loader itself on boot).
+                Dialect("no-ZLP, 16K, full attrs, SkipStorageInit", 16384, false, true, skipStorageInit = true)
             )
             val storage = _uiState.value.selectedStorage
             var anyWorks = false
             var hung = false
             val verdicts = mutableListOf<FirehoseProtocol.WriteVerdict>()
             for (d in dialects) {
-                if (!firehose.reconfigure(storage, d.payload, d.zlp)) {
+                val cfg = firehose.reconfigure(storage, d.payload, d.zlp, d.skipStorageInit)
+                if (cfg.verdict == FirehoseProtocol.ReconfigureVerdict.HUNG) {
+                    hung = true
+                    appendLog(
+                        "[${d.name}] <configure> got no reply at all (${cfg.detail}) -- the loader is already wedged " +
+                            "from an earlier command in this session. Sending more commands now would only make it " +
+                            "worse, so the remaining dialects are skipped. Unplug/replug and power-cycle the device " +
+                            "before trying again."
+                    )
+                    break
+                }
+                if (cfg.verdict == FirehoseProtocol.ReconfigureVerdict.NAKED) {
                     appendLog("[${d.name}] loader refused <configure>; skipped.")
                     continue
                 }
@@ -1435,6 +1449,13 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             appendLog(
                 when {
                     anyWorks -> "RESULT: writes work with the dialect above. Flash using it (the app keeps it configured)."
+                    hung && verdicts.isEmpty() ->
+                        "RESULT: the loader stopped answering <configure> itself, before any write was even attempted " +
+                            "in this run -- it was already wedged from something earlier in this session (e.g. a previous " +
+                            "manual erase/program attempt). This is why the test 'takes forever': every remaining dialect " +
+                            "would also wait out its timeout for nothing. Power-cycle the tablet (unplug, hold Power+Vol " +
+                            "Down ~10s) and re-enter the loader fresh, then run this test again as the FIRST command you " +
+                            "send -- don't read/erase/program anything before it."
                     hung ->
                         "RESULT: the loader/controller stopped answering the moment a real write command was sent " +
                             "(the GPT still reads fine, only writes freeze it). That is a hardware-level symptom, not a " +
