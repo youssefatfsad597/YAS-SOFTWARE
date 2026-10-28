@@ -77,3 +77,18 @@ The dashboard uses only authenticated RPC functions for admin actions. The SQL f
 - إنشاء حسابات متعددة بباسوردات عشوائية (`admin_create_users`) بحد أقصى 200 في المرة.
 - حظر الأجهزة: قائمة `yas_banned_devices` تُفحص قبل شاشة الدخول (`is_device_banned`) وأيضًا داخل `authorize_device`. المطابقة بمعرّف التثبيت أو Android ID (يبقى بعد إعادة تثبيت التطبيق ويتغير فقط بعد فورمات المصنع).
 - تفعيل عدة حسابات مع بعض: `admin_activate_users`. إنشاء الحسابات صار يأخذ تاريخ انتهاء (`p_expires_at`) بدل عدد الأيام.
+
+## 7. إعادة تعيين كلمة المرور من الإيميل (Deep Link)
+
+1. استضف `reset-password.html` على HTTPS (مثلاً GitHub Pages).
+2. في Supabase → Authentication → URL Configuration:
+   - **Site URL** و **Redirect URLs**: أضف رابط الصفحة المستضافة (مثال: `https://USER.github.io/YAS-SOFTWARE/reset-password.html`).
+3. ابنِ التطبيق مع: `-PRESET_REDIRECT_URL=https://USER.github.io/YAS-SOFTWARE/reset-password.html`
+   (لو تركته فارغًا يرسل `yassoftware://reset-password` مباشرة، ويجب إضافته أيضًا في Redirect URLs، لكن بعض تطبيقات الإيميل لا تفتح هذه الروابط).
+4. الرابط في الإيميل ← الصفحة ← زر «فتح التطبيق» ← شاشة «تعيين كلمة مرور جديدة» داخل التطبيق.
+
+## 8. اسم المُرسِل وشكل الإيميل (من لوحة Supabase، لا من الكود)
+
+- **اسم المُرسِل:** Authentication → Settings (أو Emails) → **SMTP Settings** → حقل **Sender name** = `YAS SOFTWARE`. (يظهر `me` فقط لو أرسلت من Gmail لنفس حسابك أو تركت الحقل فارغًا.)
+- **القوالب:** Authentication → **Email Templates** → الصق محتوى `supabase/email-templates/recovery.html` (Reset Password) و`confirmation.html` (Confirm signup)، وغيّر Subject إلى `YAS SOFTWARE — إعادة تعيين كلمة المرور`.
+- **الصورة:** الإيميل لا يستطيع عرض صورة من داخل المشروع؛ لازم رابط HTTPS عام. ارفع `assets/yas_logo.png` (GitHub Pages أو `https://raw.githubusercontent.com/USER/REPO/main/assets/yas_logo.png`) واستبدل `LOGO_URL` في القالبين. بعض البرامج تحجب الصور حتى يضغط المستخدم «عرض الصور».
