@@ -67,3 +67,13 @@ The dashboard uses only authenticated RPC functions for admin actions. The SQL f
 - Test pending, active, expired, suspended, device-limit, revoked-device, refresh-token, offline, and admin/non-admin cases before distributing an APK.
 - The app's local gate protects normal app use, but an attacker who patches the APK may bypass local UI checks. Any truly sensitive operation must also be authorized by a trusted server at the moment it occurs. Device flashing is performed locally, so server-side licensing cannot prevent all patched-client use.
 - `allowBackup=false`, cleartext traffic disabled, encrypted session preferences, and R8 release shrinking are configured. This is defense in depth, not a guarantee of invulnerability.
+
+## 6. تحديث لوحة الإدارة (الأجهزة / IP / حذف الحساب / إنشاء حسابات)
+
+أعد تشغيل ملف `supabase/schema.sql` كاملًا في SQL Editor (آمن لإعادة التشغيل). يضيف:
+- إلغاء جهاز (يبقى ظاهرًا «ملغي») وحذف جهاز (يبقى في السجل «محذوف») واستعادة جهاز.
+- تسجيل IP الجهاز (أول/آخر) من الخادم، واسم الجهاز يأتي من التطبيق (يظهر بعد أول دخول بالنسخة الجديدة).
+- حذف حساب نهائيًا (`admin_delete_user`) ولا يعمل على حسابات المدير ولا حسابك.
+- إنشاء حسابات متعددة بباسوردات عشوائية (`admin_create_users`) بحد أقصى 200 في المرة.
+- حظر الأجهزة: قائمة `yas_banned_devices` تُفحص قبل شاشة الدخول (`is_device_banned`) وأيضًا داخل `authorize_device`. المطابقة بمعرّف التثبيت أو Android ID (يبقى بعد إعادة تثبيت التطبيق ويتغير فقط بعد فورمات المصنع).
+- تفعيل عدة حسابات مع بعض: `admin_activate_users`. إنشاء الحسابات صار يأخذ تاريخ انتهاء (`p_expires_at`) بدل عدد الأيام.
