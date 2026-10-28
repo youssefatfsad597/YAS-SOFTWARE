@@ -8,15 +8,20 @@ import java.io.InputStream
  * inside the APK as assets, so the "X216B Wipe & Write" button works with a single
  * tap and never requires the user to manually pick any file.
  *
- * These files are copied into app/src/main/assets/x216b/ at build time by the
- * "Copy Embedded X216B Firmware Assets" step in this workflow, from firmware/x216b/
- * in the repository. They must be stored UNCOMPRESSED in the APK (see the
- * androidResources { noCompress += listOf("elf","bin") } block in app/build.gradle.kts)
- * so that AssetFileDescriptor can report an exact length and large files (like
- * sec_efs.bin) can be streamed without loading the whole file into RAM.
+ * These files are AES-256-CTR encrypted at build time (see encrypt_firmware_assets.sh /
+ * the "Encrypt + Copy Embedded X216B Firmware Assets" step in the CI workflow) from
+ * firmware/x216b/ in the repository, and land in app/src/main/assets/x216b/ as
+ * "<name>.enc" (16-byte IV header + ciphertext). They are decrypted on the fly through
+ * FirmwareCipher so the raw files are never written to disk and are not sitting
+ * plaintext inside the shipped APK. They must be stored UNCOMPRESSED in the APK (see
+ * the androidResources { noCompress += listOf("elf","bin","enc") } block in
+ * app/build.gradle.kts) so that AssetFileDescriptor can report an exact length and
+ * large files (like sec_efs.bin) can be streamed and decrypted without loading the
+ * whole file into RAM.
  */
 object EmbeddedFirmware {
     private const val ASSET_DIR = "x216b"
+    private const val ENC_SUFFIX = ".enc"
 
     const val LOADER = "X216B.elf"
     const val FRP = "frp.bin"
@@ -26,7 +31,7 @@ object EmbeddedFirmware {
 
     val ALL_FILES = listOf(LOADER, FRP, SEC_EFS, PERSISTENT, MISC)
 
-    private fun path(name: String) = "$ASSET_DIR/$name"
+    private fun path(name: String) = "$ASSET_DIR/$name$ENC_SUFFIX"
 
     fun exists(context: Context, name: String): Boolean =
         runCatching { context.assets.open(path(name)).close() }.isSuccess
@@ -34,15 +39,17 @@ object EmbeddedFirmware {
     fun allPresent(context: Context): Boolean =
         ALL_FILES.all { exists(context, it) }
 
-    /** Exact uncompressed size via AssetFileDescriptor. Returns -1 if unavailable. */
+    /** Exact plaintext (decrypted) size. Returns -1 if unavailable. */
     fun sizeOf(context: Context, name: String): Long =
-        runCatching { context.assets.openFd(path(name)).use { it.length } }.getOrDefault(-1L)
+        runCatching {
+            FirmwareCipher.plaintextSize(context.assets.openFd(path(name)).use { it.length })
+        }.getOrDefault(-1L)
 
     fun openStream(context: Context, name: String): InputStream =
-        context.assets.open(path(name))
+        FirmwareCipher.decryptingStream(context.assets.open(path(name)))
 
     fun readAllBytes(context: Context, name: String): ByteArray =
-        context.assets.open(path(name)).use { it.readBytes() }
+        openStream(context, name).use { it.readBytes() }
 
     fun describeStatus(context: Context): String {
         val missing = ALL_FILES.filterNot { exists(context, it) }

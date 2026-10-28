@@ -22,7 +22,11 @@ object T509Firmware {
     const val FDL2 = "fdl2-sign.bin"
     val ALL_FILES = listOf(FDL1, FDL2)
 
-    private fun path(variant: T509Variant, name: String) = "${variant.assetDir}/$name"
+    private const val ENC_SUFFIX = ".enc"
+
+    // Assets are AES-256-CTR encrypted at build time (encrypt_firmware_assets.sh) and
+    // land as "<name>.enc"; see EmbeddedFirmware's doc comment / FirmwareCipher for the format.
+    private fun path(variant: T509Variant, name: String) = "${variant.assetDir}/$name$ENC_SUFFIX"
 
     fun exists(context: Context, variant: T509Variant, name: String): Boolean =
         runCatching { context.assets.open(path(variant, name)).close() }.isSuccess
@@ -30,14 +34,17 @@ object T509Firmware {
     fun allPresent(context: Context, variant: T509Variant): Boolean =
         ALL_FILES.all { exists(context, variant, it) }
 
+    /** Exact plaintext (decrypted) size. Returns -1 if unavailable. */
     fun sizeOf(context: Context, variant: T509Variant, name: String): Long =
-        runCatching { context.assets.openFd(path(variant, name)).use { it.length } }.getOrDefault(-1L)
+        runCatching {
+            FirmwareCipher.plaintextSize(context.assets.openFd(path(variant, name)).use { it.length })
+        }.getOrDefault(-1L)
 
     fun openStream(context: Context, variant: T509Variant, name: String): InputStream =
-        context.assets.open(path(variant, name))
+        FirmwareCipher.decryptingStream(context.assets.open(path(variant, name)))
 
     fun readAllBytes(context: Context, variant: T509Variant, name: String): ByteArray =
-        context.assets.open(path(variant, name)).use { it.readBytes() }
+        openStream(context, variant, name).use { it.readBytes() }
 
     fun describeStatus(context: Context, variant: T509Variant): String {
         val missing = ALL_FILES.filterNot { exists(context, variant, it) }
