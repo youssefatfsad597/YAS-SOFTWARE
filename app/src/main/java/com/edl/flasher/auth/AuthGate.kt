@@ -82,6 +82,10 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     val adminService = remember { AdminService(service) }
     var isAdmin by remember { mutableStateOf(false) }
     var showAdmin by remember { mutableStateOf(false) }
+    var showChangePassword by remember { mutableStateOf(false) }
+    var changingPassword by remember { mutableStateOf(false) }
+    var cpMessage by remember { mutableStateOf("") }
+    var cpError by remember { mutableStateOf(false) }
 
     fun verify() {
         // Refuse to run against a re-signed/repackaged build or a mismatched applicationId.
@@ -167,6 +171,7 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
             isAdmin = isAdmin,
             onEnter = { enteredApp = true },
             onOpenAdmin = { showAdmin = true },
+            onChangePassword = { cpMessage = ""; cpError = false; showChangePassword = true },
             onSignOut = {
                 service.clearSession()
                 authorized = false
@@ -176,6 +181,28 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
                 isError = false
             }
         )
+        if (showChangePassword) {
+            ChangePasswordDialog(
+                loading = changingPassword,
+                message = cpMessage,
+                isError = cpError,
+                onDismiss = { if (!changingPassword) { showChangePassword = false; cpMessage = ""; cpError = false } },
+                onSubmit = { current, newPw ->
+                    changingPassword = true; cpMessage = ""; cpError = false
+                    scope.launch {
+                        try {
+                            cpMessage = service.changePassword(current, newPw)
+                            cpError = false
+                            showChangePassword = false
+                        } catch (e: Exception) {
+                            cpMessage = e.message ?: "حدث خطأ."
+                            cpError = true
+                        }
+                        changingPassword = false
+                    }
+                }
+            )
+        }
         return
     }
 
@@ -362,6 +389,7 @@ private fun SubscriptionGateScreen(
     isAdmin: Boolean,
     onEnter: () -> Unit,
     onOpenAdmin: () -> Unit,
+    onChangePassword: () -> Unit,
     onSignOut: () -> Unit
 ) {
     GateScaffold {
@@ -404,11 +432,119 @@ private fun SubscriptionGateScreen(
                     Text("لوحة الإدارة", fontWeight = FontWeight.Bold, fontSize = 14.sp)
                 }
             }
+            TextButton(onClick = onChangePassword, modifier = Modifier.fillMaxWidth()) {
+                Text("تغيير كلمة المرور", color = Yas.SkyText)
+            }
             TextButton(onClick = onSignOut, modifier = Modifier.fillMaxWidth()) {
                 Text("تسجيل الخروج من هذا الحساب", color = Yas.Muted)
             }
         }
     }
+}
+
+/** Self-service password change for a user who still remembers their current password.
+ *  The current password is re-verified server-side before the update (see
+ *  LicenseService.changePassword); this dialog only collects and validates input. */
+@Composable
+private fun ChangePasswordDialog(
+    loading: Boolean,
+    message: String,
+    isError: Boolean,
+    onDismiss: () -> Unit,
+    onSubmit: (current: String, newPassword: String) -> Unit
+) {
+    var current by remember { mutableStateOf("") }
+    var newPw by remember { mutableStateOf("") }
+    var confirmPw by remember { mutableStateOf("") }
+    var showCurrent by remember { mutableStateOf(false) }
+    var showNew by remember { mutableStateOf(false) }
+
+    val fieldColors = OutlinedTextFieldDefaults.colors(
+        focusedBorderColor = Yas.SkyText,
+        unfocusedBorderColor = Yas.Border,
+        focusedLabelColor = Yas.SkyText,
+        unfocusedLabelColor = Yas.Muted,
+        cursorColor = Yas.SkyText,
+        focusedTextColor = Yas.Text,
+        unfocusedTextColor = Yas.Text,
+        focusedContainerColor = Yas.SurfaceHi,
+        unfocusedContainerColor = Yas.SurfaceHi
+    )
+    val mismatch = confirmPw.isNotBlank() && confirmPw != newPw
+
+    AlertDialog(
+        onDismissRequest = { if (!loading) onDismiss() },
+        containerColor = Yas.Surface,
+        title = { Text("تغيير كلمة المرور", color = Yas.Text, fontWeight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = current,
+                    onValueChange = { current = it },
+                    label = { Text("كلمة المرور الحالية") },
+                    singleLine = true,
+                    visualTransformation = if (showCurrent) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showCurrent = !showCurrent }) {
+                            Icon(if (showCurrent) YasIcons.VisibilityOff else YasIcons.Visibility, contentDescription = null, tint = Yas.Muted)
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = fieldColors,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = newPw,
+                    onValueChange = { newPw = it },
+                    label = { Text("كلمة المرور الجديدة (8 أحرف على الأقل)") },
+                    singleLine = true,
+                    visualTransformation = if (showNew) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = {
+                        IconButton(onClick = { showNew = !showNew }) {
+                            Icon(if (showNew) YasIcons.VisibilityOff else YasIcons.Visibility, contentDescription = null, tint = Yas.Muted)
+                        }
+                    },
+                    shape = RoundedCornerShape(14.dp),
+                    colors = fieldColors,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = confirmPw,
+                    onValueChange = { confirmPw = it },
+                    label = { Text("تأكيد كلمة المرور الجديدة") },
+                    singleLine = true,
+                    isError = mismatch,
+                    visualTransformation = if (showNew) VisualTransformation.None else PasswordVisualTransformation(),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = fieldColors,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                if (mismatch) {
+                    Text("كلمتا المرور غير متطابقتين.", color = Yas.DangerText, style = MaterialTheme.typography.bodySmall)
+                }
+                if (message.isNotBlank()) {
+                    Text(message, color = if (isError) Yas.DangerText else Yas.Success, style = MaterialTheme.typography.bodySmall)
+                }
+                if (loading) {
+                    LinearProgressIndicator(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)),
+                        color = Yas.SkyText,
+                        trackColor = Yas.SurfaceHi
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                enabled = !loading && current.isNotBlank() && newPw.length >= 8 && newPw == confirmPw,
+                onClick = { onSubmit(current, newPw) },
+                colors = ButtonDefaults.buttonColors(containerColor = Yas.Primary, contentColor = Color.White)
+            ) { Text("تغيير") }
+        },
+        dismissButton = {
+            TextButton(onClick = { if (!loading) onDismiss() }) { Text("إلغاء", color = Yas.Muted) }
+        }
+    )
 }
 
 @Composable

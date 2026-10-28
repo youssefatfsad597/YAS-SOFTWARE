@@ -111,6 +111,35 @@ class LicenseService(context: Context) {
         "إذا كان هذا البريد مسجلاً لدينا، فستصلك رسالة لإعادة تعيين كلمة المرور خلال دقائق."
     }
 
+    /** Self-service password change for a signed-in user who still remembers their current
+     *  password. The current password is re-verified with a throwaway sign-in call (its
+     *  tokens are discarded) before the update, so a stolen/unlocked session on its own is
+     *  never enough to change the password. Never touches the admin-only admin_set_password
+     *  RPC, which exists for the opposite case (the user forgot it and an admin resets it). */
+    suspend fun changePassword(currentPassword: String, newPassword: String): String = withContext(Dispatchers.IO) {
+        if (newPassword.length < 8) throw IllegalStateException("كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف.")
+        if (newPassword == currentPassword) throw IllegalStateException("كلمة المرور الجديدة مطابقة للحالية.")
+        val userEmail = email()
+        if (userEmail.isBlank()) throw IllegalStateException("لا توجد جلسة دخول حالية.")
+        // Confirms the current password without disturbing the stored session.
+        try {
+            request(
+                "/auth/v1/token?grant_type=password", "POST",
+                JSONObject().put("email", userEmail).put("password", currentPassword),
+                authenticated = false
+            )
+        } catch (_: Exception) {
+            throw IllegalStateException("كلمة المرور الحالية غير صحيحة.")
+        }
+        val result = request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true)
+        if (result.optString("id").isBlank()) {
+            throw IllegalStateException(result.optString("msg", result.optString("message", "تعذر تحديث كلمة المرور.")))
+        }
+        // Keep the saved remember-me password (if any) in sync so auto-fill still works.
+        if (rememberEnabled()) saveCredentials(userEmail, newPassword, true)
+        "تم تغيير كلمة المرور بنجاح."
+    }
+
     suspend fun authorize(): License = withContext(Dispatchers.IO) {
         if (!hasSession()) return@withContext License(false, "signed_out", null, "سجّل الدخول أولًا.")
         try {
