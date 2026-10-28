@@ -22,8 +22,9 @@ object EmbeddedFirmware {
     const val FRP = "frp.bin"
     const val SEC_EFS = "sec_efs.bin"
     const val PERSISTENT = "persistent.bin"
+    const val MISC = "misc.bin"
 
-    val ALL_FILES = listOf(LOADER, FRP, SEC_EFS, PERSISTENT)
+    val ALL_FILES = listOf(LOADER, FRP, SEC_EFS, PERSISTENT, MISC)
 
     private fun path(name: String) = "$ASSET_DIR/$name"
 
