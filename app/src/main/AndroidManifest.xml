@@ -25,6 +25,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
+            <!-- Password-reset deep link: yassoftware://reset-password?access_token=...
+                 (opened by reset-password.html after the user taps the e-mail link). -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="yassoftware" android:host="reset-password" />
+            </intent-filter>
+
             <!-- No USB_DEVICE_ATTACHED filter on purpose: it made Android show its own
                  "open YAS to handle this USB device" dialog on top of the app's own
                  "allow access" dialog (two taps). The app detects attach at runtime. -->
