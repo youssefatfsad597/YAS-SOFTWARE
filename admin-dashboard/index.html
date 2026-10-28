@@ -12,8 +12,10 @@ h1{margin-top:0}
 input,select,button{font:inherit;border-radius:9px;border:1px solid #394969;padding:10px;background:#0e1629;color:inherit}
 input{max-width:100%;box-sizing:border-box}
 button{cursor:pointer;background:#3659cc;border:0;font-weight:650}
+button:disabled{opacity:.5;cursor:wait}
 button.secondary{background:#303c56}
 button.danger{background:#9d3545}
+button.success{background:#1f7a4c}
 button.ghost{background:transparent;border:1px solid #394969;font-weight:500;padding:6px 9px}
 button.chip{background:#20305a;font-weight:600;padding:6px 10px;border-radius:999px;font-size:13px}
 button.chip:hover{background:#2c4078}
@@ -24,21 +26,26 @@ button.chip.active{background:#1f7a4c}
 .muted{color:#aab7d3}
 .msg{white-space:pre-wrap;margin:10px 0}
 .tablewrap{overflow:auto}
-table{width:100%;border-collapse:collapse;min-width:950px}
+table{width:100%;border-collapse:collapse;min-width:900px}
 th,td{text-align:right;padding:10px;border-bottom:1px solid #2a3653;vertical-align:top}
 small{display:block;color:#aab7d3;overflow-wrap:anywhere}
 .device{border:1px solid #34415f;border-radius:9px;padding:8px;margin:6px 0}
+.device.current{border-color:#1f7a4c}
 .tag{padding:3px 8px;border-radius:7px;background:#263858;display:inline-block}
 .tag.active{background:#1f4a32;color:#8ff0b8}
 .tag.pending{background:#4a3c1f;color:#f0d08f}
 .tag.suspended,.tag.expired{background:#4a1f26;color:#f08f9b}
+.tag.admin{background:#3b2a5c;color:#cdb4ff;margin-inline-start:6px}
 .quick{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}
-.search-wrap{display:flex;gap:10px;align-items:center;margin:10px 0}
-.search-wrap input{flex:1}
+.search-wrap{display:flex;gap:10px;align-items:center;margin:10px 0;flex-wrap:wrap}
+.search-wrap input{flex:1;min-width:200px}
 .count-badge{background:#263858;border-radius:999px;padding:4px 12px;font-size:13px;white-space:nowrap}
 .copybtn{background:none;border:none;color:#8aa0e0;cursor:pointer;font-size:12px;padding:2px 4px}
+.notice{background:#1a2a4a;border:1px solid #2f4a7d;border-radius:12px;padding:10px 14px;margin:10px 0;font-size:14px}
+.bulk{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
+.bulk input{width:110px}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 </head>
 <body><main class="wrap">
 <h1>YAS SOFTWARE <span class="muted">/ إدارة التراخيص</span></h1>
@@ -60,9 +67,22 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
 <section id="panel" class="hidden">
   <div class="card">
     <div class="row">
-      <div><h2>الحسابات والتراخيص</h2><p class="muted">التفعيل الافتراضي للحسابات الجديدة هو pending. الأزرار السريعة أسفل كل حساب تطبّق فورًا دون الحاجة للنزول للنموذج.</p></div>
+      <div><h2>الحسابات والتراخيص</h2><p class="muted">الحسابات الجديدة تبدأ بحالة pending. الأزرار السريعة أسفل كل حساب تُطبَّق فورًا.</p></div>
       <div style="text-align:left"><button class="secondary" id="reload">تحديث</button> <button class="danger" id="logout">خروج</button></div>
     </div>
+
+    <div class="notice">
+      سياسة الجهاز الواحد: كل حساب يعمل على جهاز واحد فقط في نفس الوقت. التبديل إلى جهاز آخر يُسمح به بعد
+      <b>4 ساعات</b> من آخر نشاط للجهاز السابق، أو فورًا إذا ضغطت «إلغاء الجهاز» من هنا.
+    </div>
+
+    <div class="bulk">
+      <span>تفعيل كل الحسابات المعلّقة (<b id="pendingCount">0</b>) لمدة</span>
+      <input id="bulkDays" type="number" min="1" max="3650" value="30">
+      <span>يوم</span>
+      <button class="success" id="activateAll">تفعيل الكل</button>
+    </div>
+
     <div class="search-wrap">
       <input id="search" placeholder="بحث بالبريد أو User ID أو الحالة...">
       <select id="filterStatus"><option value="">كل الحالات</option><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="expired">منتهي</option><option value="suspended">موقوف</option></select>
@@ -70,19 +90,18 @@ small{display:block;color:#aab7d3;overflow-wrap:anywhere}
     </div>
     <div id="message" class="msg"></div>
     <div class="tablewrap"><table>
-      <thead><tr><th>الحساب</th><th>الحالة</th><th>انتهاء التفعيل</th><th>حد الأجهزة</th><th>الأجهزة</th><th>إجراءات سريعة</th></tr></thead>
+      <thead><tr><th>الحساب</th><th>الحالة</th><th>انتهاء التفعيل</th><th>الجهاز</th><th>إجراءات سريعة</th></tr></thead>
       <tbody id="users"></tbody>
     </table></div>
   </div>
 
   <div class="card">
     <h2>تفعيل / تعديل حساب (يدوي)</h2>
-    <p class="muted">أدخل User ID من الجدول، أو اضغط "تعديل" في صف الحساب لتعبئته تلقائيًا. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p>
+    <p class="muted">أدخل User ID من الجدول، أو اضغط «تعديل» في صف الحساب لتعبئته تلقائيًا. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p>
     <div class="row">
       <input id="userId" placeholder="User UUID">
       <select id="status"><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="suspended">موقوف</option></select>
       <input id="expiry" type="datetime-local">
-      <input id="limit" type="number" min="1" max="100" value="3" placeholder="حد الأجهزة">
     </div>
     <p class="muted">تمديد سريع من الآن (يملأ حقل الانتهاء تلقائيًا ويضبط الحالة كـ مفعّل):</p>
     <div class="quick" id="quickDurations">
@@ -112,6 +131,7 @@ function connect(show=true){
   try{
     const u=$('url').value.trim(),k=$('key').value.trim();
     if(!u||!k)throw Error('أدخل URL ومفتاح anon.');
+    if(!window.supabase)throw Error('تعذر تحميل مكتبة Supabase. تأكد من الاتصال بالإنترنت.');
     sb=window.supabase.createClient(u,k,{auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
     $('login').classList.remove('hidden');
     if(show)say('تم إعداد الاتصال. سجّل الدخول بحساب المدير.');
@@ -120,15 +140,24 @@ function connect(show=true){
 }
 $('connect').onclick=()=>{connect()};
 $('saveConfig').onclick=()=>{localStorage.setItem('yas_supabase_url',$('url').value.trim());localStorage.setItem('yas_supabase_anon',$('key').value.trim());alert('تم حفظ URL ومفتاح anon محليًا في هذا المتصفح فقط.')};
-$('signIn').onclick=async()=>{if(!sb&&!connect())return;const {data,error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error){alert(error.message);return}await loadUsers()};
+$('signIn').onclick=async()=>{if(!sb&&!connect())return;const {error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error){alert(error.message);return}await loadUsers()};
 $('reload').onclick=loadUsers;
-$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
+$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();allUsers=[];$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
 
 function dateInput(v){if(!v)return '';const d=new Date(v);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16)}
+function fmt(v){if(!v)return '—';const d=new Date(v);return isNaN(d)?String(v):d.toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'})}
 function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 async function rpc(name,args={}){const {data,error}=await sb.rpc(name,args);if(error)throw error;return data}
 
-function statusTag(s){return `<span class="tag ${esc(s)}">${esc(s)}</span>`}
+const STATUS_AR={active:'مفعّل',pending:'بانتظار التفعيل',expired:'منتهي',suspended:'موقوف'};
+function statusTag(s){return `<span class="tag ${esc(s)}">${esc(STATUS_AR[s]||s)}</span>`}
+
+// Extends from whichever is later: right now, or the account's current expiry,
+// so pressing "+شهر" on an account with 20 days left does not shorten it.
+function extendedExpiry(currentExpiry,mins){
+  const base=Math.max(Date.now(),currentExpiry?new Date(currentExpiry).getTime():0);
+  return new Date(base+mins*60000).toISOString();
+}
 
 function renderTable(){
   const q=($('search').value||'').trim().toLowerCase();
@@ -139,23 +168,26 @@ function renderTable(){
     return matchesQ && matchesS;
   });
   $('count').textContent=`${filtered.length} من ${allUsers.length} حساب`;
+  $('pendingCount').textContent=allUsers.filter(u=>u.status==='pending').length;
   $('users').innerHTML='';
   for(const u of filtered){
     const tr=document.createElement('tr');
-    const devices=(u.devices||[]).map(d=>`<div class="device"><b>${esc(d.label)}</b><small>${esc(d.device_id)}</small><small>آخر ظهور: ${esc(d.last_seen_at||'—')}</small>${d.revoked_at?'<span class="tag">ملغى</span>':`<button class="danger" data-revoke="${esc(d.id)}">إلغاء الجهاز</button>`}</div>`).join('')||'—';
+    const devs=u.devices||[];
+    const live=devs.filter(d=>!d.revoked_at);
+    const old=devs.length-live.length;
+    const devices=live.map(d=>`<div class="device current"><b>${esc(d.label)}</b><small>${esc(d.device_id)}</small><small>آخر ظهور: ${esc(fmt(d.last_seen_at))}</small><button class="danger" data-revoke="${esc(d.id)}">إلغاء الجهاز</button></div>`).join('')||'<span class="muted">لا يوجد جهاز نشط</span>';
     tr.innerHTML=`
-      <td><b>${esc(u.email)}</b> <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>${esc(u.user_id)} <button class="copybtn" data-copy="${esc(u.user_id)}" title="نسخ المعرّف">⧉</button></small><small>إنشاء: ${esc(u.created_at)}</small></td>
+      <td><b>${esc(u.email)}</b>${u.role==='admin'?'<span class="tag admin">admin</span>':''} <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>${esc(u.user_id)} <button class="copybtn" data-copy="${esc(u.user_id)}" title="نسخ المعرّف">⧉</button></small><small>إنشاء: ${esc(fmt(u.created_at))}</small></td>
       <td>${statusTag(u.status)}</td>
-      <td>${esc(u.expires_at||'—')}</td>
-      <td>${esc(u.device_limit)}</td>
-      <td>${esc(u.device_count)}<div>${devices}</div></td>
+      <td>${esc(fmt(u.expires_at))}</td>
+      <td>${devices}${old?`<small>أجهزة سابقة ملغاة: ${old}</small>`:''}</td>
       <td>
         <div class="quick">
-          <button class="ghost" data-edit="${esc(u.user_id)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}" data-limit="${esc(u.device_limit)}">تعديل</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="1440">+يوم</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="10080">+أسبوع</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-limit="${esc(u.device_limit)}" data-quick-mins="43200">+شهر</button>
-          <button class="danger" data-suspend="${esc(u.user_id)}" data-limit="${esc(u.device_limit)}">إيقاف</button>
+          <button class="ghost" data-edit="${esc(u.user_id)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}">تعديل</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="1440">+يوم</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="10080">+أسبوع</button>
+          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="43200">+شهر</button>
+          <button class="danger" data-suspend="${esc(u.user_id)}">إيقاف</button>
         </div>
       </td>`;
     $('users').appendChild(tr);
@@ -165,23 +197,20 @@ function renderTable(){
     $('userId').value=b.dataset.edit;
     $('status').value=['active','pending','suspended'].includes(b.dataset.status)?b.dataset.status:'pending';
     $('expiry').value=dateInput(b.dataset.expiry);
-    $('limit').value=b.dataset.limit;
     window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
   });
   $('users').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('إلغاء هذا الجهاز؟'))return;
-    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});await loadUsers()}catch(e){say(e.message)}
+    if(!confirm('إلغاء هذا الجهاز؟ سيتمكن الحساب من الدخول من جهاز جديد فورًا.'))return;
+    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});say('تم إلغاء الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
   });
   $('users').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
     navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
   });
-  // Row-level quick extend: applies instantly without touching the manual form.
   $('users').querySelectorAll('[data-quick-user]').forEach(b=>b.onclick=async()=>{
     try{
       say('جارٍ التطبيق...');
-      const mins=Number(b.dataset.quickMins);
-      const expiry=new Date(Date.now()+mins*60000).toISOString();
-      await rpc('admin_set_license',{p_user_id:b.dataset.quickUser,p_status:'active',p_expires_at:expiry,p_device_limit:Number(b.dataset.quickLimit)||3});
+      const expiry=extendedExpiry(b.dataset.quickExpiry,Number(b.dataset.quickMins));
+      await rpc('admin_set_license',{p_user_id:b.dataset.quickUser,p_status:'active',p_expires_at:expiry});
       say('تم التمديد.');
       await loadUsers();
     }catch(e){say(`فشل: ${e.message||e}`)}
@@ -189,7 +218,7 @@ function renderTable(){
   $('users').querySelectorAll('[data-suspend]').forEach(b=>b.onclick=async()=>{
     if(!confirm('إيقاف هذا الحساب فورًا؟'))return;
     try{
-      await rpc('admin_set_license',{p_user_id:b.dataset.suspend,p_status:'suspended',p_expires_at:null,p_device_limit:Number(b.dataset.limit)||3});
+      await rpc('admin_set_license',{p_user_id:b.dataset.suspend,p_status:'suspended',p_expires_at:null});
       say('تم إيقاف الحساب.');
       await loadUsers();
     }catch(e){say(`فشل: ${e.message||e}`)}
@@ -198,6 +227,22 @@ function renderTable(){
 
 $('search').oninput=renderTable;
 $('filterStatus').onchange=renderTable;
+
+$('activateAll').onclick=async()=>{
+  const days=Number($('bulkDays').value);
+  const n=allUsers.filter(u=>u.status==='pending').length;
+  if(!n){say('لا توجد حسابات معلّقة.');return}
+  if(!Number.isFinite(days)||days<1){say('أدخل عدد أيام صحيح.');return}
+  if(!confirm(`تفعيل ${n} حساب معلّق لمدة ${days} يوم؟`))return;
+  const btn=$('activateAll');btn.disabled=true;
+  try{
+    const expiry=new Date(Date.now()+days*86400000).toISOString();
+    const r=await rpc('admin_activate_all_pending',{p_expires_at:expiry});
+    say(`تم تفعيل ${r&&r.activated_count!=null?r.activated_count:n} حساب.`);
+    await loadUsers();
+  }catch(e){say(`فشل: ${e.message||e}`)}
+  finally{btn.disabled=false}
+};
 
 async function loadUsers(){
   if(!sb)return;
@@ -224,14 +269,14 @@ $('quickDurations').querySelectorAll('[data-mins]').forEach(b=>b.onclick=()=>{
 
 $('apply').onclick=async()=>{
   try{
-    const userId=$('userId').value.trim(),status=$('status').value,limit=Number($('limit').value);
+    const userId=$('userId').value.trim(),status=$('status').value;
     if(!userId)throw Error('أدخل User ID.');
     let expiry=null;
     if(status==='active'){
       if(!$('expiry').value)throw Error('حدد تاريخ انتهاء مستقبليًا أو استخدم أحد أزرار التمديد السريع.');
       expiry=new Date($('expiry').value).toISOString();
     }
-    await rpc('admin_set_license',{p_user_id:userId,p_status:status,p_expires_at:expiry,p_device_limit:limit});
+    await rpc('admin_set_license',{p_user_id:userId,p_status:status,p_expires_at:expiry});
     say('تم تحديث الترخيص على الخادم.');
     await loadUsers();
   }catch(e){say(`فشل تحديث الترخيص: ${e.message||e}`)}
