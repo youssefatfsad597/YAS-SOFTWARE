@@ -107,7 +107,20 @@ class LicenseService(context: Context) {
     }
 
     suspend fun resetPassword(email: String): String = withContext(Dispatchers.IO) {
-        request("/auth/v1/recover", "POST", JSONObject().put("email", email.trim()), authenticated = false)
+        try {
+            request("/auth/v1/recover", "POST", JSONObject().put("email", email.trim()), authenticated = false)
+        } catch (e: Exception) {
+            val reason = e.message.orEmpty().lowercase()
+            if (reason.contains("error sending recovery email") || reason.contains("error sending confirmation") ||
+                reason.contains("smtp") || (reason.contains("email") && reason.contains("rate limit"))
+            ) {
+                throw IllegalStateException(
+                    "تعذر إرسال بريد الاستعادة. خدمة الإيميل الافتراضية في Supabase محدودة جدًا — " +
+                    "يجب على المسؤول تفعيل SMTP مخصص من لوحة Supabase (Authentication → Settings → SMTP Settings)."
+                )
+            }
+            throw e
+        }
         "إذا كان هذا البريد مسجلاً لدينا، فستصلك رسالة لإعادة تعيين كلمة المرور خلال دقائق."
     }
 

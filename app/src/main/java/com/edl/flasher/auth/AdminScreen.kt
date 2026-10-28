@@ -71,6 +71,7 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
     var message by remember { mutableStateOf("") }
     var messageIsError by remember { mutableStateOf(false) }
     var confirm by remember { mutableStateOf<ConfirmReq?>(null) }
+    var pwTarget by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var showDeleted by remember { mutableStateOf(true) }
 
@@ -121,6 +122,27 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
 
     confirm?.let { req ->
         ConfirmDialog(req = req, onDismiss = { confirm = null }, onConfirmed = { confirm = null; req.onConfirm() })
+    }
+
+    pwTarget?.let { email ->
+        PasswordDialog(
+            email = email,
+            randomPassword = { service.randomPassword(12) },
+            onDismiss = { pwTarget = null },
+            onConfirm = { pw ->
+                pwTarget = null
+                scope.launch {
+                    try {
+                        service.setPassword(email, pw)
+                        message = "تم تغيير كلمة المرور لـ $email.\nكلمة المرور الجديدة: $pw\n⚠️ احفظها الآن، لن تظهر مرة أخرى."
+                        messageIsError = false
+                    } catch (e: Exception) {
+                        message = e.message ?: "فشلت العملية."
+                        messageIsError = true
+                    }
+                }
+            }
+        )
     }
 
     MaterialTheme(colorScheme = darkColorScheme(background = AdminColors.Bg, surface = AdminColors.Surface, primary = AdminColors.Primary)) {
@@ -368,6 +390,10 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                                             perform("تم حذف الحساب نهائيًا.") { service.deleteUser(account.userId) }
                                         }
                                     },
+                                    onChangePassword = { pwTarget = account.email },
+                                    onQuickExtend = { mins ->
+                                        perform("تم التمديد.") { service.extendLicense(account.userId, account.expiresAt, mins) }
+                                    },
                                     onCopy = { clipboard.setText(AnnotatedString(it)) }
                                 )
                             }
@@ -399,6 +425,40 @@ private fun ConfirmDialog(req: ConfirmReq, onDismiss: () -> Unit, onConfirmed: (
             }
         },
         confirmButton = { TextButton(enabled = ok, onClick = onConfirmed) { Text(req.confirmLabel, color = if (ok) AdminColors.DangerText else AdminColors.Muted, fontWeight = FontWeight.Bold) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("تراجع", color = AdminColors.SkyText) } }
+    )
+}
+
+/** Matches the web dashboard's "تغيير الباسورد" prompt: type a password (8+ chars) or leave
+ *  blank to auto-generate one. Confirming invalidates the account's current password immediately. */
+@Composable
+private fun PasswordDialog(email: String, randomPassword: () -> String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
+    var pw by remember { mutableStateOf("") }
+    val trimmed = pw.trim()
+    val valid = trimmed.isEmpty() || trimmed.length >= 8
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = AdminColors.Surface,
+        titleContentColor = AdminColors.Text,
+        textContentColor = AdminColors.TextSoft,
+        title = { Text("تغيير كلمة مرور $email") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text("هذا يُبطل كلمة المرور الحالية فورًا. اتركه فارغًا لتوليد كلمة مرور عشوائية تلقائيًا، أو اكتب كلمة مرور بنفسك (8 أحرف على الأقل):")
+                OutlinedTextField(
+                    value = pw, onValueChange = { pw = it }, singleLine = true,
+                    colors = fieldColors(), shape = RoundedCornerShape(12.dp),
+                    isError = !valid, modifier = Modifier.fillMaxWidth()
+                )
+                if (!valid) Text("كلمة المرور يجب ألا تقل عن 8 أحرف.", color = AdminColors.DangerText, style = MaterialTheme.typography.labelSmall)
+                TextButton(onClick = { pw = randomPassword() }) { Text("توليد تلقائي", color = AdminColors.SkyText) }
+            }
+        },
+        confirmButton = {
+            TextButton(enabled = valid, onClick = { onConfirm(trimmed.ifEmpty { randomPassword() }) }) {
+                Text("تغيير", color = if (valid) AdminColors.DangerText else AdminColors.Muted, fontWeight = FontWeight.Bold)
+            }
+        },
         dismissButton = { TextButton(onClick = onDismiss) { Text("تراجع", color = AdminColors.SkyText) } }
     )
 }
@@ -463,6 +523,8 @@ private fun AccountRow(
     onRestore: (AdminService.DeviceRow) -> Unit,
     onBan: (AdminService.DeviceRow) -> Unit,
     onDeleteAccount: () -> Unit,
+    onChangePassword: () -> Unit,
+    onQuickExtend: (Long) -> Unit,
     onCopy: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -491,6 +553,12 @@ private fun AccountRow(
                     "active" -> TextButton(onClick = { onToggle("suspended") }) { Text("إيقاف", color = AdminColors.DangerText) }
                     "suspended" -> TextButton(onClick = { onToggle("active") }) { Text("تفعيل", color = AdminColors.SkyText) }
                 }
+                TextButton(onClick = onChangePassword) { Text("تغيير الباسورد", color = AdminColors.SkyText) }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(onClick = { onQuickExtend(1440L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+يوم", color = AdminColors.SkyText, fontSize = 12.sp) }
+                TextButton(onClick = { onQuickExtend(10080L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+أسبوع", color = AdminColors.SkyText, fontSize = 12.sp) }
+                TextButton(onClick = { onQuickExtend(43200L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+شهر", color = AdminColors.SkyText, fontSize = 12.sp) }
             }
             if (expanded) {
                 val devices = account.devices.filter { showDeleted || it.state != "deleted" }

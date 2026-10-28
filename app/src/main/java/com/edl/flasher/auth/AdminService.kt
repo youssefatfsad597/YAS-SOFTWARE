@@ -124,6 +124,19 @@ class AdminService(private val license: LicenseService) {
         rpc("admin_set_license", JSONObject().put("p_user_id", userId).put("p_status", status).put("p_expires_at", expiresAt ?: JSONObject.NULL))
     }
 
+    /** Same "+يوم / +أسبوع / +شهر" quick chip as the web dashboard: extends from the later of
+     *  [currentExpiresAt] or now, by [minutes], and activates the account until then. */
+    suspend fun extendLicense(userId: String, currentExpiresAt: String?, minutes: Long) {
+        val base = currentExpiresAt?.let { raw ->
+            try {
+                val parsed = OffsetDateTime.parse(raw)
+                if (parsed.isAfter(OffsetDateTime.now())) parsed else OffsetDateTime.now()
+            } catch (_: Exception) { OffsetDateTime.now() }
+        } ?: OffsetDateTime.now()
+        val expiresAt = base.plusMinutes(minutes).toString()
+        rpc("admin_set_license", JSONObject().put("p_user_id", userId).put("p_status", "active").put("p_expires_at", expiresAt))
+    }
+
     // ---- Devices: cancel (blocked, stays listed) / delete (kept as history) / restore / ban ----
     suspend fun revokeDevice(deviceRowId: String) { rpc("admin_revoke_device", JSONObject().put("p_device_row_id", deviceRowId)) }
     suspend fun deleteDevice(deviceRowId: String) { rpc("admin_delete_device", JSONObject().put("p_device_row_id", deviceRowId)) }
@@ -149,6 +162,15 @@ class AdminService(private val license: LicenseService) {
 
     /** Permanently deletes the account (and its devices) from the platform. Server refuses admins / yourself. */
     suspend fun deleteUser(userId: String) { rpc("admin_delete_user", JSONObject().put("p_user_id", userId)) }
+
+    /** Admin-forced password reset, same as the web dashboard's "تغيير الباسورد". Invalidates
+     *  the account's current password immediately; the new one is not retrievable afterwards. */
+    suspend fun setPassword(email: String, newPassword: String) {
+        rpc("admin_set_password", JSONObject().put("p_email", email).put("p_new_password", newPassword))
+    }
+
+    /** Public entry point for the UI to suggest a random password, same generator used for bulk creation. */
+    fun randomPassword(length: Int = 12): String = generatePassword(length)
 
     /** Emails like yasoftware1@yas.com, yasoftware2@yas.com ... skipping ones already in [taken]. */
     fun generateEmails(prefix: String, domain: String, count: Int, taken: Set<String>): List<String> {
