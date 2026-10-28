@@ -31,6 +31,7 @@ android {
         debug {
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "yassoftware://reset-password") + "\"")
             // Left blank on purpose: the tamper check is skipped for debug builds.
             buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
         }
@@ -39,6 +40,7 @@ android {
             isShrinkResources = true
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "yassoftware://reset-password") + "\"")
             // Fill RELEASE_CERT_SHA256 in gradle.properties with your release keystore's
             // SHA-256 fingerprint once you have one, so TamperGuard can reject re-signed APKs.
             buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
