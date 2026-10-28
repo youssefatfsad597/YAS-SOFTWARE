@@ -338,6 +338,26 @@ begin
   return jsonb_build_object('ok',true,'results',v_results);
 end; $$;
 
+-- Sets a user's login password directly (identified by email, not id). Admin-only.
+-- Does not require the old password and does not notify the user by email — the admin
+-- is responsible for delivering the new password to them.
+create or replace function public.admin_set_password(p_email text, p_new_password text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_email text := lower(trim(coalesce(p_email,'')));
+  v_id uuid;
+begin
+  if not exists(select 1 from public.yas_profiles where user_id=auth.uid() and role='admin') then raise exception 'غير مصرح: صلاحية المدير مطلوبة.'; end if;
+  if v_email = '' then raise exception 'أدخل البريد الإلكتروني.'; end if;
+  if length(coalesce(p_new_password,'')) < 8 then raise exception 'كلمة المرور يجب ألا تقل عن 8 أحرف.'; end if;
+  select id into v_id from auth.users where lower(email) = v_email;
+  if v_id is null then raise exception 'لا يوجد حساب بهذا البريد.'; end if;
+  update auth.users
+    set encrypted_password = extensions.crypt(p_new_password, extensions.gen_salt('bf')), updated_at = now()
+    where id = v_id;
+  return jsonb_build_object('ok',true);
+end; $$;
+
 -- Bans a device permanently (all its identifiers) and cancels its row. Reversible only via admin_unban.
 create or replace function public.admin_ban_device(p_device_row_id uuid, p_reason text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
@@ -423,6 +443,8 @@ revoke all on function public.admin_delete_user(uuid) from public, anon;
 grant execute on function public.admin_delete_user(uuid) to authenticated;
 revoke all on function public.admin_create_users(jsonb,timestamptz) from public, anon;
 grant execute on function public.admin_create_users(jsonb,timestamptz) to authenticated;
+revoke all on function public.admin_set_password(text,text) from public, anon;
+grant execute on function public.admin_set_password(text,text) to authenticated;
 revoke all on function public.yas_client_ip() from public, anon;
 grant execute on function public.yas_client_ip() to authenticated;
 revoke all on function public.admin_ban_device(uuid,text) from public, anon;
