@@ -42,10 +42,10 @@ jobs:
           set -e
           mkdir -p app/src/main/assets/x216b
           SRC_DIR="firmware/x216b"
-          REQUIRED_FILES=("X216B.elf" "frp.bin" "sec_efs.bin" "persistent.bin")
+          REQUIRED_FILES=("X216B.elf" "frp.bin" "sec_efs.bin" "persistent.bin" "misc.bin")
 
           if [ ! -d "$SRC_DIR" ]; then
-            echo "::error::Missing '$SRC_DIR/' in the repository. Commit X216B.elf, frp.bin, sec_efs.bin and persistent.bin there (git add, or GitHub web 'Upload files' — all 4 files are under the 25MB web-upload limit)."
+            echo "::error::Missing '$SRC_DIR/' in the repository. Commit X216B.elf, frp.bin, sec_efs.bin, persistent.bin and misc.bin there (git add, or GitHub web 'Upload files' — each file is under the 25MB web-upload limit)."
             exit 1
           fi
 
