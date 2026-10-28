@@ -748,6 +748,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         val aliases: Set<String>,
         val displayName: String,
         val sizeBytes: Long,
+        // What the log shows for this step instead of the raw partition/file name.
+        val logLabel: String,
         val open: () -> InputStream
     )
 
@@ -825,41 +827,45 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLog("Erase step completed successfully.")
 
-            appendLog("=== STEP 2: WRITING PARTITIONS (FRP, SEC_EFS, PERSISTENT) ===")
+            appendLog("=== STEP 2: WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
                 appendLog("Writing firmware images...")
                 listOf(
                     WriteJob("frp", setOf("frp"), "frp",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP)) {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "مسح frp 1") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP)
                     },
-                    WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS)) {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS)
-                    },
                     WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT)) {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "مسح frp 2") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT)
+                    },
+                    WriteJob("misc", setOf("misc"), "misc",
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "مسح data") {
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC)
+                    },
+                    WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "مسح MDM") {
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS)
                     }
                 )
             } else {
                 listOfNotNull(
                     _uiState.value.frpFileUri?.let { uri ->
                         val doc = DocumentFile.fromSingleUri(context, uri)
-                        WriteJob("frp", setOf("frp"), doc?.name ?: "frp", doc?.length() ?: 0L) {
-                            context.contentResolver.openInputStream(uri)!!
-                        }
-                    },
-                    _uiState.value.secEfsFileUri?.let { uri ->
-                        val doc = DocumentFile.fromSingleUri(context, uri)
-                        WriteJob("sec_efs", setOf("sec_efs"), doc?.name ?: "sec_efs", doc?.length() ?: 0L) {
+                        WriteJob("frp", setOf("frp"), doc?.name ?: "frp", doc?.length() ?: 0L, "مسح frp 1") {
                             context.contentResolver.openInputStream(uri)!!
                         }
                     },
                     _uiState.value.persistentFileUri?.let { uri ->
                         val doc = DocumentFile.fromSingleUri(context, uri)
-                        WriteJob("persistent", setOf("persistent", "persestent", "presistent"), doc?.name ?: "persistent", doc?.length() ?: 0L) {
+                        WriteJob("persistent", setOf("persistent", "persestent", "presistent"), doc?.name ?: "persistent", doc?.length() ?: 0L, "مسح frp 2") {
+                            context.contentResolver.openInputStream(uri)!!
+                        }
+                    },
+                    _uiState.value.secEfsFileUri?.let { uri ->
+                        val doc = DocumentFile.fromSingleUri(context, uri)
+                        WriteJob("sec_efs", setOf("sec_efs"), doc?.name ?: "sec_efs", doc?.length() ?: 0L, "مسح MDM") {
                             context.contentResolver.openInputStream(uri)!!
                         }
                     }
@@ -878,7 +884,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     appendLog("ERROR: Partition '${job.label}' not found in GPT! Cannot write.")
                 } else {
                     val startNs = System.nanoTime()
-                    appendLog("Writing ${idx + 1}/${writeQueue.size}...")
+                    appendLog(job.logLabel)
                     job.open().use { input ->
                         firehose.writePartitionStream(
                             lun = targetPart.lun,

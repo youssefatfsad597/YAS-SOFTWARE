@@ -1494,7 +1494,7 @@ private fun ServiceTab(
                 StatusBadge("Firmware", if (state.embeddedFirmwareReady) Yas.Success else Yas.Idle)
             }
             YASButton(
-                text = "Wipe & Write  \u00B7  Format + FRP + MDM",
+                text = "Format FRP MDM",
                 onClick = onRunX216BWipeAndWrite,
                 modifier = Modifier.fillMaxWidth(),
                 style = BtnStyle.Primary,
@@ -3085,8 +3085,8 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
     ExplainSection(
         title = "تبويب X216B",
         body = """
-## "Wipe & Write · Format + FRP + MDM"
-الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM. بيشتغل والجهاز في EDL (9008).
+## "Format FRP MDM"
+الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM. بيشتغل والجهاز في EDL (9008). بيكتب الملفات بالترتيب ده: frp ← persistent ← misc ← sec_efs، واللوج بيوضح كل خطوة.
 
 ## "X216B Remove KNOX"
 1. بيلغي باكدجات Knox والـ MDM عن طريق ADB.
@@ -3242,7 +3242,7 @@ private val EXPLAIN_WORKFLOWS: List<ExplainSection> = listOf(
 ## المرحلة 1: التجهيز والدخول في EDL
 1. لو في شريحة (خط) جوه التابلت، شيلها قبل ما تبدأ.
 2. ادخل الجهاز في EDL بالكابل المعدل (اتبع قسم "EDL" فوق).
-3. افتح تبويب X216B واضغط "Wipe & Write · Format + FRP + MDM".
+3. افتح تبويب X216B واضغط "Format FRP MDM".
 4. استنى لحد ما العملية تخلص من غير ما تفصل الكابل.
 5. افصل الكابل وسيب الجهاز يقلع. أول إقلاع بياخد دقايق وممكن يعمل reboot أكتر من مرة.
 
