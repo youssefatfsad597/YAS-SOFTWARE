@@ -31,7 +31,10 @@ android {
         debug {
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
-            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "yassoftware://reset-password") + "\"")
+            // Default points at the hosted reset-password.html in the public "Yas" repo
+            // (GitHub Pages), so the link works from Gmail/any mail app without needing
+            // -PRESET_REDIRECT_URL on every build. Override with -PRESET_REDIRECT_URL=... if needed.
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "https://youssefatfsad597.github.io/Yas/reset-password.html") + "\"")
             // Left blank on purpose: the tamper check is skipped for debug builds.
             buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
         }
@@ -40,7 +43,7 @@ android {
             isShrinkResources = true
             buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
             buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
-            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "yassoftware://reset-password") + "\"")
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "https://youssefatfsad597.github.io/Yas/reset-password.html") + "\"")
             // Fill RELEASE_CERT_SHA256 in gradle.properties with your release keystore's
             // SHA-256 fingerprint once you have one, so TamperGuard can reject re-signed APKs.
             buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
