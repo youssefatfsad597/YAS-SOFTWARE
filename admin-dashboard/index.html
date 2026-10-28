@@ -120,7 +120,7 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
     <p class="muted">اكتب الإيميلات (سطر لكل إيميل أو مفصولة بمسافة/فاصلة) وحدّد المدة، وكلها تتفعل بنفس تاريخ الانتهاء.</p>
     <p><textarea id="actEmails" placeholder="yasoftware1@yas.com&#10;yasoftware2@yas.com"></textarea></p>
     <div class="row">
-      <label class="muted">مدة التفعيل <input id="actDur" type="number" min="1" value="30" style="width:80px"> <select id="actUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option></select></label>
+      <label class="muted">مدة التفعيل <input id="actDur" type="number" min="1" value="30" style="width:80px"> <select id="actUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option><option value="525600">سنة</option></select></label>
       <button class="success" id="activateMany">تفعيل الحسابات</button>
     </div>
     <div id="actResult" class="msg"></div>
@@ -138,8 +138,8 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
   </div>
 
   <div class="card">
-    <h2>إنشاء عدة حسابات بباسوردات عشوائية</h2>
-    <p class="muted">الإيميلات المولّدة بالشكل yasoftware1@yas.com ثم 2 ثم 3... حسب العدد (تُحفظ بحروف صغيرة). اكتب الإيميلات بنفسك أو ولّدها تلقائيًا. كل حساب يأخذ كلمة مرور عشوائية مختلفة، وتظهر لك <b>مرة واحدة فقط</b> بعد الإنشاء فاحفظها أو نزّلها.</p>
+    <h2>إنشاء عدة حسابات</h2>
+    <p class="muted">الإيميلات المولّدة بالشكل yasoftware1@yas.com ثم 2 ثم 3... حسب العدد (تُحفظ بحروف صغيرة). اكتب الإيميلات بنفسك أو ولّدها تلقائيًا.</p>
     <div class="row">
       <input id="genCount" type="number" min="1" max="200" value="5" placeholder="العدد">
       <input id="genPrefix" value="yasoftware" placeholder="بداية الاسم" style="direction:ltr">
@@ -147,9 +147,20 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
       <button class="secondary" id="genEmails">توليد الإيميلات</button>
     </div>
     <p><textarea id="newEmails" placeholder="user1@example.com&#10;user2@example.com"></textarea></p>
-    <div class="row">
+    <p class="muted">كلمة المرور: اختر طريقة التوليد. عند «توليد عشوائي» تظهر لك كل كلمة مرور <b>مرة واحدة فقط</b> بعد الإنشاء فاحفظها أو نزّلها.</p>
+    <div class="quick" id="pwModeChips">
+      <button class="chip active" data-pwmode="random">توليد عشوائي</button>
+      <button class="chip" data-pwmode="email">نفس البريد الإلكتروني</button>
+      <button class="chip" data-pwmode="custom">كلمة مرور موحّدة</button>
+    </div>
+    <div class="row" id="pwLenRow">
       <label class="muted">طول الباسورد <input id="pwLen" type="number" min="8" max="64" value="12" style="width:80px"></label>
-      <label class="muted">مدة التفعيل (0 = بانتظار التفعيل) <input id="newDur" type="number" min="0" value="30" style="width:80px"> <select id="newUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option></select></label>
+    </div>
+    <div class="row hidden" id="pwCustomRow">
+      <input id="pwCustom" placeholder="كلمة المرور الموحّدة (8 أحرف على الأقل)" style="direction:ltr">
+    </div>
+    <div class="row">
+      <label class="muted">مدة التفعيل (0 = بانتظار التفعيل) <input id="newDur" type="number" min="0" value="30" style="width:80px"> <select id="newUnit"><option value="60">ساعة</option><option value="1440" selected>يوم</option><option value="10080">أسبوع</option><option value="43200">شهر (30 يوم)</option><option value="525600">سنة</option></select></label>
       <button class="success" id="createAccounts">إنشاء الحسابات</button>
     </div>
     <div id="createResult"></div>
@@ -173,6 +184,7 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
       <button class="chip" data-mins="10080">+ أسبوع</button>
       <button class="chip" data-mins="43200">+ شهر</button>
       <button class="chip" data-mins="129600">+ 3 أشهر</button>
+      <button class="chip" data-mins="525600">+ سنة</button>
     </div>
     <p><button id="apply">حفظ الترخيص</button></p>
   </div>
@@ -315,6 +327,13 @@ function parseEmails(id='newEmails'){
   for(const x of $(id).value.split(/[\s,;]+/)){const e=x.trim().toLowerCase();if(e&&!seen.has(e)){seen.add(e);out.push(e)}}
   return out;
 }
+let pwMode='random';
+$('pwModeChips').querySelectorAll('[data-pwmode]').forEach(b=>b.onclick=()=>{
+  pwMode=b.dataset.pwmode;
+  $('pwModeChips').querySelectorAll('[data-pwmode]').forEach(x=>x.classList.toggle('active',x===b));
+  $('pwLenRow').classList.toggle('hidden',pwMode!=='random');
+  $('pwCustomRow').classList.toggle('hidden',pwMode!=='custom');
+});
 $('genEmails').onclick=()=>{
   const n=Math.min(200,Math.max(1,Number($('genCount').value)||1));
   const prefix=($('genPrefix').value.trim()||'yasoftware').replace(/[^a-zA-Z0-9._-]/g,'');
@@ -348,14 +367,25 @@ $('createAccounts').onclick=async()=>{
   if(emails.length>200){say('الحد الأقصى 200 حساب في المرة الواحدة.');return}
   const bad=emails.filter(e=>!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e));
   if(bad.length){say('بريد غير صالح: '+bad.slice(0,5).join('، '));return}
-  const len=Math.min(64,Math.max(8,Number($('pwLen').value)||12));
+  let accounts;
+  if(pwMode==='email'){
+    const short=emails.filter(e=>e.length<8);
+    if(short.length){say('بعض الإيميلات أقصر من 8 أحرف فلا تصلح ككلمة مرور: '+short.join('، '));return}
+    accounts=emails.map(email=>({email,password:email}));
+  }else if(pwMode==='custom'){
+    const pw=$('pwCustom').value.trim();
+    if(pw.length<8){say('كلمة المرور الموحّدة يجب ألا تقل عن 8 أحرف.');return}
+    accounts=emails.map(email=>({email,password:pw}));
+  }else{
+    const len=Math.min(64,Math.max(8,Number($('pwLen').value)||12));
+    accounts=emails.map(email=>({email,password:genPassword(len)}));
+  }
   const expiry=expiryFrom($('newDur').value,$('newUnit').value);
   const durTxt=`${Number($('newDur').value)||0} ${$('newUnit').selectedOptions[0].textContent}`;
   if(!confirm(`إنشاء ${emails.length} حساب${expiry?` وتفعيلها لمدة ${durTxt}`:' (بانتظار التفعيل)'}؟`))return;
   const btn=$('createAccounts');btn.disabled=true;
   try{
     say('جارٍ إنشاء الحسابات...');
-    const accounts=emails.map(email=>({email,password:genPassword(len)}));
     const pwByEmail=Object.fromEntries(accounts.map(a=>[a.email,a.password]));
     const r=await rpc('admin_create_users',{p_accounts:accounts,p_expires_at:expiry});
     lastCreated=((r&&r.results)||[]).map(x=>({email:x.email,ok:!!x.ok,error:x.error,password:pwByEmail[x.email]}));
@@ -435,6 +465,7 @@ function renderTable(){
           <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="1440">+يوم</button>
           <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="10080">+أسبوع</button>
           <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="43200">+شهر</button>
+          <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="525600">+سنة</button>
           <button class="danger" data-suspend-email="${esc(u.email)}">إيقاف</button>
           <button class="secondary" data-pw-email="${esc(u.email)}">تغيير الباسورد</button>
           ${u.role==='admin'?'':`<button class="danger" data-delete-email="${esc(u.email)}">حذف الحساب نهائيًا</button>`}
