@@ -56,6 +56,12 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
 .notice{background:#1a2a4a;border:1px solid #2f4a7d;border-radius:12px;padding:10px 14px;margin:10px 0;font-size:14px}
 .bulk{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:10px 0}
 .bulk input{width:110px}
+.modal{position:fixed;inset:0;background:rgba(5,8,18,.7);display:flex;align-items:center;justify-content:center;padding:20px;z-index:50}
+.modal.hidden{display:none!important}
+.modal-box{background:#151d32;border:1px solid #2a3653;border-radius:16px;padding:20px;max-width:680px;width:100%;max-height:85vh;overflow:auto}
+.modal-head{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:10px}
+.devbtn{display:flex;flex-direction:column;align-items:center;gap:2px;min-width:120px}
+.devbtn small{color:inherit}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.min.js"></script>
 </head>
@@ -87,7 +93,7 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
       سياسة الجهاز الواحد: كل حساب يعمل على جهاز واحد فقط في نفس الوقت. التبديل إلى جهاز آخر يُسمح به بعد
       <b>4 ساعات</b> من آخر نشاط للجهاز السابق، أو فورًا بعد «إلغاء» الجهاز من هنا.<br>
       <b>إلغاء الجهاز</b>: يُمنع هذا الجهاز من الدخول ويبقى ظاهرًا بحالة «ملغي» (ويمكن استعادته).<br>
-      <b>حذف الجهاز</b>: يُزال من الحساب ويبقى في السجل بحالة «محذوف»، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.
+      <b>حذف الجهاز</b>: يُزال من الحساب ويختفي من هذه اللوحة فورًا (يبقى في قاعدة البيانات فقط بحالة «محذوف» دون ظهور)، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.
     </div>
 
     <div class="bulk">
@@ -98,9 +104,8 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
     </div>
 
     <div class="search-wrap">
-      <input id="search" placeholder="بحث بالبريد أو User ID أو الحالة أو اسم الجهاز أو IP...">
+      <input id="search" placeholder="بحث بالبريد أو الحالة أو اسم الجهاز أو IP...">
       <select id="filterStatus"><option value="">كل الحالات</option><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="expired">منتهي</option><option value="suspended">موقوف</option></select>
-      <label class="muted"><input type="checkbox" id="showDeleted" checked style="width:auto"> إظهار الأجهزة المحذوفة</label>
       <span class="count-badge" id="count">0 حساب</span>
     </div>
     <div id="message" class="msg"></div>
@@ -152,9 +157,9 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
 
   <div class="card">
     <h2>تفعيل / تعديل حساب (يدوي)</h2>
-    <p class="muted">أدخل User ID من الجدول، أو اضغط «تعديل» في صف الحساب لتعبئته تلقائيًا. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p>
+    <p class="muted">أدخل البريد الإلكتروني للحساب، أو اضغط «تعديل» في صف الحساب لتعبئته تلقائيًا. تاريخ الانتهاء بالتوقيت المحلي للمتصفح وسيُرسل بصيغة UTC.</p>
     <div class="row">
-      <input id="userId" placeholder="User UUID">
+      <input id="userEmail" type="email" placeholder="account@example.com" style="direction:ltr">
       <select id="status"><option value="active">مفعّل</option><option value="pending">بانتظار التفعيل</option><option value="suspended">موقوف</option></select>
       <input id="expiry" type="datetime-local">
     </div>
@@ -172,8 +177,18 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
     <p><button id="apply">حفظ الترخيص</button></p>
   </div>
 </section>
+
+<div id="deviceModal" class="modal hidden">
+  <div class="modal-box">
+    <div class="modal-head">
+      <h3 id="deviceModalTitle" style="margin:0"></h3>
+      <button class="ghost" id="closeDeviceModal">إغلاق ✕</button>
+    </div>
+    <div id="deviceModalBody"></div>
+  </div>
+</div>
 </main><script>
-let sb=null, allUsers=[];
+let sb=null, allUsers=[], modalEmail=null;
 const $=id=>document.getElementById(id);
 const say=t=>{$('message').textContent=t||''};
 
@@ -197,7 +212,7 @@ $('connect').onclick=()=>{connect()};
 $('saveConfig').onclick=()=>{localStorage.setItem('yas_supabase_url',$('url').value.trim());localStorage.setItem('yas_supabase_anon',$('key').value.trim());alert('تم حفظ URL ومفتاح anon محليًا في هذا المتصفح فقط.')};
 $('signIn').onclick=async()=>{if(!sb&&!connect())return;const {error}=await sb.auth.signInWithPassword({email:$('email').value.trim(),password:$('password').value});if(error){alert(error.message);return}await loadUsers()};
 $('reload').onclick=loadUsers;
-$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();allUsers=[];$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
+$('logout').onclick=async()=>{if(sb)await sb.auth.signOut();allUsers=[];modalEmail=null;$('deviceModal').classList.add('hidden');$('panel').classList.add('hidden');$('login').classList.remove('hidden')};
 
 function dateInput(v){if(!v)return '';const d=new Date(v);return new Date(d.getTime()-d.getTimezoneOffset()*60000).toISOString().slice(0,16)}
 function fmt(v){if(!v)return '—';const d=new Date(v);return isNaN(d)?String(v):d.toLocaleString('ar-EG',{dateStyle:'medium',timeStyle:'short'})}
@@ -214,6 +229,11 @@ function extendedExpiry(currentExpiry,mins){
   return new Date(base+mins*60000).toISOString();
 }
 
+function idForEmail(email){
+  const u=allUsers.find(x=>(x.email||'').toLowerCase()===String(email||'').trim().toLowerCase());
+  if(!u)throw Error(`لا يوجد حساب بالبريد: ${email}`);
+  return u.user_id;
+}
 function devState(d){return d.deleted_at?'deleted':(d.revoked_at?'revoked':'active')}
 const DEV_AR={active:'نشط',revoked:'ملغي',deleted:'محذوف'};
 function deviceHtml(d){
@@ -234,6 +254,50 @@ function deviceHtml(d){
     <small>Android ID: <span class="ip">${esc(d.android_id||'—')}</span></small>
     <small>آخر ظهور: ${esc(fmt(d.last_seen_at))}</small>${when}<div class="dev-actions">${actions}${banBtn}</div></div>`;
 }
+
+// Devices are shown per-account inside a popup, never inline in the table; deleted
+// devices never appear here at all (not even behind a toggle).
+function openDeviceModal(email){
+  const u=allUsers.find(x=>(x.email||'').toLowerCase()===String(email||'').toLowerCase());
+  if(!u){say(`لا يوجد حساب بالبريد: ${email}`);return}
+  modalEmail=u.email;
+  renderDeviceModal(u.email);
+  $('deviceModal').classList.remove('hidden');
+}
+function renderDeviceModal(email){
+  const u=allUsers.find(x=>(x.email||'').toLowerCase()===String(email||'').toLowerCase());
+  if(!u){$('deviceModal').classList.add('hidden');return}
+  const devs=(u.devices||[]).filter(d=>devState(d)!=='deleted');
+  const nActive=devs.filter(d=>devState(d)==='active').length;
+  const nRevoked=devs.filter(d=>devState(d)==='revoked').length;
+  $('deviceModalTitle').textContent=`أجهزة: ${u.email}`;
+  $('deviceModalBody').innerHTML=(devs.map(deviceHtml).join('')||'<p class="muted">لا يوجد أجهزة لهذا الحساب.</p>')+
+    `<p class="muted">نشطة: ${nActive} • ملغاة: ${nRevoked}</p>`;
+  bindDeviceActions($('deviceModalBody'),u.email);
+}
+function bindDeviceActions(container,email){
+  container.querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('إلغاء هذا الجهاز؟ سيُمنع من الدخول ويبقى ظاهرًا بحالة «ملغي»، وسيتمكن الحساب من الدخول من جهاز جديد فورًا.'))return;
+    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});say('تم إلغاء الجهاز (ما زال ظاهرًا بحالة ملغي).');await loadUsers();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  container.querySelectorAll('[data-delete-dev]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('حذف هذا الجهاز من الحساب؟ سيختفي من هذه القائمة فورًا (يبقى في السجل بحالة «محذوف» فقط)، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.'))return;
+    try{await rpc('admin_delete_device',{p_device_row_id:b.dataset.deleteDev});say('تم حذف الجهاز.');await loadUsers();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  container.querySelectorAll('[data-ban]').forEach(b=>b.onclick=async()=>{
+    if(!confirm(`حظر هذا الجهاز نهائيًا${b.dataset.name?` (${b.dataset.name})`:''}؟\nلن يستطيع تشغيل البرنامج حتى لو دخل بحساب آخر أو أعاد تثبيت التطبيق (طالما Android ID كما هو).`))return;
+    const reason=prompt('سبب الحظر (اختياري):','')||'';
+    try{await rpc('admin_ban_device',{p_device_row_id:b.dataset.ban,p_reason:reason});say('تم حظر الجهاز.');await loadUsers();await loadBans();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  container.querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
+    if(!confirm('استعادة هذا الجهاز كجهاز نشط؟ أي جهاز نشط آخر لنفس الحساب سيتم إلغاؤه.'))return;
+    try{await rpc('admin_restore_device',{p_device_row_id:b.dataset.restore});say('تمت استعادة الجهاز.');await loadUsers();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  container.querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
+    navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
+  });
+}
+$('closeDeviceModal').onclick=()=>{$('deviceModal').classList.add('hidden');modalEmail=null};
 
 function genPassword(n){
   const cs='ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
@@ -344,8 +408,8 @@ function renderTable(){
   const q=($('search').value||'').trim().toLowerCase();
   const fs=$('filterStatus').value;
   const filtered=allUsers.filter(u=>{
-    const devText=(u.devices||[]).map(d=>`${d.label||''} ${d.last_ip||''} ${d.first_ip||''} ${d.android_id||''}`).join(' ').toLowerCase();
-    const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.user_id||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q) || devText.includes(q);
+    const devText=(u.devices||[]).filter(d=>devState(d)!=='deleted').map(d=>`${d.label||''} ${d.last_ip||''} ${d.first_ip||''} ${d.android_id||''}`).join(' ').toLowerCase();
+    const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q) || devText.includes(q);
     const matchesS=!fs || u.status===fs;
     return matchesQ && matchesS;
   });
@@ -354,86 +418,82 @@ function renderTable(){
   $('users').innerHTML='';
   for(const u of filtered){
     const tr=document.createElement('tr');
-    const devs=u.devices||[];
+    // Deleted devices never surface here — only counted among non-deleted ones,
+    // and shown in detail only inside the per-account popup.
+    const devs=(u.devices||[]).filter(d=>devState(d)!=='deleted');
     const nActive=devs.filter(d=>devState(d)==='active').length;
     const nRevoked=devs.filter(d=>devState(d)==='revoked').length;
-    const nDeleted=devs.filter(d=>devState(d)==='deleted').length;
-    const shown=devs.filter(d=>$('showDeleted').checked||devState(d)!=='deleted');
-    const devices=(shown.map(deviceHtml).join('')||'<span class="muted">لا يوجد أجهزة</span>')+
-      `<small>نشطة: ${nActive} • ملغاة: ${nRevoked} • محذوفة: ${nDeleted}</small>`;
+    const devLabel=devs.length?`${nActive} نشط${nRevoked?` • ${nRevoked} ملغي`:''}`:'لا يوجد';
     tr.innerHTML=`
-      <td><b>${esc(u.email)}</b>${u.role==='admin'?'<span class="tag admin">admin</span>':''} <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>${esc(u.user_id)} <button class="copybtn" data-copy="${esc(u.user_id)}" title="نسخ المعرّف">⧉</button></small><small>إنشاء: ${esc(fmt(u.created_at))}</small></td>
+      <td><b>${esc(u.email)}</b>${u.role==='admin'?'<span class="tag admin">admin</span>':''} <button class="copybtn" data-copy="${esc(u.email)}" title="نسخ البريد">⧉</button><small>إنشاء: ${esc(fmt(u.created_at))}</small></td>
       <td>${statusTag(u.status)}</td>
       <td>${esc(fmt(u.expires_at))}</td>
-      <td>${devices}${old?`<small>أجهزة سابقة ملغاة: ${old}</small>`:''}</td>
+      <td><button class="secondary devbtn" data-devices="${esc(u.email)}">الأجهزة<small>${esc(devLabel)}</small></button></td>
       <td>
         <div class="quick">
-          <button class="ghost" data-edit="${esc(u.user_id)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}">تعديل</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="1440">+يوم</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="10080">+أسبوع</button>
-          <button class="chip" data-quick-user="${esc(u.user_id)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="43200">+شهر</button>
-          <button class="danger" data-suspend="${esc(u.user_id)}">إيقاف</button>
-          ${u.role==='admin'?'':`<button class="danger" data-delete-user="${esc(u.user_id)}" data-email="${esc(u.email)}">حذف الحساب نهائيًا</button>`}
+          <button class="ghost" data-edit="${esc(u.email)}" data-status="${esc(u.status)}" data-expiry="${esc(u.expires_at||'')}">تعديل</button>
+          <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="1440">+يوم</button>
+          <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="10080">+أسبوع</button>
+          <button class="chip" data-quick-email="${esc(u.email)}" data-quick-expiry="${esc(u.expires_at||'')}" data-quick-mins="43200">+شهر</button>
+          <button class="danger" data-suspend-email="${esc(u.email)}">إيقاف</button>
+          <button class="secondary" data-pw-email="${esc(u.email)}">تغيير الباسورد</button>
+          ${u.role==='admin'?'':`<button class="danger" data-delete-email="${esc(u.email)}">حذف الحساب نهائيًا</button>`}
         </div>
       </td>`;
     $('users').appendChild(tr);
   }
 
+  $('users').querySelectorAll('[data-devices]').forEach(b=>b.onclick=()=>openDeviceModal(b.dataset.devices));
   $('users').querySelectorAll('[data-edit]').forEach(b=>b.onclick=()=>{
-    $('userId').value=b.dataset.edit;
+    $('userEmail').value=b.dataset.edit;
     $('status').value=['active','pending','suspended'].includes(b.dataset.status)?b.dataset.status:'pending';
     $('expiry').value=dateInput(b.dataset.expiry);
     window.scrollTo({top:document.body.scrollHeight,behavior:'smooth'});
   });
-  $('users').querySelectorAll('[data-revoke]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('إلغاء هذا الجهاز؟ سيُمنع من الدخول ويبقى ظاهرًا بحالة «ملغي»، وسيتمكن الحساب من الدخول من جهاز جديد فورًا.'))return;
-    try{await rpc('admin_revoke_device',{p_device_row_id:b.dataset.revoke});say('تم إلغاء الجهاز (ما زال ظاهرًا بحالة ملغي).');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
-  });
-  $('users').querySelectorAll('[data-delete-dev]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('حذف هذا الجهاز من الحساب؟ سيظهر في السجل بحالة «محذوف»، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.'))return;
-    try{await rpc('admin_delete_device',{p_device_row_id:b.dataset.deleteDev});say('تم حذف الجهاز (ظاهر بحالة محذوف).');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
-  });
-  $('users').querySelectorAll('[data-ban]').forEach(b=>b.onclick=async()=>{
-    if(!confirm(`حظر هذا الجهاز نهائيًا${b.dataset.name?` (${b.dataset.name})`:''}؟\nلن يستطيع تشغيل البرنامج حتى لو دخل بحساب آخر أو أعاد تثبيت التطبيق (طالما Android ID كما هو).`))return;
-    const reason=prompt('سبب الحظر (اختياري):','')||'';
-    try{await rpc('admin_ban_device',{p_device_row_id:b.dataset.ban,p_reason:reason});say('تم حظر الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
-  });
-  $('users').querySelectorAll('[data-restore]').forEach(b=>b.onclick=async()=>{
-    if(!confirm('استعادة هذا الجهاز كجهاز نشط؟ أي جهاز نشط آخر لنفس الحساب سيتم إلغاؤه.'))return;
-    try{await rpc('admin_restore_device',{p_device_row_id:b.dataset.restore});say('تمت استعادة الجهاز.');await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
-  });
-  $('users').querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=async()=>{
-    const email=b.dataset.email||'';
+  $('users').querySelectorAll('[data-delete-email]').forEach(b=>b.onclick=async()=>{
+    const email=b.dataset.deleteEmail||'';
     const typed=prompt(`⚠️ حذف نهائي لا يمكن التراجع عنه: سيُحذف الحساب وكل أجهزته من المنصة.\nللتأكيد اكتب البريد بالضبط:\n${email}`);
     if(typed===null)return;
     if(typed.trim().toLowerCase()!==email.toLowerCase()){say('لم يتم الحذف: البريد المكتوب لا يطابق.');return}
-    try{await rpc('admin_delete_user',{p_user_id:b.dataset.deleteUser});say(`تم حذف الحساب ${email} نهائيًا.`);await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
+    try{await rpc('admin_delete_user',{p_user_id:idForEmail(email)});say(`تم حذف الحساب ${email} نهائيًا.`);await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
   });
-  $('users').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
-    navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
-  });
-  $('users').querySelectorAll('[data-quick-user]').forEach(b=>b.onclick=async()=>{
+  $('users').querySelectorAll('[data-quick-email]').forEach(b=>b.onclick=async()=>{
     try{
       say('جارٍ التطبيق...');
       const expiry=extendedExpiry(b.dataset.quickExpiry,Number(b.dataset.quickMins));
-      await rpc('admin_set_license',{p_user_id:b.dataset.quickUser,p_status:'active',p_expires_at:expiry});
+      await rpc('admin_set_license',{p_user_id:idForEmail(b.dataset.quickEmail),p_status:'active',p_expires_at:expiry});
       say('تم التمديد.');
       await loadUsers();
     }catch(e){say(`فشل: ${e.message||e}`)}
   });
-  $('users').querySelectorAll('[data-suspend]').forEach(b=>b.onclick=async()=>{
+  $('users').querySelectorAll('[data-suspend-email]').forEach(b=>b.onclick=async()=>{
     if(!confirm('إيقاف هذا الحساب فورًا؟'))return;
     try{
-      await rpc('admin_set_license',{p_user_id:b.dataset.suspend,p_status:'suspended',p_expires_at:null});
+      await rpc('admin_set_license',{p_user_id:idForEmail(b.dataset.suspendEmail),p_status:'suspended',p_expires_at:null});
       say('تم إيقاف الحساب.');
       await loadUsers();
     }catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-pw-email]').forEach(b=>b.onclick=async()=>{
+    const email=b.dataset.pwEmail;
+    let pw=prompt(`كلمة مرور جديدة لـ ${email}\nاتركه فارغًا لتوليد كلمة مرور عشوائية تلقائيًا، أو اكتب كلمة مرور بنفسك (8 أحرف على الأقل):`,'');
+    if(pw===null)return;
+    pw=pw.trim();
+    if(pw && pw.length<8){say('كلمة المرور يجب ألا تقل عن 8 أحرف.');return}
+    if(!pw)pw=genPassword(12);
+    if(!confirm(`تغيير كلمة مرور ${email}؟ هذا يُبطل كلمة المرور الحالية فورًا.`))return;
+    try{
+      await rpc('admin_set_password',{p_email:email,p_new_password:pw});
+      say(`تم تغيير كلمة المرور لـ ${email}.\nكلمة المرور الجديدة: ${pw}\n⚠️ احفظها الآن، لن تظهر مرة أخرى.`);
+    }catch(e){say(`فشل: ${e.message||e}`)}
+  });
+  $('users').querySelectorAll('[data-copy]').forEach(b=>b.onclick=()=>{
+    navigator.clipboard?.writeText(b.dataset.copy);b.textContent='✓';setTimeout(()=>b.textContent='⧉',900);
   });
 }
 
 $('search').oninput=renderTable;
 $('filterStatus').onchange=renderTable;
-$('showDeleted').onchange=renderTable;
 
 $('activateAll').onclick=async()=>{
   const days=Number($('bulkDays').value);
@@ -459,6 +519,7 @@ async function loadUsers(){
     $('login').classList.add('hidden');$('panel').classList.remove('hidden');
     renderTable();
     loadBans();
+    if(modalEmail)renderDeviceModal(modalEmail);
     say(`تم تحميل ${allUsers.length} حساب.`);
   }catch(e){
     say(`تعذر تحميل لوحة الإدارة: ${e.message||e}\nتأكد أن حسابك role=admin في yas_profiles وأن schema.sql نُفذ بنجاح.`);
@@ -477,8 +538,9 @@ $('quickDurations').querySelectorAll('[data-mins]').forEach(b=>b.onclick=()=>{
 
 $('apply').onclick=async()=>{
   try{
-    const userId=$('userId').value.trim(),status=$('status').value;
-    if(!userId)throw Error('أدخل User ID.');
+    const email=$('userEmail').value.trim(),status=$('status').value;
+    if(!email)throw Error('أدخل البريد الإلكتروني.');
+    const userId=idForEmail(email);
     let expiry=null;
     if(status==='active'){
       if(!$('expiry').value)throw Error('حدد تاريخ انتهاء مستقبليًا أو استخدم أحد أزرار التمديد السريع.');
