@@ -57,7 +57,7 @@ private data class ConfirmReq(
 )
 
 /** Same unit choices as the web dashboard (minutes per unit). */
-private val DURATION_UNITS = listOf("ساعة" to 60L, "يوم" to 1440L, "أسبوع" to 10080L, "شهر" to 43200L)
+private val DURATION_UNITS = listOf("ساعة" to 60L, "يوم" to 1440L, "أسبوع" to 10080L, "شهر" to 43200L, "سنة" to 525600L)
 
 @Composable
 fun AdminScreen(service: AdminService, onBack: () -> Unit) {
@@ -86,11 +86,20 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
     var genPrefix by remember { mutableStateOf("yasoftware") }
     var genDomain by remember { mutableStateOf("yas.com") }
     var newEmails by remember { mutableStateOf("") }
+    var pwMode by remember { mutableStateOf(AdminService.PasswordMode.RANDOM) }
     var pwLen by remember { mutableStateOf("12") }
+    var pwCustom by remember { mutableStateOf("") }
     var newDur by remember { mutableStateOf("30") }
     var newUnit by remember { mutableStateOf(1440L) }
     var createBusy by remember { mutableStateOf(false) }
     var createResults by remember { mutableStateOf<List<AdminService.NewAccountResult>>(emptyList()) }
+
+    // Manual activation by email
+    var manualEmail by remember { mutableStateOf("") }
+    var manualStatus by remember { mutableStateOf("active") }
+    var manualDur by remember { mutableStateOf("30") }
+    var manualUnit by remember { mutableStateOf(1440L) }
+    var manualBusy by remember { mutableStateOf(false) }
 
     // Manual ban
     var banAid by remember { mutableStateOf("") }
@@ -219,7 +228,7 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
 
                 // ---- Bulk create ----
                 AdminCard {
-                    Text("إنشاء عدة حسابات بباسوردات عشوائية", style = MaterialTheme.typography.titleMedium, color = AdminColors.Text, fontWeight = FontWeight.Bold)
+                    Text("إنشاء عدة حسابات", style = MaterialTheme.typography.titleMedium, color = AdminColors.Text, fontWeight = FontWeight.Bold)
                     Text("الإيميلات المولّدة بالشكل yasoftware1@yas.com ثم 2 ثم 3... حسب العدد (بحروف صغيرة). أو اكتب الإيميلات بنفسك.", style = MaterialTheme.typography.bodySmall, color = AdminColors.TextSoft)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedTextField(genCount, { genCount = it.filter { c -> c.isDigit() }.take(3) }, label = { Text("العدد") }, singleLine = true,
@@ -243,20 +252,54 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier.fillMaxWidth().height(130.dp)
                     )
-                    OutlinedTextField(
-                        value = pwLen,
-                        onValueChange = { pwLen = it.filter { c -> c.isDigit() }.take(2) },
-                        label = { Text("طول الباسورد (8 - 64)") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                        colors = fieldColors(),
-                        shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.width(170.dp)
-                    )
+                    Text("كلمة المرور", style = MaterialTheme.typography.labelSmall, color = AdminColors.Muted)
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val modes = listOf(
+                            AdminService.PasswordMode.RANDOM to "توليد عشوائي",
+                            AdminService.PasswordMode.EMAIL to "نفس البريد",
+                            AdminService.PasswordMode.CUSTOM to "موحّدة"
+                        )
+                        modes.forEach { (mode, labelTxt) ->
+                            val selected = pwMode == mode
+                            TextButton(onClick = { pwMode = mode }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text(labelTxt, color = if (selected) AdminColors.SkyText else AdminColors.Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    when (pwMode) {
+                        AdminService.PasswordMode.RANDOM -> OutlinedTextField(
+                            value = pwLen,
+                            onValueChange = { pwLen = it.filter { c -> c.isDigit() }.take(2) },
+                            label = { Text("طول الباسورد (8 - 64)") },
+                            singleLine = true,
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            colors = fieldColors(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.width(170.dp)
+                        )
+                        AdminService.PasswordMode.EMAIL -> Text(
+                            "سيُستخدم البريد الإلكتروني لكل حساب ككلمة مرور له.",
+                            style = MaterialTheme.typography.labelSmall, color = AdminColors.TextSoft
+                        )
+                        AdminService.PasswordMode.CUSTOM -> OutlinedTextField(
+                            value = pwCustom,
+                            onValueChange = { pwCustom = it },
+                            label = { Text("كلمة المرور الموحّدة (8 أحرف على الأقل)") },
+                            singleLine = true,
+                            colors = fieldColors(),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
                     DurationPicker("مدة التفعيل (0 = بانتظار التفعيل)", newDur, { newDur = it }, newUnit, { newUnit = it })
                     val emailList = parseEmails(newEmails)
+                    val pwReady = when (pwMode) {
+                        AdminService.PasswordMode.RANDOM -> true
+                        AdminService.PasswordMode.EMAIL -> emailList.all { it.length >= 8 }
+                        AdminService.PasswordMode.CUSTOM -> pwCustom.trim().length >= 8
+                    }
                     Button(
-                        enabled = !createBusy && emailList.isNotEmpty() && emailList.size <= 200,
+                        enabled = !createBusy && emailList.isNotEmpty() && emailList.size <= 200 && pwReady,
                         onClick = {
                             val value = newDur.toIntOrNull() ?: 0
                             val expiry = service.expiryFrom(value, newUnit)
@@ -265,7 +308,13 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                                 createBusy = true; createResults = emptyList()
                                 scope.launch {
                                     try {
-                                        createResults = service.createAccountsBulk(emailList, (pwLen.toIntOrNull() ?: 12).coerceIn(8, 64), expiry)
+                                        createResults = service.createAccountsBulk(
+                                            emails = emailList,
+                                            passwordLength = (pwLen.toIntOrNull() ?: 12).coerceIn(8, 64),
+                                            expiresAt = expiry,
+                                            passwordMode = pwMode,
+                                            customPassword = pwCustom.trim()
+                                        )
                                         message = "تم إنشاء ${createResults.count { it.error == null }} من ${createResults.size}."
                                         messageIsError = false
                                         reload()
@@ -315,6 +364,66 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                             }
                         }
                     }
+                }
+
+                // ---- Manual activation / edit by email ----
+                AdminCard {
+                    Text("تفعيل / تعديل حساب (يدوي)", style = MaterialTheme.typography.titleMedium, color = AdminColors.Text, fontWeight = FontWeight.Bold)
+                    Text("اكتب البريد الإلكتروني للحساب، حدّد الحالة والمدة، ثم احفظ. يعمل بالبريد الإلكتروني فقط.", style = MaterialTheme.typography.bodySmall, color = AdminColors.TextSoft)
+                    OutlinedTextField(
+                        value = manualEmail,
+                        onValueChange = { manualEmail = it },
+                        label = { Text("البريد الإلكتروني") },
+                        placeholder = { Text("account@example.com") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
+                        colors = fieldColors(),
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        val statuses = listOf("active" to "مفعّل", "pending" to "بانتظار التفعيل", "suspended" to "موقوف")
+                        statuses.forEach { (value, labelTxt) ->
+                            val selected = manualStatus == value
+                            TextButton(onClick = { manualStatus = value }, contentPadding = PaddingValues(horizontal = 8.dp)) {
+                                Text(labelTxt, color = if (selected) AdminColors.SkyText else AdminColors.Muted, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, fontSize = 13.sp)
+                            }
+                        }
+                    }
+                    if (manualStatus == "active") {
+                        DurationPicker("مدة التفعيل", manualDur, { manualDur = it }, manualUnit, { manualUnit = it })
+                    }
+                    val manualValue = manualDur.toIntOrNull() ?: 0
+                    val manualReady = manualEmail.trim().contains("@") && (manualStatus != "active" || manualValue > 0)
+                    Button(
+                        enabled = !manualBusy && manualReady,
+                        onClick = {
+                            val email = manualEmail.trim()
+                            val userId = service.userIdForEmail(accounts, email)
+                            if (userId == null) {
+                                message = "لا يوجد حساب بالبريد: $email"
+                                messageIsError = true
+                                return@Button
+                            }
+                            val expiry = if (manualStatus == "active") service.expiryFrom(manualValue, manualUnit) else null
+                            val what = if (expiry != null) "لمدة $manualValue ${unitName(manualUnit)}" else "(${statusLabelAr(manualStatus)})"
+                            confirm = ConfirmReq("تحديث الترخيص", "تحديث حساب $email $what؟", "حفظ") {
+                                manualBusy = true
+                                scope.launch {
+                                    try {
+                                        service.setLicenseDirect(userId, manualStatus, expiry)
+                                        message = "تم تحديث الترخيص على الخادم."
+                                        messageIsError = false
+                                        reload()
+                                    } catch (e: Exception) { message = e.message ?: "فشل تحديث الترخيص."; messageIsError = true }
+                                    manualBusy = false
+                                }
+                            }
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AdminColors.Primary, contentColor = Color.White),
+                        modifier = Modifier.fillMaxWidth().height(48.dp)
+                    ) { Text(if (manualBusy) "جارٍ الحفظ..." else "حفظ الترخيص", fontWeight = FontWeight.Bold) }
                 }
 
                 // ---- Ban list ----
@@ -559,6 +668,7 @@ private fun AccountRow(
                 TextButton(onClick = { onQuickExtend(1440L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+يوم", color = AdminColors.SkyText, fontSize = 12.sp) }
                 TextButton(onClick = { onQuickExtend(10080L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+أسبوع", color = AdminColors.SkyText, fontSize = 12.sp) }
                 TextButton(onClick = { onQuickExtend(43200L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+شهر", color = AdminColors.SkyText, fontSize = 12.sp) }
+                TextButton(onClick = { onQuickExtend(525600L) }, contentPadding = PaddingValues(horizontal = 8.dp)) { Text("+سنة", color = AdminColors.SkyText, fontSize = 12.sp) }
             }
             if (expanded) {
                 val devices = account.devices.filter { showDeleted || it.state != "deleted" }
@@ -618,6 +728,13 @@ private fun DeviceCard(
             }
         }
     }
+}
+
+private fun statusLabelAr(status: String): String = when (status) {
+    "active" -> "مفعّل"
+    "pending" -> "بانتظار التفعيل"
+    "suspended" -> "موقوف"
+    else -> status
 }
 
 private fun formatShortDate(raw: String): String = try {

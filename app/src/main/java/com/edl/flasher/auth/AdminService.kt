@@ -56,6 +56,9 @@ class AdminService(private val license: LicenseService) {
     data class NewAccountResult(val email: String, val password: String, val error: String?)
     data class ActivateResult(val activated: Int, val notFound: List<String>)
 
+    /** Same three choices as the web dashboard's bulk-create chips. */
+    enum class PasswordMode { RANDOM, EMAIL, CUSTOM }
+
     private fun JSONObject.str(key: String): String? =
         optString(key).takeIf { it.isNotBlank() && it != "null" }
 
@@ -124,6 +127,18 @@ class AdminService(private val license: LicenseService) {
         rpc("admin_set_license", JSONObject().put("p_user_id", userId).put("p_status", status).put("p_expires_at", expiresAt ?: JSONObject.NULL))
     }
 
+    /** Direct equivalent of the web dashboard's manual "تفعيل / تعديل حساب" form: sets the
+     *  status with an already-computed [expiresAt] (required for "active", null otherwise)
+     *  instead of assuming a day count. Used for the by-email manual activation card. */
+    suspend fun setLicenseDirect(userId: String, status: String, expiresAt: String?) {
+        rpc("admin_set_license", JSONObject().put("p_user_id", userId).put("p_status", status).put("p_expires_at", expiresAt ?: JSONObject.NULL))
+    }
+
+    /** Resolves an email typed into the manual activation card to its user_id from the
+     *  already-loaded account list, the same lookup the web dashboard does client-side. */
+    fun userIdForEmail(accounts: List<Account>, email: String): String? =
+        accounts.firstOrNull { it.email.equals(email.trim(), ignoreCase = true) }?.userId
+
     /** Same "+يوم / +أسبوع / +شهر" quick chip as the web dashboard: extends from the later of
      *  [currentExpiresAt] or now, by [minutes], and activates the account until then. */
     suspend fun extendLicense(userId: String, currentExpiresAt: String?, minutes: Long) {
@@ -186,12 +201,30 @@ class AdminService(private val license: LicenseService) {
         return out
     }
 
-    /** Creates accounts with random passwords through the admin_create_users function (email pre-confirmed).
-     *  [expiresAt] activates them until then; null leaves them pending. Passwords are generated here and
-     *  returned so the admin can hand them out — they are not retrievable later. */
-    suspend fun createAccountsBulk(emails: List<String>, passwordLength: Int, expiresAt: String?): List<NewAccountResult> {
-        val accounts = emails.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()
-            .map { it to generatePassword(passwordLength) }
+    /** Creates accounts through the admin_create_users function (email pre-confirmed).
+     *  [expiresAt] activates them until then; null leaves them pending.
+     *  Password per account depends on [passwordMode]:
+     *   - RANDOM (default, unchanged): a different random password per account, [passwordLength] long.
+     *   - EMAIL: the account's own email address is used as its password.
+     *   - CUSTOM: [customPassword] is used as-is for every account.
+     *  Passwords are generated/chosen here and returned so the admin can hand them out — they are
+     *  not retrievable later. */
+    suspend fun createAccountsBulk(
+        emails: List<String>,
+        passwordLength: Int,
+        expiresAt: String?,
+        passwordMode: PasswordMode = PasswordMode.RANDOM,
+        customPassword: String? = null
+    ): List<NewAccountResult> {
+        val cleanEmails = emails.map { it.trim().lowercase() }.filter { it.isNotEmpty() }.distinct()
+        val accounts = when (passwordMode) {
+            PasswordMode.RANDOM -> cleanEmails.map { it to generatePassword(passwordLength) }
+            PasswordMode.EMAIL -> cleanEmails.map { it to it }
+            PasswordMode.CUSTOM -> {
+                val pw = customPassword.orEmpty()
+                cleanEmails.map { it to pw }
+            }
+        }
         if (accounts.isEmpty()) return emptyList()
         val results = ArrayList<NewAccountResult>()
         for (chunk in accounts.chunked(100)) {
