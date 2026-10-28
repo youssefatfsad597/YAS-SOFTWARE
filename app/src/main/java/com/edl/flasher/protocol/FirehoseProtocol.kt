@@ -104,8 +104,8 @@ class FirehoseProtocol(
         startSector: Long,
         numSectors: Long,
         output: OutputStream,
-        onProgress: (Long, Long) -> Unit = { _, _ -> },
-        responseTimeoutMs: Int = 60000
+        responseTimeoutMs: Int = 60000,
+        onProgress: (Long, Long) -> Unit = { _, _ -> }
     ) {
         val sectorSize = storageType.sectorSize
         val cmd = buildXml(
