@@ -20,6 +20,29 @@ class MainActivity : ComponentActivity() {
     private val viewModel: EdlViewModel by viewModels()
     private lateinit var licenseService: LicenseService
     @Volatile private var licenseAuthorized = false
+    /** Recovery access token delivered by the password-reset deep link (yassoftware://reset-password). */
+    private var recoveryToken by mutableStateOf<String?>(null)
+    private var recoveryError by mutableStateOf<String?>(null)
+
+    private fun handleDeepLink(intent: android.content.Intent?) {
+        val data = intent?.data ?: return
+        if (data.scheme != "yassoftware" || data.host != "reset-password") return
+        // Supabase puts values in the fragment (#access_token=...); the web page may also
+        // forward them as a query string. Accept both.
+        val params = HashMap<String, String>()
+        fun parse(raw: String?) {
+            raw.orEmpty().split("&").forEach {
+                val i = it.indexOf('=')
+                if (i > 0) params[it.substring(0, i)] = android.net.Uri.decode(it.substring(i + 1).replace('+', ' '))
+            }
+        }
+        parse(data.encodedFragment); parse(data.encodedQuery)
+        val token = params["access_token"]
+        if (!token.isNullOrBlank()) { recoveryToken = token; recoveryError = null }
+        else recoveryError = params["error_description"] ?: "رابط الاستعادة غير صالح أو منتهي. اطلب رابطًا جديدًا."
+        // Consume it so rotating the screen / re-resuming doesn't replay the link.
+        intent.data = null
+    }
 
     override fun onResume() {
         super.onResume()
@@ -42,6 +65,7 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: android.content.Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        handleDeepLink(intent)
         // USB_DEVICE_ATTACHED delivered while the app is open: permission may already be
         // granted by the system, so just rescan instead of asking again.
         if (licenseAuthorized) viewModel.autoConnect()
@@ -51,9 +75,13 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         licenseService = LicenseService(applicationContext)
+        handleDeepLink(intent)
         setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
-                AuthGate(service = licenseService, onAuthorizationChanged = { allowed ->
+                AuthGate(service = licenseService,
+                    recoveryToken = recoveryToken, recoveryError = recoveryError,
+                    onRecoveryDone = { recoveryToken = null; recoveryError = null },
+                    onAuthorizationChanged = { allowed ->
                     licenseAuthorized = allowed
                     if (allowed) viewModel.autoConnect()
                 }) {
