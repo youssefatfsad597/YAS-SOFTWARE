@@ -22,6 +22,14 @@ data class FirehoseResponse(
 
 private const val ERASE_FALLBACK_MAX_SECTORS = 131072L // 64 MiB at 512 B
 
+/** How long to wait for a single <erase> command to finish, scaled to how much is being erased.
+ *  Assumes a conservative ~3 MB/s real eMMC erase throughput (much slower than read/write streaming)
+ *  plus a flat floor/ceiling so tiny erases stay fast-failing and huge ones don't wait forever. */
+private fun eraseWaitBudgetMs(totalBytes: Long): Int {
+    val estimatedMs = totalBytes / (3L * 1024 * 1024) * 1000
+    return estimatedMs.coerceIn(60_000L, 10 * 60_000L).toInt()
+}
+
 class FirehoseProtocol(
     private val transport: EdlUsbTransport,
     private val logger: (String) -> Unit
@@ -74,14 +82,19 @@ class FirehoseProtocol(
         throw IOException("Firehose <configure> negotiation failed after 8 attempts.")
     }
 
-    private fun sendConfigureXml(storage: StorageType, payloadSize: Int): FirehoseResponse {
+    private fun sendConfigureXml(
+        storage: StorageType,
+        payloadSize: Int,
+        timeoutMs: Int = 60000,
+        skipStorageInit: Boolean = false
+    ): FirehoseResponse {
         val xml = buildXml(
             """<configure MemoryName="${storage.memoryName}" Verbose="0" AlwaysValidate="0" """ +
             """MaxDigestTableSizeInBytes="8192" MaxPayloadSizeToTargetInBytes="$payloadSize" """ +
-            """ZlpAwareHost="${if (zlpAwareHost) 1 else 0}" SkipStorageInit="0" />"""
+            """ZlpAwareHost="${if (zlpAwareHost) 1 else 0}" SkipStorageInit="${if (skipStorageInit) 1 else 0}" />"""
         )
         transport.write(xml.toByteArray(Charsets.UTF_8))
-        return waitForResponse()
+        return waitForResponse(timeoutMs = timeoutMs)
     }
 
 
@@ -91,7 +104,8 @@ class FirehoseProtocol(
         startSector: Long,
         numSectors: Long,
         output: OutputStream,
-        onProgress: (Long, Long) -> Unit = { _, _ -> }
+        onProgress: (Long, Long) -> Unit = { _, _ -> },
+        responseTimeoutMs: Int = 60000
     ) {
         val sectorSize = storageType.sectorSize
         val cmd = buildXml(
@@ -100,7 +114,7 @@ class FirehoseProtocol(
         )
         transport.write(cmd.toByteArray(Charsets.UTF_8))
 
-        val initialRsp = waitForResponse()
+        val initialRsp = waitForResponse(timeoutMs = responseTimeoutMs)
         if (!initialRsp.ack || !initialRsp.rawMode) {
             throw IOException("Firehose <read> NAK on LUN $lun, LBA $startSector")
         }
@@ -111,13 +125,13 @@ class FirehoseProtocol(
 
         while (bytesRemaining > 0) {
             val toRead = min(buf.size.toLong(), bytesRemaining).toInt()
-            transport.readFully(buf, 0, toRead, timeoutMs = 60000)
+            transport.readFully(buf, 0, toRead, timeoutMs = responseTimeoutMs)
             output.write(buf, 0, toRead)
             bytesRemaining -= toRead
             onProgress(totalBytes - bytesRemaining, totalBytes)
         }
 
-        val finalRsp = waitForResponse()
+        val finalRsp = waitForResponse(timeoutMs = responseTimeoutMs)
         if (!finalRsp.ack) {
             throw IOException("Firehose <read> failed final ACK.")
         }
@@ -167,6 +181,7 @@ class FirehoseProtocol(
         if (!rsp.ack || !rsp.rawMode) {
             throw IOException("Firehose <program> rejected on LUN $lun, start_sector $startSector: ${rsp.rawXml.take(300)}")
         }
+        settleAfterProgramAck()
 
         val buffer = ByteArray(maxPayloadSize)
         val crc = java.util.zip.CRC32()
@@ -291,6 +306,7 @@ class FirehoseProtocol(
         transport.write(cmd.toByteArray(Charsets.UTF_8))
         val rsp = waitForResponse()
         if (!rsp.ack || !rsp.rawMode) throw IOException("Sparse RAW chunk rejected at sector $startSector")
+        settleAfterProgramAck()
 
         val buf = ByteArray(maxPayloadSize)
         var sent = 0L
@@ -322,6 +338,7 @@ class FirehoseProtocol(
         transport.write(cmd.toByteArray(Charsets.UTF_8))
         val rsp = waitForResponse()
         if (!rsp.ack || !rsp.rawMode) throw IOException("Sparse FILL chunk rejected")
+        settleAfterProgramAck()
 
         val buf = ByteArray(maxPayloadSize)
         for (i in buf.indices step 4) {
@@ -347,7 +364,11 @@ class FirehoseProtocol(
             """physical_partition_number="$lun" start_sector="$startSector" />"""
         )
         transport.write(cmd.toByteArray(Charsets.UTF_8))
-        val rsp = waitForResponse()
+        // <erase> has no data phase: the host just sits here while the eMMC controller actually performs
+        // the discard/erase internally. That is MUCH slower than streamed read/write throughput (often only
+        // a few MB/s on older eMMC), so a flat 60s default times out on large partitions (userdata, system...)
+        // even though the device is working fine -- the erase just hasn't finished yet. Scale the wait with size.
+        val rsp = waitForResponse(timeoutMs = eraseWaitBudgetMs(numSectors * sectorSize))
         if (!rsp.ack) throw IOException("Firehose <erase> failed on LUN $lun, LBA $startSector: ${rsp.rawXml.take(300)}")
         val erased = checkErased(lun, startSector, numSectors)
         if (erased == false && storageType == StorageType.EMMC) {
@@ -399,6 +420,7 @@ class FirehoseProtocol(
         if (!rsp.ack || !rsp.rawMode) {
             throw IOException("Firehose <program> rejected (LUN $lun, sector $startSector): ${rsp.rawXml.take(300)}")
         }
+        settleAfterProgramAck()
         var off = 0
         while (off < data.size) {
             val n = min(maxPayloadSize, data.size - off)
@@ -432,6 +454,7 @@ class FirehoseProtocol(
         transport.write(buildXml(programTag(lun, startSector, numSectors, false)).toByteArray(Charsets.UTF_8))
         val rsp = waitForResponse()
         if (!rsp.ack || !rsp.rawMode) throw IOException("Zero-fill <program> rejected: ${rsp.rawXml.take(300)}")
+        settleAfterProgramAck()
         val total = numSectors * sectorSize
         val buf = ByteArray(maxPayloadSize)
         var sent = 0L
@@ -459,16 +482,39 @@ class FirehoseProtocol(
         }
     }
 
-    /** Re-sends <configure> with explicit knobs; used to try loader "dialects". */
-    fun reconfigure(storage: StorageType, payload: Int, zlp: Boolean): Boolean {
+    enum class ReconfigureVerdict { OK, NAKED, HUNG }
+    data class ReconfigureResult(val verdict: ReconfigureVerdict, val detail: String = "")
+
+    /** Re-sends <configure> with explicit knobs; used to try loader "dialects". Uses a short timeout
+     *  (default 6s, matching [writeSelfTest]) so a loader that got wedged by a previous write attempt
+     *  is detected as HUNG in a few seconds instead of silently eating up to 60s per remaining dialect
+     *  -- which is what made the eMMC write test "take forever" instead of failing fast. */
+    fun reconfigure(
+        storage: StorageType,
+        payload: Int,
+        zlp: Boolean,
+        skipStorageInit: Boolean = false,
+        timeoutMs: Int = 6000
+    ): ReconfigureResult {
         zlpAwareHost = zlp
         drainPendingLogs()
-        val rsp = runCatching { sendConfigureXml(storage, payload) }.getOrNull() ?: return false
+        val startNs = System.nanoTime()
+        val rsp = try {
+            sendConfigureXml(storage, payload, timeoutMs, skipStorageInit)
+        } catch (e: IOException) {
+            val elapsedMs = (System.nanoTime() - startNs) / 1_000_000
+            return if (elapsedMs >= timeoutMs - 500) {
+                ReconfigureResult(ReconfigureVerdict.HUNG, "no reply for ${elapsedMs}ms")
+            } else {
+                ReconfigureResult(ReconfigureVerdict.NAKED, e.message.orEmpty())
+            }
+        }
         if (rsp.ack) {
             storageType = storage
             maxPayloadSize = rsp.maxPayloadSizeToTarget?.takeIf { it in storage.sectorSize..payload } ?: payload
+            return ReconfigureResult(ReconfigureVerdict.OK)
         }
-        return rsp.ack
+        return ReconfigureResult(ReconfigureVerdict.NAKED, rsp.rawXml.take(200))
     }
 
     enum class WriteVerdict { WRITES_WORK, REJECTED, HUNG, SILENTLY_IGNORED, UNREADABLE, UNEXPECTED }
@@ -488,9 +534,21 @@ class FirehoseProtocol(
         val testTimeoutMs = 6000
         fun readOne(): ByteArray? {
             val out = java.io.ByteArrayOutputStream()
-            return runCatching { readSectors(lun, sector, 1, out); out.toByteArray() }.getOrNull()
+            return runCatching {
+                readSectors(lun, sector, 1, out, responseTimeoutMs = testTimeoutMs)
+                out.toByteArray()
+            }.getOrNull()
         }
-        val original = readOne() ?: return WriteTestReport(WriteVerdict.UNREADABLE, "could not read sector $sector")
+        val probeStartNs = System.nanoTime()
+        val original = readOne()
+        if (original == null) {
+            val elapsedMs = (System.nanoTime() - probeStartNs) / 1_000_000
+            return if (elapsedMs >= testTimeoutMs - 500) {
+                WriteTestReport(WriteVerdict.HUNG, "no reply to the initial probe read for ${elapsedMs}ms -- the loader was already wedged before this test touched it")
+            } else {
+                WriteTestReport(WriteVerdict.UNREADABLE, "could not read sector $sector")
+            }
+        }
         if (original.size != ss) return WriteTestReport(WriteVerdict.UNREADABLE, "short read (${original.size} bytes)")
         val inverted = ByteArray(ss) { (original[it].toInt() xor 0xFF).toByte() }
         val startNs = System.nanoTime()
@@ -559,6 +617,22 @@ class FirehoseProtocol(
             logger("Target NAKed <power $mode> (variant ${i + 1}): ${rsp.rawXml.take(200)}")
         }
         return false
+    }
+
+    /**
+     * KNOWN SAMSUNG LOADER QUIRK (confirmed via bkerler/edl issue #737, reverse-engineered from the
+     * loader's own code): most Firehose loaders send "Log, Log, Log, then ACK" -- but a long list of
+     * Samsung-signed loaders instead send the ACK for <program> and only THEN fire one more async log
+     * such as `start_sector=X, num_sectors=Y` as part of their own write-protected-area check, which
+     * keeps the loader's receiver briefly busy. A client that starts streaming the payload the instant
+     * it sees the ACK (as this app used to) can race that trailing log: the loader isn't actually ready
+     * to receive data yet, and the write silently doesn't take -- while the protocol-level ACK still
+     * looks perfectly fine, which is why it was so hard to tell apart from "loader/eMMC is fine but
+     * ignores writes". The documented workaround (and the one used here) is to pause briefly and drain
+     * whatever the loader sends right after the ACK before pushing any payload bytes.
+     */
+    private fun settleAfterProgramAck() {
+        drainPendingLogs()
     }
 
     private fun drainPendingLogs() {
