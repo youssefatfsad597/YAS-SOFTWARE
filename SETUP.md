@@ -80,15 +80,18 @@ The dashboard uses only authenticated RPC functions for admin actions. The SQL f
 
 ## 7. إعادة تعيين كلمة المرور من الإيميل (Deep Link)
 
-1. استضف `reset-password.html` على HTTPS (مثلاً GitHub Pages).
+1. `reset-password.html` مستضاف في ريبو عام (public) منفصل اسمه **Yas** عبر GitHub Pages
+   (لازم يكون عام لأن GitHub Pages المجاني لا يعمل على ريبوهات خاصة):
+   `https://youssefatfsad597.github.io/Yas/reset-password.html`
 2. في Supabase → Authentication → URL Configuration:
-   - **Site URL** و **Redirect URLs**: أضف رابط الصفحة المستضافة (مثال: `https://USER.github.io/YAS-SOFTWARE/reset-password.html`).
-3. ابنِ التطبيق مع: `-PRESET_REDIRECT_URL=https://USER.github.io/YAS-SOFTWARE/reset-password.html`
-   (لو تركته فارغًا يرسل `yassoftware://reset-password` مباشرة، ويجب إضافته أيضًا في Redirect URLs، لكن بعض تطبيقات الإيميل لا تفتح هذه الروابط).
-4. الرابط في الإيميل ← الصفحة ← زر «فتح التطبيق» ← شاشة «تعيين كلمة مرور جديدة» داخل التطبيق.
+   - **Site URL** و **Redirect URLs**: ضع نفس الرابط أعلاه بالظبط (بالمسار الكامل، مش الدومين لوحده).
+3. `app/build.gradle.kts` فيه هذا الرابط كقيمة افتراضية لـ `RESET_REDIRECT_URL` الآن، فمش محتاج تمرر `-PRESET_REDIRECT_URL` يدويًا إلا لو غيّرت اسم الريبو أو الدومين.
+4. الرابط في الإيميل ← صفحة `reset-password.html` على ريبو Yas ← زر «فتح التطبيق» ← شاشة «تعيين كلمة مرور جديدة» داخل التطبيق.
 
 ## 8. اسم المُرسِل وشكل الإيميل (من لوحة Supabase، لا من الكود)
 
 - **اسم المُرسِل:** Authentication → Settings (أو Emails) → **SMTP Settings** → حقل **Sender name** = `YAS SOFTWARE`. (يظهر `me` فقط لو أرسلت من Gmail لنفس حسابك أو تركت الحقل فارغًا.)
 - **القوالب:** Authentication → **Email Templates** → الصق محتوى `supabase/email-templates/recovery.html` (Reset Password) و`confirmation.html` (Confirm signup)، وغيّر Subject إلى `YAS SOFTWARE — إعادة تعيين كلمة المرور`.
-- **الصورة:** الإيميل لا يستطيع عرض صورة من داخل المشروع؛ لازم رابط HTTPS عام. ارفع `assets/yas_logo.png` (GitHub Pages أو `https://raw.githubusercontent.com/USER/REPO/main/assets/yas_logo.png`) واستبدل `LOGO_URL` في القالبين. بعض البرامج تحجب الصور حتى يضغط المستخدم «عرض الصور».
+- **الصورة:** الإيميل لا يستطيع عرض صورة من داخل المشروع؛ لازم رابط HTTPS عام. ارفع `yas_logo.png` لنفس ريبو **Yas** العام (بجانب `reset-password.html`) — القالبان `recovery.html` و`confirmation.html` فيهم الرابط جاهز بالفعل:
+  `https://raw.githubusercontent.com/youssefatfsad597/Yas/main/yas_logo.png`
+  بعض البرامج تحجب الصور حتى يضغط المستخدم «عرض الصور».
