@@ -796,56 +796,25 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("GPT Partition Table is empty! Check storage type (UFS/eMMC).")
             }
 
-            val eraseTargets = listOf(
-                "userdata" to setOf("userdata"),
-                "persistent" to setOf("persistent", "persestent", "presistent"),
-                "metadata" to setOf("metadata"),
-                "cache" to setOf("cache"),
-                "sec_efs" to setOf("sec_efs"),
-                "frp" to setOf("frp")
-            )
-
-            appendLog("=== STEP 1: Erasing partitions (${eraseTargets.size} items) ===")
-            eraseTargets.forEachIndexed { idx, (label, aliases) ->
-                appendLog("Erasing ${idx + 1}/${eraseTargets.size}...")
-                val matched = currentParts.filter { part ->
-                    aliases.any { alias -> part.name.equals(alias, ignoreCase = true) }
-                }
-                if (matched.isEmpty()) {
-                    appendLog("WARN: '$label' not found in GPT, skipping.")
-                } else {
-                    matched.forEach { part ->
-                        val sectorsToErase = if (part.name.equals("userdata", ignoreCase = true) && part.numSectors > 16384L) {
-                            16384L
-                        } else {
-                            part.numSectors
-                        }
-                        firehose.eraseSectors(part.lun, part.firstLba, sectorsToErase)
-                    }
-                }
-                _uiState.update { it.copy(progress = (idx + 1).toFloat() / 9f) }
-            }
-            appendLog("Erase step completed successfully.")
-
-            appendLog("=== STEP 2: WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
+            appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
                 appendLog("Writing firmware images...")
                 listOf(
                     WriteJob("frp", setOf("frp"), "frp",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "مسح frp 1") {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "Erasing FRP 1") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP)
                     },
                     WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "مسح frp 2") {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "Erasing FRP 2") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT)
                     },
                     WriteJob("misc", setOf("misc"), "misc",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "مسح data") {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "Erasing DATA") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC)
                     },
                     WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "مسح MDM") {
+                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "Erasing MDM") {
                         EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS)
                     }
                 )
@@ -900,6 +869,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             appendLog("Operation completed successfully.")
+            appendLog("Rebooting device...")
+            performDeviceReset("reset")
         }
     }
 
@@ -1705,58 +1676,66 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun resetDevice(mode: String = "reset") {
         runTask("Resetting Device ($mode)") {
-            if (!_uiState.value.firehoseReady) {
-                appendLog("ERROR: Firehose not ready. Cannot send power command.")
-                return@runTask
-            }
-            appendLog("Sending '$mode' command...")
-            var accepted = false
-            try {
-                accepted = firehose.powerControl(mode)
-            } catch (e: Exception) {
-                appendLog("Warning: ${e.message}")
-            }
-
-            if (accepted) {
-                appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
-                // Keep the USB session open until the phone has really left the 9008 bus.
-                // Closing it right after the ACK can leave some loaders half-reset, which is
-                // what used to force a cable pull. If it is still in EDL, ask again.
-                var gone = waitForEdlToLeave(6000)
-                var attempt = 1
-                while (!gone && attempt < 3 && transport.isConnected) {
-                    attempt++
-                    appendLog("Device is still in EDL. Re-sending '$mode' (attempt $attempt of 3)...")
-                    runCatching { firehose.powerControl(mode) }
-                    gone = waitForEdlToLeave(5000)
-                }
-                if (!gone) {
-                    appendLog("WARNING: The device stayed in EDL after the reset. Hold Power + Vol Down for about 10 seconds to force the restart.")
-                }
-            } else {
-                appendLog("WARNING: the loader refused <power>. It will not reboot from software; hold Power + Vol Down ~10s.")
-            }
-
-            transport.close()
-            _uiState.update {
-                it.copy(
-                    usbConnected = false,
-                    firehoseReady = false,
-                    partitions = emptyList(),
-                    deviceDescription = "No 9008 Device Detected"
-                )
-            }
-            // Always forget the old handle: whatever shows up next (normal boot, Download Mode,
-            // or 9008 again) is treated as a brand-new connection, so no cable re-plug is needed.
-            scanMutex.lock()
-            try {
-                knownUsb.clear()
-            } finally {
-                scanMutex.unlock()
-            }
-            appendLog("Device reset command sent. Waiting for the device to come back (no need to unplug the cable)...")
-            rescanUsbAfterReset()
+            performDeviceReset(mode)
         }
+    }
+
+    /** Sends <power> and waits for the device to leave EDL. Shared by [resetDevice] and any other
+     *  task (e.g. [runX216BWipeAndWriteSequence]) that needs to reboot the phone as its last step --
+     *  callers that are already inside a [runTask] block call this directly instead of [resetDevice],
+     *  since nesting runTask calls would no-op because isBusy is already true. */
+    private suspend fun performDeviceReset(mode: String = "reset") {
+        if (!_uiState.value.firehoseReady) {
+            appendLog("ERROR: Firehose not ready. Cannot send power command.")
+            return
+        }
+        appendLog("Sending '$mode' command...")
+        var accepted = false
+        try {
+            accepted = firehose.powerControl(mode)
+        } catch (e: Exception) {
+            appendLog("Warning: ${e.message}")
+        }
+
+        if (accepted) {
+            appendLog("Reset accepted: device is rebooting now (no need to unplug the cable).")
+            // Keep the USB session open until the phone has really left the 9008 bus.
+            // Closing it right after the ACK can leave some loaders half-reset, which is
+            // what used to force a cable pull. If it is still in EDL, ask again.
+            var gone = waitForEdlToLeave(6000)
+            var attempt = 1
+            while (!gone && attempt < 3 && transport.isConnected) {
+                attempt++
+                appendLog("Device is still in EDL. Re-sending '$mode' (attempt $attempt of 3)...")
+                runCatching { firehose.powerControl(mode) }
+                gone = waitForEdlToLeave(5000)
+            }
+            if (!gone) {
+                appendLog("WARNING: The device stayed in EDL after the reset. Hold Power + Vol Down for about 10 seconds to force the restart.")
+            }
+        } else {
+            appendLog("WARNING: the loader refused <power>. It will not reboot from software; hold Power + Vol Down ~10s.")
+        }
+
+        transport.close()
+        _uiState.update {
+            it.copy(
+                usbConnected = false,
+                firehoseReady = false,
+                partitions = emptyList(),
+                deviceDescription = "No 9008 Device Detected"
+            )
+        }
+        // Always forget the old handle: whatever shows up next (normal boot, Download Mode,
+        // or 9008 again) is treated as a brand-new connection, so no cable re-plug is needed.
+        scanMutex.lock()
+        try {
+            knownUsb.clear()
+        } finally {
+            scanMutex.unlock()
+        }
+        appendLog("Device reset command sent. Waiting for the device to come back (no need to unplug the cable)...")
+        rescanUsbAfterReset()
     }
 
     /** True once no Qualcomm 9008 device is left on the USB bus; false if it is still there at the timeout. */
