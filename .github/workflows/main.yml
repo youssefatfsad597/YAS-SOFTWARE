@@ -37,56 +37,32 @@ jobs:
           [ "$FAIL" -eq 0 ] || exit 1
 
 
-      - name: Copy Embedded X216B Firmware Assets From Repository
+      - name: Check required firmware files are present in the repository
         run: |
           set -e
-          mkdir -p app/src/main/assets/x216b
-          SRC_DIR="firmware/x216b"
-          REQUIRED_FILES=("X216B.elf" "frp.bin" "sec_efs.bin" "persistent.bin" "misc.bin")
-
-          if [ ! -d "$SRC_DIR" ]; then
-            echo "::error::Missing '$SRC_DIR/' in the repository. Commit X216B.elf, frp.bin, sec_efs.bin, persistent.bin and misc.bin there (git add, or GitHub web 'Upload files' — each file is under the 25MB web-upload limit)."
-            exit 1
-          fi
-
           MISSING=0
-          for f in "${REQUIRED_FILES[@]}"; do
-            if [ ! -f "$SRC_DIR/$f" ]; then
-              echo "::error::Missing required firmware file: $SRC_DIR/$f"
-              MISSING=1
-            else
-              cp "$SRC_DIR/$f" "app/src/main/assets/x216b/$f"
-            fi
+          for f in X216B.elf frp.bin sec_efs.bin persistent.bin misc.bin; do
+            [ -f "firmware/x216b/$f" ] || { echo "::error::Missing firmware/x216b/$f"; MISSING=1; }
           done
-
-          if [ "$MISSING" -eq 1 ]; then
-            echo "::error::One or more required X216B firmware files are missing from $SRC_DIR/. The APK will still build, but the embedded one-tap Wipe & Write flow will be disabled until these are committed."
-          fi
-
-          echo "Embedded firmware assets staged:"
-          ls -la app/src/main/assets/x216b/ || true
-
-      - name: Copy Embedded T509 / T509N Firmware Assets From Repository
-        run: |
-          set -e
-          REQUIRED_FILES=("fdl1-sign.bin" "fdl2-sign.bin")
           for VARIANT in t509 t509n; do
-            mkdir -p "app/src/main/assets/$VARIANT"
-            SRC_DIR="firmware/$VARIANT"
-            if [ ! -d "$SRC_DIR" ]; then
-              echo "::warning::Missing '$SRC_DIR/' in the repository. Commit fdl1-sign.bin and fdl2-sign.bin there (git add, or GitHub web 'Upload files') for the $VARIANT tab to work."
-              continue
-            fi
-            for f in "${REQUIRED_FILES[@]}"; do
-              if [ ! -f "$SRC_DIR/$f" ]; then
-                echo "::warning::Missing firmware file: $SRC_DIR/$f -- the $VARIANT tab will report firmware as not ready until it is committed."
-              else
-                cp "$SRC_DIR/$f" "app/src/main/assets/$VARIANT/$f"
-              fi
+            for f in fdl1-sign.bin fdl2-sign.bin; do
+              [ -f "firmware/$VARIANT/$f" ] || echo "::warning::Missing firmware/$VARIANT/$f -- the $VARIANT tab will report firmware as not ready until it is committed."
             done
           done
-          echo "Embedded T509/T509N firmware assets staged:"
-          ls -la app/src/main/assets/t509/ app/src/main/assets/t509n/ || true
+          if [ "$MISSING" -eq 1 ]; then
+            echo "::error::One or more required X216B firmware files are missing. The APK will still build, but the embedded one-tap Wipe & Write flow will be disabled until these are committed."
+          fi
+
+      - name: Encrypt + Stage Embedded Firmware Assets
+        # Firmware files are never copied into the APK's assets in plaintext: this
+        # AES-256-CTR encrypts each file (random IV per file, prepended) so that
+        # unzipping the built APK does NOT hand out ready-to-use firmware images.
+        # Decryption happens on-device at runtime (see FirmwareCipher.kt).
+        run: |
+          set -e
+          bash tools/encrypt_firmware_assets.sh
+          echo "Embedded firmware assets staged (encrypted):"
+          find app/src/main/assets -name "*.enc" -exec ls -la {} \;
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

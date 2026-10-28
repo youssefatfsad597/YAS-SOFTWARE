@@ -20,19 +20,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Copy Embedded X216B Firmware Assets From Repository
-        run: |
-          set -e
-          mkdir -p app/src/main/assets/x216b
-          cp firmware/x216b/* app/src/main/assets/x216b/ 2>/dev/null || true
-
-      - name: Copy Embedded T509 / T509N Firmware Assets From Repository
-        run: |
-          set -e
-          for VARIANT in t509 t509n; do
-            mkdir -p "app/src/main/assets/$VARIANT"
-            cp firmware/$VARIANT/* app/src/main/assets/$VARIANT/ 2>/dev/null || true
-          done
+      - name: Encrypt + Stage Embedded Firmware Assets
+        # Same AES-256-CTR encryption as the debug workflow (tools/encrypt_firmware_assets.sh)
+        # so the release APK also never ships plaintext firmware in its assets.
+        run: bash tools/encrypt_firmware_assets.sh
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
