@@ -3,6 +3,7 @@ package com.edl.flasher.auth
 import com.edl.flasher.BuildConfig
 
 import android.content.Context
+import android.os.Build
 import android.provider.Settings
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
@@ -15,6 +16,7 @@ import java.util.UUID
 
 /** Supabase Auth + PostgREST RPC client. Only the public anon key belongs in the app. */
 class LicenseService(context: Context) {
+    private val appContext: Context = context.applicationContext
     private val prefs = EncryptedSharedPreferences.create(
         context,
         "yas_secure_session",
@@ -53,6 +55,39 @@ class LicenseService(context: Context) {
         return generated
     }
 
+    /** ANDROID_ID: survives app reinstall (same signing key); changes only on factory reset. */
+    private fun androidId(): String = try {
+        Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
+    } catch (_: Exception) { "" }
+
+    private fun identityBody(): JSONObject = JSONObject()
+        .put("p_device_id", deviceId())
+        .put("p_android_id", androidId())
+
+    /** Remembered locally once the server says this phone is banned, so the block also holds offline. */
+    fun isLocallyBanned(): Boolean = prefs.getBoolean("device_banned", false)
+    private fun markBanned() { prefs.edit().putBoolean("device_banned", true).apply() }
+
+    /** Runs BEFORE the login screen / any UI. True = this phone is on the ban list.
+     *  Network errors return false here (the license check that follows still fails closed offline). */
+    suspend fun checkBanned(): Boolean = withContext(Dispatchers.IO) {
+        if (isLocallyBanned()) return@withContext true
+        try {
+            val r = request("/rest/v1/rpc/is_device_banned", "POST", identityBody(), authenticated = false)
+            val banned = r.optBoolean("banned", false)
+            if (banned) markBanned()
+            banned
+        } catch (_: Exception) { false }
+    }
+
+    /** Human-readable device name shown in the admin dashboard, e.g. "samsung SM-T509 (Android 13)". */
+    private fun deviceName(): String {
+        val maker = Build.MANUFACTURER.orEmpty().trim()
+        val model = Build.MODEL.orEmpty().trim()
+        val name = if (model.startsWith(maker, ignoreCase = true)) model else "$maker $model"
+        return "${name.trim().ifBlank { "Android device" }} (Android ${Build.VERSION.RELEASE})".take(80)
+    }
+
     suspend fun signUp(email: String, password: String): String = withContext(Dispatchers.IO) {
         val body = JSONObject().put("email", email.trim()).put("password", password)
         val result = request("/auth/v1/signup", "POST", body, authenticated = false)
@@ -79,7 +114,7 @@ class LicenseService(context: Context) {
     suspend fun authorize(): License = withContext(Dispatchers.IO) {
         if (!hasSession()) return@withContext License(false, "signed_out", null, "سجّل الدخول أولًا.")
         try {
-            val body = JSONObject().put("p_device_id", deviceId())
+            val body = identityBody().put("p_device_name", deviceName())
             val result = try {
                 request("/rest/v1/rpc/authorize_device", "POST", body, authenticated = true)
             } catch (e: Exception) {
@@ -89,6 +124,7 @@ class LicenseService(context: Context) {
                     request("/rest/v1/rpc/authorize_device", "POST", body, authenticated = true)
                 } else throw e
             }
+            if (result.optString("status") == "device_banned") markBanned()
             License(
                 active = result.optBoolean("active", false),
                 status = result.optString("status", "pending"),

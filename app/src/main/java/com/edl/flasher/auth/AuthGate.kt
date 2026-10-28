@@ -77,6 +77,7 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     var isError by remember { mutableStateOf(false) }
     var license by remember { mutableStateOf<LicenseService.License?>(null) }
     var tamperBlocked by remember { mutableStateOf(false) }
+    var banned by remember { mutableStateOf(service.isLocallyBanned()) }
     val scope = rememberCoroutineScope()
     val adminService = remember { AdminService(service) }
     var isAdmin by remember { mutableStateOf(false) }
@@ -93,6 +94,7 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
         scope.launch {
             val result = service.authorize()
             license = result
+            if (result.status == "device_banned") banned = true
             authorized = result.active
             message = result.message
             isError = !result.active
@@ -100,7 +102,10 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
         }
     }
 
-    LaunchedEffect(Unit) { verify() }
+    // Ban check comes first: a banned phone never reaches the login screen or the app UI.
+    LaunchedEffect(Unit) {
+        if (service.checkBanned()) { banned = true; checking = false } else verify()
+    }
     LaunchedEffect(authorized) {
         onAuthorizationChanged(authorized && enteredApp)
         if (!authorized) { enteredApp = false; showAdmin = false; isAdmin = false }
@@ -109,6 +114,7 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
             delay(60_000)
             val result = service.authorize()
             license = result
+            if (result.status == "device_banned") banned = true
             if (!result.active) {
                 authorized = false
                 enteredApp = false
@@ -120,6 +126,18 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
     // The running app itself has no exit/logout control — closing the app (see
     // MainActivity.onDestroy) is what ends the session and counts as a logout.
     LaunchedEffect(enteredApp) { onAuthorizationChanged(authorized && enteredApp) }
+
+    if (banned) {
+        GateScaffold {
+            Text(
+                "هذا الجهاز محظور ولا يمكنه استخدام YAS SOFTWARE. إذا كنت تعتقد أن هذا خطأ، تواصل مع الإدارة.",
+                style = MaterialTheme.typography.titleMedium,
+                color = Yas.DangerText,
+                textAlign = TextAlign.Center
+            )
+        }
+        return
+    }
 
     if (tamperBlocked) {
         GateScaffold {
@@ -201,6 +219,7 @@ fun AuthGate(service: LicenseService, onAuthorizationChanged: (Boolean) -> Unit,
                         else -> {
                             val result = service.signIn(email, password)
                             license = result
+                            if (result.status == "device_banned") banned = true
                             message = result.message.ifBlank { if (result.active) "تم التحقق من الترخيص." else "الحساب غير مفعّل أو انتهت مدة الترخيص." }
                             isError = !result.active
                             authorized = result.active
@@ -301,6 +320,7 @@ private fun StatusChip(status: String) {
         "offline" -> "تعذر الاتصال" to Yas.DangerText
         "device_cooldown" -> "بانتظار تبديل الجهاز" to Yas.WarningText
         "device_revoked" -> "تم إلغاء الجهاز" to Yas.DangerText
+        "device_banned" -> "الجهاز محظور" to Yas.DangerText
         else -> status to Yas.Muted
     }
     Surface(shape = RoundedCornerShape(50), color = color.copy(alpha = 0.14f), border = BorderStroke(1.dp, color.copy(alpha = 0.4f))) {
