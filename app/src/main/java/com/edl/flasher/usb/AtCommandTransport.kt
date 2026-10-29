@@ -171,8 +171,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 val read = conn.bulkTransfer(epIn, buf, buf.size, 1500)
                 if (read > 0) {
                     val reply = String(buf, 0, read, Charsets.US_ASCII).replace("\r", " ").replace("\n", " ").trim()
-                    val rejected = reply.contains("ERROR", ignoreCase = true) || reply.contains("#NG#")
-                    if (rejected) log("The device rejected the request.")
+                    val rejected = isRejected(reply)
+                    if (rejected) log(rejectionReason(reply))
                     if (!rejected && reply.contains("OK", ignoreCase = true)) anySuccess = true
                     if (anySuccess && stopOnSuccess) break
                 } else {
@@ -212,7 +212,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     for (cmd in commands) {
                         val reply = exchange(conn, epIn, epOut, cmd)
-                        if (reply.isNotBlank() && !reply.contains("ERROR", ignoreCase = true) && !reply.contains("#NG#")) result[cmd] = reply
+                        if (reply.isNotBlank() && !isRejected(reply)) result[cmd] = reply
                     }
                 } finally {
                     runCatching { conn.releaseInterface(intf) }
@@ -254,7 +254,25 @@ class AtCommandTransport(private val context: Context) : Closeable {
     private fun isAtTerminator(line: String): Boolean {
         val t = line.trim()
         return t == "OK" || t == "#OK#" || t == "ERROR" || t == "#NG#" || t == "NG" ||
-            t.startsWith("+CME ERROR") || t.startsWith("+CMS ERROR")
+            t.startsWith("+CME ERROR") || t.startsWith("+CMS ERROR") ||
+            t.contains("Wrong Attribute", true) || t.contains("Wrong Data", true)
+    }
+
+    /** The Samsung CP's own AT-command parser answers a long list of commands --
+     *  SERIALNO, PRODCODE, RFBYCODE, CPLDUCFG, and others -- with a plain
+     *  "<CMD> Wrong Attribute" / "<CMD> Wrong Data" line instead of (or alongside) ERROR
+     *  when a parameter is invalid; this is the modem's own error convention, not specific
+     *  to one command. Treat it the same as ERROR/#NG# everywhere a reply is judged. */
+    private fun isRejected(reply: String): Boolean =
+        reply.contains("ERROR", true) || reply.contains("#NG#") ||
+            reply.contains("Wrong Attribute", true) || reply.contains("Wrong Data", true)
+
+    /** Turns a rejected CP reply into a short, specific reason instead of a generic one,
+     *  when the modem's own wording lets us (see [isRejected]). */
+    private fun rejectionReason(reply: String): String = when {
+        reply.contains("Wrong Attribute", true) -> "A step was rejected by the device: wrong attribute value."
+        reply.contains("Wrong Data", true) -> "A step was rejected by the device: wrong data for that step."
+        else -> "A step was rejected by the device."
     }
 
     private fun exchange(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint, cmd: String): String {
@@ -378,8 +396,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     commands.forEachIndexed { i, cmd ->
                         val reply = exchange(conn, epIn, epOut, cmd)
                         replies?.add(reply)
-                        val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
-                        if (bad) log("A step was rejected by the device.")
+                        val bad = isRejected(reply)
+                        if (bad) log(rejectionReason(reply))
                         onProgress?.invoke((i + 1).toFloat() / commands.size)
                         if (bad) allOk = false
                         if (i < commands.size - 1) kotlinx.coroutines.delay(delayMs)
@@ -412,6 +430,15 @@ class AtCommandTransport(private val context: Context) : Closeable {
      * Samsung serial-number rewrite (5 steps, NO factory reset). Returns true ONLY when the final
      * AT+SERIALNO step was explicitly acknowledged by the modem (reply contains "OK" and no error).
      * The reboot is done by the caller afterwards (see [rebootVerified]).
+     *
+     * Every command below -- AT+SWATD=0/1, AT+ACTIVATE=0,0,0, AT+DEBUGLVC, AT+PARALLEL and
+     * AT+SERIALNO=2,<data> -- is present verbatim in this firmware's own AP-side AT-command
+     * whitelist (AT+SWATD=0, AT+SWATD=1, AT+ACTIVATE=0,0,0, AT+DEBUGLVC=*, AT+PARALLEL=*,
+     * AT+SERIALNO=* and specifically AT+SERIALNO=2,* for the write attribute used here), so
+     * none of them are blocked by the AP before ever reaching the modem. They are, however,
+     * engineering/service commands: none of them appear in this device's own AT+CLAC reply (the
+     * modem's list of "publicly documented" commands), so AT+CLAC must never be used to decide
+     * whether this sequence is worth attempting -- its absence there is expected, not an error.
      */
     suspend fun changeSerialSequence(device: UsbDevice, newSerial: String, log: (String) -> Unit): Boolean {
         val before = readModemSerial(device)
@@ -427,6 +454,20 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val last = replies.lastOrNull().orEmpty()
         val acknowledged = sequenceOk && replies.size == cmds.size &&
             last.contains("SERIALNO", true) && last.contains("OK", true)
+        // The modem's own AT+SERIALNO handler reports a rejected write as "...Wrong Attribute"
+        // (the leading "2," attribute itself was refused) or "...Wrong Data" (the attribute was
+        // accepted but the 11-character payload was not) rather than a bare ERROR -- surface
+        // whichever one it was instead of a single generic message.
+        if (!acknowledged) {
+            when {
+                last.contains("Wrong Attribute", true) ->
+                    log("The modem rejected the new serial: Wrong Attribute (AT+SERIALNO=2 was refused in this USB mode/firmware).")
+                last.contains("Wrong Data", true) ->
+                    log("The modem rejected the new serial: Wrong Data (it did not accept \"$newSerial\" as written).")
+                last.contains("ERROR", true) || last.contains("#NG#") ->
+                    log("The modem rejected the new serial.")
+            }
+        }
         kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
         val after = readModemSerial(device, 2)
         return acknowledged || after.equals(newSerial, true)
@@ -465,8 +506,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     }
                     for (cmd in FORMAT_COMMANDS) {
                         val reply = exchange(conn, epIn, epOut, cmd)
-                        val bad = reply.contains("ERROR", true) || reply.contains("#NG#")
-                        if (bad) log("The device rejected a step, trying another method...") else onProgress?.invoke(0.7f)
+                        val bad = isRejected(reply)
+                        if (bad) log("${rejectionReason(reply)} Trying another method...") else onProgress?.invoke(0.7f)
                         if (!bad) { accepted = true; break }
                         kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
                     }
