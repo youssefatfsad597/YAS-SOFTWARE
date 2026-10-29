@@ -222,6 +222,8 @@ class MainActivity : ComponentActivity() {
                     onClearCscTar = viewModel::clearCscTar,
                     onClearUserdataTar = viewModel::clearUserdataTar,
                     onFormatT505N = { t505nFormatPicker.launch(arrayOf("*/*")) },
+                    onRunT505NFormatFrp = viewModel::runT505NFormatFrpSequence,
+                    onRunT505NEraseFrp = viewModel::runT505NEraseFrpSequence,
                     onToggleOdinAutoReboot = viewModel::setOdinAutoReboot,
                     onExitDownloadMode = viewModel::exitDownloadMode,
                     onReadMtpInfo = viewModel::readMtpInfo,
