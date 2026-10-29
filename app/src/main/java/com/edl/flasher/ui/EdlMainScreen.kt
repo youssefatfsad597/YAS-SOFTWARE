@@ -695,6 +695,8 @@ fun EdlMainScreen(
     onToggleOdinSlot: (String) -> Unit,
     onToggleOdinEntry: (String, String) -> Unit,
     onFormatT505N: () -> Unit,
+    onRunT505NFormatFrp: () -> Unit,
+    onRunT505NEraseFrp: () -> Unit,
     onToggleOdinAutoReboot: (Boolean) -> Unit,
     onExitDownloadMode: () -> Unit,
     onReadMtpInfo: () -> Unit,
@@ -768,14 +770,14 @@ fun EdlMainScreen(
             0 -> ServiceTab(
                 state = state,
                 onRunX216BWipeAndWrite = onRunX216BWipeAndWrite,
-                onResetFrp = onResetFrp,
-                onFactoryReset = onFactoryReset,
                 onAdbShell = knoxRunner
             )
             1 -> T505NTab(
                 state = state,
                 onMtpDownloadAt = onMtpDownloadAt,
                 onFormatT505N = onFormatT505N,
+                onRunT505NFormatFrp = onRunT505NFormatFrp,
+                onRunT505NEraseFrp = onRunT505NEraseFrp,
                 onMtpFormatAt = onMtpFormatAt,
                 onAdbShell = knoxRunner
             )
@@ -870,7 +872,9 @@ fun EdlMainScreen(
                     state = state,
                     wide = wide,
                     onConnectUsb = onConnectUsb,
-                    onResetDevice = onResetDevice
+                    onResetDevice = onResetDevice,
+                    onResetFrp = onResetFrp,
+                    onFactoryReset = onFactoryReset
                 )
                 YDivider()
 
@@ -965,9 +969,40 @@ private fun TopBar(
     state: EdlUiState,
     wide: Boolean,
     onConnectUsb: () -> Unit,
-    onResetDevice: (String) -> Unit
+    onResetDevice: (String) -> Unit,
+    onResetFrp: () -> Unit,
+    onFactoryReset: () -> Unit
 ) {
     val mode = connMode(state)
+    var showFrpConfirm by remember { mutableStateOf(false) }
+    var showFactoryConfirm by remember { mutableStateOf(false) }
+
+    if (showFrpConfirm) {
+        YASConfirmDialog(
+            title = "Erase FRP?",
+            message = "Erase the FRP partition on the connected 9008 device?",
+            confirmText = "Erase FRP",
+            danger = true,
+            onConfirm = {
+                showFrpConfirm = false
+                onResetFrp()
+            },
+            onDismiss = { showFrpConfirm = false }
+        )
+    }
+    if (showFactoryConfirm) {
+        YASConfirmDialog(
+            title = "Factory reset?",
+            message = "Factory reset the connected 9008 device? User data will be lost.",
+            confirmText = "Factory Reset",
+            danger = true,
+            onConfirm = {
+                showFactoryConfirm = false
+                onFactoryReset()
+            },
+            onDismiss = { showFactoryConfirm = false }
+        )
+    }
 
     val brand: @Composable () -> Unit = {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -990,6 +1025,23 @@ private fun TopBar(
         YASButton("Re-scan USB", onConnectUsb, style = BtnStyle.Secondary, compact = true, enabled = !state.isBusy)
         YASButton("Reboot", { onResetDevice("reset") }, style = BtnStyle.Warning, compact = true, enabled = !state.isBusy)
         YASButton("Power Off", { onResetDevice("off") }, style = BtnStyle.DangerSoft, compact = true, enabled = !state.isBusy)
+        // EDL + Firehose utilities, moved here from the X216B tab so they are reachable from
+        // any tab, right next to Reboot / Power Off: both need "Upload Loader + Read GPT" run
+        // first (Read GPT tab, or either X216B/T505N one-tap button) before they have a GPT to act on.
+        YASButton(
+            "Erase FRP",
+            { showFrpConfirm = true },
+            style = BtnStyle.DangerSoft,
+            compact = true,
+            enabled = state.firehoseReady && !state.isBusy
+        )
+        YASButton(
+            "Factory Reset",
+            { showFactoryConfirm = true },
+            style = BtnStyle.Danger,
+            compact = true,
+            enabled = state.firehoseReady && !state.isBusy
+        )
     }
 
     if (wide) {
@@ -1415,13 +1467,9 @@ private fun Hint(text: String) {
 private fun ServiceTab(
     state: EdlUiState,
     onRunX216BWipeAndWrite: () -> Unit,
-    onResetFrp: () -> Unit,
-    onFactoryReset: () -> Unit,
     onAdbShell: (String) -> Unit
 ) {
     var showKnoxConfirm by remember { mutableStateOf(false) }
-    var showFrpConfirm by remember { mutableStateOf(false) }
-    var showFactoryConfirm by remember { mutableStateOf(false) }
 
     if (showKnoxConfirm) {
         YASConfirmDialog(
@@ -1434,32 +1482,6 @@ private fun ServiceTab(
                 onAdbShell(X216B_ADB_COMMAND)
             },
             onDismiss = { showKnoxConfirm = false }
-        )
-    }
-    if (showFrpConfirm) {
-        YASConfirmDialog(
-            title = "Erase FRP?",
-            message = "Erase the FRP partition on the connected 9008 device?",
-            confirmText = "Erase FRP",
-            danger = true,
-            onConfirm = {
-                showFrpConfirm = false
-                onResetFrp()
-            },
-            onDismiss = { showFrpConfirm = false }
-        )
-    }
-    if (showFactoryConfirm) {
-        YASConfirmDialog(
-            title = "Factory reset?",
-            message = "Factory reset the connected 9008 device? User data will be lost.",
-            confirmText = "Factory Reset",
-            danger = true,
-            onConfirm = {
-                showFactoryConfirm = false
-                onFactoryReset()
-            },
-            onDismiss = { showFactoryConfirm = false }
         )
     }
 
@@ -1494,7 +1516,7 @@ private fun ServiceTab(
                 StatusBadge("Firmware", if (state.embeddedFirmwareReady) Yas.Success else Yas.Idle)
             }
             YASButton(
-                text = "Format FRP MDM",
+                text = "Format + FRP + MDM",
                 onClick = onRunX216BWipeAndWrite,
                 modifier = Modifier.fillMaxWidth(),
                 style = BtnStyle.Primary,
@@ -1523,32 +1545,6 @@ private fun ServiceTab(
                 large = true
             )
             Hint("ADB (normal Android, USB debugging on): disables Knox / MDM packages.")
-        }
-
-        YASCard(
-            title = "EDL Utilities",
-            subtitle = "Firehose"
-        ) {
-            if (!state.firehoseReady) {
-                Hint("Needs Firehose: run Upload Loader + Read GPT first.")
-            }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                YASButton(
-                    "Erase FRP",
-                    { showFrpConfirm = true },
-                    Modifier.weight(1f),
-                    style = BtnStyle.DangerSoft,
-                    enabled = state.firehoseReady && !state.isBusy
-                )
-                YASButton(
-                    "Factory Reset",
-                    { showFactoryConfirm = true },
-                    Modifier.weight(1f),
-                    style = BtnStyle.Danger,
-                    enabled = state.firehoseReady && !state.isBusy
-                )
-            }
-            Hint("EDL + Firehose. Erase FRP wipes the FRP partition; Factory Reset erases user data.")
         }
     }
 }
@@ -1848,6 +1844,7 @@ private fun ReadGptTab(
                 )
             }
             Hint("EDL 9008: Read HWID / PK_HASH reads the chip ID. Upload Loader + Read GPT starts Firehose and reads partitions. Read GPT re-reads them.")
+            Hint("T505N also has a built-in loader (its own Format + FRP / Erase FRP buttons load it automatically) and its memory is eMMC, not UFS -- pick \"eMMC\" above if you upload its loader manually from here.")
         }
 
         PartitionTable(
@@ -2561,12 +2558,42 @@ private fun T505NTab(
     state: EdlUiState,
     onMtpDownloadAt: () -> Unit,
     onFormatT505N: () -> Unit,
+    onRunT505NFormatFrp: () -> Unit,
+    onRunT505NEraseFrp: () -> Unit,
     onMtpFormatAt: (() -> Unit)? = null,
     onAdbShell: ((String) -> Unit)? = null
 ) {
     var showFormatConfirm by remember { mutableStateOf(false) }
     var showRestoreConfirm by remember { mutableStateOf(false) }
     var showKnoxConfirm by remember { mutableStateOf(false) }
+    var showEdlFormatFrpConfirm by remember { mutableStateOf(false) }
+    var showEdlEraseFrpConfirm by remember { mutableStateOf(false) }
+    if (showEdlFormatFrpConfirm) {
+        YASConfirmDialog(
+            title = "Format + FRP?",
+            message = "Uploads the built-in T505N Firehose loader over EDL (9008), reads the full GPT, then writes misc, FRP and persistent, and reboots. User data will be lost.",
+            confirmText = "Format + FRP",
+            danger = true,
+            onConfirm = {
+                showEdlFormatFrpConfirm = false
+                onRunT505NFormatFrp()
+            },
+            onDismiss = { showEdlFormatFrpConfirm = false }
+        )
+    }
+    if (showEdlEraseFrpConfirm) {
+        YASConfirmDialog(
+            title = "Erase FRP?",
+            message = "Uploads the built-in T505N Firehose loader over EDL (9008), reads the full GPT, then writes only FRP and persistent, and reboots.",
+            confirmText = "Erase FRP",
+            danger = true,
+            onConfirm = {
+                showEdlEraseFrpConfirm = false
+                onRunT505NEraseFrp()
+            },
+            onDismiss = { showEdlEraseFrpConfirm = false }
+        )
+    }
     if (showKnoxConfirm) {
         YASConfirmDialog(
             title = "Remove Knox?",
@@ -2678,6 +2705,50 @@ private fun T505NTab(
                 )
                 Hint("USB debugging on: disables every Knox package for the current user, including the ones that talk to an external MDM / lease-protection service -- can trip that service's own anti-tamper lock on some units.")
             }
+        }
+
+        YASCard(
+            title = "EDL 9008 Service",
+            subtitle = "SM-T505N  \u00B7  Firehose (built-in loader, eMMC)",
+            trailing = {
+                StatusBadge(
+                    text = if (state.t505nFirmwareReady) "FIRMWARE READY" else "FIRMWARE CHECK",
+                    color = if (state.t505nFirmwareReady) Yas.Success else Yas.WarningText
+                )
+            }
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                StatusBadge("9008 port", if (state.usbConnected) Yas.Success else Yas.Idle)
+                StatusBadge("Firehose", if (state.firehoseReady) Yas.Success else Yas.Idle)
+                StatusBadge(
+                    if (state.partitions.isEmpty()) "GPT" else "GPT  ${state.partitions.size}",
+                    if (state.partitions.isNotEmpty()) Yas.Success else Yas.Idle
+                )
+                StatusBadge("Firmware", if (state.t505nFirmwareReady) Yas.Success else Yas.Idle)
+            }
+            YASButton(
+                text = "Format + FRP",
+                onClick = { showEdlFormatFrpConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.Primary,
+                enabled = !state.isBusy,
+                large = true
+            )
+            Hint("EDL 9008: uploads the built-in loader, reads the GPT, writes misc + FRP + persistent, then reboots.")
+            YASButton(
+                text = "Erase FRP",
+                onClick = { showEdlEraseFrpConfirm = true },
+                modifier = Modifier.fillMaxWidth(),
+                style = BtnStyle.DangerSoft,
+                enabled = !state.isBusy,
+                large = true
+            )
+            Hint("EDL 9008: same loader + GPT read as above, but only writes FRP + persistent (misc/DATA is left untouched), then reboots.")
         }
     }
 }
@@ -3085,32 +3156,33 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
     ExplainSection(
         title = "تبويب X216B",
         body = """
-## "Format FRP MDM"
-الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM. بيشتغل والجهاز في EDL (9008). بيكتب الملفات بالترتيب ده: frp ← persistent ← misc ← sec_efs، واللوج بيوضح كل خطوة.
+## "Format + FRP + MDM"
+الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM (الاسم القديم كان "Format FRP MDM"). بيشتغل والجهاز في EDL (9008)، برفع اللودر المدمج تلقائيًا، قراءة الـ GPT، وبعدين بيكتب الملفات بالترتيب ده: frp ← persistent ← misc ← sec_efs، واللوج بيوضح كل خطوة.
 
 ## "X216B Remove KNOX"
 1. بيلغي باكدجات Knox والـ MDM عن طريق ADB.
 2. الجهاز لازم يكون شغال أندرويد عادي و USB Debugging مفعّل.
 
+ملحوظة: زراري "Erase FRP" و"Factory Reset" مش هنا تاني -- اتنقلوا للشريط العلوي (جنب "Reboot" و"Power Off")، عشان يبقوا متاحين من أي تبويب. شوف قسم "الشريط العلوي" تحت.
+""".trimIndent()
+    ),
+    ExplainSection(
+        title = "الشريط العلوي (Reboot / Power Off / Erase FRP / Factory Reset)",
+        body = """
+الأربع أزرار دي ظاهرة فوق في كل التبويبات (جنب بعض)، مش جوه تبويب معيّن.
+
+## "Reboot" و"Power Off"
+بيشتغلوا مع أي وضع متصل (EDL 9008، Download Mode، BROM): بيبعتوا أمر إعادة تشغيل أو إطفاء للجهاز المتصل حاليًا.
+
 ## "Erase FRP"
-لإزالة قفل FRP.
-لازم تحدد اللودر الأول، بالخطوات دي:
+بيمسح أي partition اسمه "frp" أو "config" أو "persistent" (وبدائلها المكتوبة غلط زي "persestent"/"presistent") من جدول الـ GPT اللي اتقرا. لازم:
 1. ادخل الجهاز في EDL (9008) بالكابل المعدل.
-2. افتح تبويب Read GPT.
-3. في اختيار اللودر: لو جهازك X216B اختار "Built-in X216B" (مش محتاج تختار أي ملف).
-4. لو جهازك غير X216B اختار "Manual" واختار ملف اللودر (.elf أو .mbn) المناسب لجهازك.
-5. اضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
-6. ارجع للتبويب اللي كنت فيه واضغط الزرار اللي عايزه.
+2. افتح تبويب Read GPT (أو استخدم أي زرار بيرفع اللودر زي "Format + FRP + MDM" في X216B أو "Format + FRP"/"Erase FRP" في T505N).
+3. حدد اللودر المناسب واضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
+4. دلوقتي الزرار يبقى شغال من الشريط العلوي.
 
 ## "Factory Reset"
-لعمل Factory Reset للجهاز.
-لازم تحدد اللودر الأول، بالخطوات دي:
-1. ادخل الجهاز في EDL (9008) بالكابل المعدل.
-2. افتح تبويب Read GPT.
-3. في اختيار اللودر: لو جهازك X216B اختار "Built-in X216B" (مش محتاج تختار أي ملف).
-4. لو جهازك غير X216B اختار "Manual" واختار ملف اللودر (.elf أو .mbn) المناسب لجهازك.
-5. اضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
-6. ارجع للتبويب اللي كنت فيه واضغط الزرار اللي عايزه.
+زي "Erase FRP" بالظبط في الخطوات، لكن بيمسح partitions الـ "userdata"/"metadata"/"cache" بدل الـ FRP. لازم GPT مقروء الأول (نفس خطوات فوق).
 """.trimIndent()
     ),
     ExplainSection(
@@ -3127,6 +3199,13 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 
 ## "Remove Knox"
 زي X216B بالظبط، ومحتاج ADB شغال (أندرويد عادي + USB Debugging).
+
+## "Format + FRP"  (EDL 9008 -- كارت "EDL 9008 Service")
+زي زرار X216B بالظبط، بس بالملفات المناسبة لـ T505N: بيرفع لودر T505N المدمج تلقائيًا، يقرا الـ GPT كامل (الذاكرة eMMC، مش UFS، والتطبيق بيظبط ده لوحده)، وبعدين بيكتب misc ← frp ← persistent، وبعد ما يخلص بيعمل reboot لوحده. مفيش sec_efs/MDM هنا، عكس X216B.
+لازم الجهاز يكون داخل EDL (9008) بالكابل المعدل، ومفيش داعي تفتح تبويب Read GPT -- اللودر بيترفع تلقائيًا.
+
+## "Erase FRP"  (EDL 9008 -- كارت "EDL 9008 Service")
+نفس خطوات "Format + FRP" (لودر T505N المدمج + قراءة GPT)، لكن بيكتب بس frp ← persistent من غير ما يلمس misc، وبعدين بيعمل reboot.
 """.trimIndent()
     ),
     ExplainSection(
@@ -3157,11 +3236,12 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 ## اختيار اللودر
 • Built-in X216B: بيستخدم X216B.elf المدمج تلقائيًا.
 • Manual: تختار ملف .elf أو .mbn بنفسك، استخدمه لو عندك لودر تاني أنسب لجهازك.
+• T505N: عنده لودر مدمج هو كمان (T505N.elf)، بس مش من هنا -- زراري "Format + FRP" و"Erase FRP" في تبويب T505N بترفعه لوحدها تلقائيًا وتظبط نوع التخزين على eMMC قبل ما تقرا الـ GPT.
 
 ## اختيار نوع التخزين
 حدده قبل القراءة عشان حجم الـ sector يتظبط:
 • UFS = 4096 بايت.
-• eMMC = 512 بايت.
+• eMMC = 512 بايت. (ده نوع تخزين الـ T505N -- لو هترفع لودره من هنا يدويًا، اختار eMMC.)
 
 ## "Read HWID / PK_HASH"
 بيقرا هوية الشريحة. بيشتغل أول ما الجهاز يبقى في EDL (9008)، من غير ما ترفع اللودر.
@@ -3242,7 +3322,7 @@ private val EXPLAIN_WORKFLOWS: List<ExplainSection> = listOf(
 ## المرحلة 1: التجهيز والدخول في EDL
 1. لو في شريحة (خط) جوه التابلت، شيلها قبل ما تبدأ.
 2. ادخل الجهاز في EDL بالكابل المعدل (اتبع قسم "EDL" فوق).
-3. افتح تبويب X216B واضغط "Format FRP MDM".
+3. افتح تبويب X216B واضغط "Format + FRP + MDM".
 4. استنى لحد ما العملية تخلص من غير ما تفصل الكابل.
 5. افصل الكابل وسيب الجهاز يقلع. أول إقلاع بياخد دقايق وممكن يعمل reboot أكتر من مرة.
 
