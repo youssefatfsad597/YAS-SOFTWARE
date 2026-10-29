@@ -49,6 +49,9 @@ jobs:
               [ -f "firmware/$VARIANT/$f" ] || echo "::warning::Missing firmware/$VARIANT/$f -- the $VARIANT tab will report firmware as not ready until it is committed."
             done
           done
+          for f in T505N.elf frp.bin persistent.bin misc.bin; do
+            [ -f "firmware/t505n/$f" ] || echo "::warning::Missing firmware/t505n/$f -- the T505N tab's Format + FRP / Erase FRP buttons will report firmware as not ready until it is committed."
+          done
           if [ "$MISSING" -eq 1 ]; then
             echo "::error::One or more required X216B firmware files are missing. The APK will still build, but the embedded one-tap Wipe & Write flow will be disabled until these are committed."
           fi
