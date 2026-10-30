@@ -1632,18 +1632,6 @@ private fun T509Tab(
                 )
             }
         ) {
-            Hint("Pick the exact variant: T509 or T509N.")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                T509Variant.values().forEach { v ->
-                    YASButton(
-                        v.label,
-                        { onSetVariant(v) },
-                        Modifier.weight(1f),
-                        style = if (state.t509Variant == v) BtnStyle.Primary else BtnStyle.Secondary,
-                        enabled = !state.isBusy
-                    )
-                }
-            }
             YDivider()
             Row(
                 modifier = Modifier
@@ -3257,9 +3245,6 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
     ExplainSection(
         title = "تبويب T509",
         body = """
-## اختيار T509 / T509N
-حدد نوع الجهاز بالظبط قبل أي خطوة، عشان التطبيق يستخدم ملفات FDL1 و FDL2 الصح.
-
 ## "Force BROM"
 بيدخّل الجهاز وضع BROM بتاع Unisoc (زي EDL عند Qualcomm) من غير كومبينيشن أزرار. بيشتغل بأوامر AT لما يكون الجهاز شغال في وضع MTP.
 
