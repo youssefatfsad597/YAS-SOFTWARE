@@ -28,9 +28,11 @@ class SprdFdlProtocol(
     private val transport: EdlUsbTransport,
     private val log: (String) -> Unit,
     /** Where the boot ROM should place FDL1 / FDL2 in RAM. These are SoC specific (0 is never
-     *  valid). Defaults are the values commonly used for the Unisoc T618 (UMS512) family and are
-     *  UNVERIFIED for this exact device -- if upload fails at START_DATA, calibrate them. */
-    var fdl1LoadAddr: Int = 0x65000800,
+     *  valid). Values below come from this device's own address.txt (T509N): FDL1 = 0x5500,
+     *  FDL2 = 0x9EFFFE00 -- the FDL2 address happened to already match the old generic default,
+     *  which is why only FDL1 changed here. If upload still fails at START_DATA, recalibrate
+     *  against a fresh address dump for the exact chip in hand. */
+    var fdl1LoadAddr: Int = 0x5500,
     var fdl2LoadAddr: Int = 0x9EFFFE00.toInt()
 ) {
     companion object {
