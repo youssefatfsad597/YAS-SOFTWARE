@@ -2241,66 +2241,178 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Writes a new Samsung-style serial number (11 characters, A-Z / 0-9) to the device over
-     *  its AT port (MTP mode, no ADB / root needed): the classic 5-step Samsung AT+SERIALNO
-     *  sequence ([AtCommandTransport.changeSerialSequence]), then a normal reboot. */
+     *  its AT port (MTP mode, no ADB / root needed). Based on MA UNLOCKER's full service
+     *  sequence: SWATD → ACTIVATE → KSTRINGB → DUMPCTRL → DEBUGLVC → SERIALNO write,
+     *  then a verified reboot with AT+POWRESET, followed by post-boot read-back confirmation.
+     *
+     * Progress stages:
+     *   0%–30 %   Service-init sequence (SWATD, ACTIVATE, KSTRINGB, DUMPCTRL, DEBUGLVC)
+     *   30%–55 %  AT+SERIALNO=2,<SN> write with automatic retries (up to 4)
+     *   55%–65 %  Post-write read-back verification
+     *   65%–85 %  Verified reboot (AT+POWRESET=0,0)
+     *   85%–95 %  Waiting for device to return on USB bus
+     *   95%–100 % Final confirmation read-back
+     */
     fun changeSamsungSerial(newSerial: String) {
         val sn = newSerial.trim().uppercase()
         if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
             appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
             return
         }
-        runTask("Change Serial") {
-            appendLog("Changing the serial number...")
+        runTask("Change Serial Number") {
+            appendLog("═══════════════════════════════════════")
+            appendLog("         CHANGE SERIAL NUMBER")
+            appendLog("═══════════════════════════════════════")
+            appendLog("Target serial: $sn")
+
+            // ── Stage 0: Read current serial before write ───────────────────────
+            setTaskProgress(0.05f)
+            appendLog("Reading current serial number...")
             val mtpDevices = MtpInfoReader.findModemDevices(context)
             if (mtpDevices.isEmpty()) {
-                appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
+                appendLog("ERROR: No device with a modem port found.")
+                appendLog("Connect the phone via USB → dial *#0808# → choose a mode that includes MODEM.")
                 return@runTask
             }
+            var currentSn = ""
+            for (dev in mtpDevices) {
+                currentSn = runCatching {
+                    AtCommandTransport(context).use { at -> at.readModemSerial(dev, attempts = 3) }
+                }.getOrDefault("")
+                if (currentSn.isNotBlank()) break
+            }
+            if (currentSn.isNotBlank()) {
+                appendLog("Current serial: $currentSn")
+            } else {
+                appendLog("⚠ Could not read current serial — proceeding with write anyway.")
+            }
+
+            // ── Stage 1: Write new serial (service-init + serial write with retries) ──
+            setTaskProgress(0.1f)
+            appendLog("┌─ Writing new serial number...")
+            appendLog("│  Steps: SWATD→ACTIVATE→KSTRINGB→DUMPCTRL→DEBUGLVC→SERIALNO")
             var written = false
-            var rebooted = false
+            var lastWriteReply = ""
             for (dev in mtpDevices) {
                 written = runCatching {
-                    AtCommandTransport(context).use { at -> at.onProgress = { f -> setTaskProgress(f * 0.6f) }; at.changeSerialSequence(dev, sn) { m -> appendLog(m) } }
-                }.getOrElse { e -> appendLog("Could not communicate with the device."); false }
-                if (!written) continue
-                appendLog("The modem accepted the new serial. Rebooting...")
-                rebooted = runCatching {
-                    AtCommandTransport(context).use { at -> at.onProgress = { f -> setTaskProgress(0.6f + f * 0.2f) }; at.rebootVerified(dev) { m -> appendLog(m) } }
-                }.getOrElse { e -> appendLog("Could not communicate with the device."); false }
-                break
+                    AtCommandTransport(context).use { at ->
+                        at.onProgress = { f -> setTaskProgress(0.1f + f * 0.45f) }
+                        val ok = at.changeSerialSequence(dev, sn, maxAttempts = 4) { msg ->
+                            lastWriteReply = msg
+                            appendLog(msg)
+                        }
+                        ok
+                    }
+                }.getOrElse { e ->
+                    appendLog("✗ AT communication error: ${e.message}")
+                    false
+                }
+                if (written) break
             }
+
             if (!written) {
-                appendLog("ERROR: Serial was NOT changed. The modem port did not acknowledge the write (wrong USB mode, or this firmware does not allow it). On Samsung dial *#0808#, pick a mode that includes MODEM, then retry.")
+                appendLog("│ ✗ FAILED — modem did not acknowledge the write.")
+                appendLog("  Possible reasons:")
+                appendLog("  • Wrong USB mode (dial *#0808# → include MODEM)")
+                appendLog("  • Firmware rejects engineering writes")
+                appendLog("  • Device locked by Knox / corporate policy")
+                _uiState.update { it.copy(infoSerial = currentSn) }
                 return@runTask
             }
-            if (!rebooted) {
-                appendLog("WARNING: The serial was written but the phone did not reboot. Restart it manually (hold Power + Vol Down for 10 s), reconnect in MTP mode and tap Read Info to confirm.")
-                _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
-                return@runTask
+            appendLog("│ ✓ Modem acknowledged the serial write!")
+
+            // ── Stage 2: Post-write read-back (before reboot) ─────────────────────
+            setTaskProgress(0.55f)
+            appendLog("│  Reading back serial immediately...")
+            var preRebootRead = ""
+            for (dev in mtpDevices) {
+                preRebootRead = runCatching {
+                    AtCommandTransport(context).use { at -> at.readModemSerial(dev, attempts = 3) }
+                }.getOrDefault("")
+                if (preRebootRead.isNotBlank()) break
             }
-            // Wait for the phone to come back, then read the serial back from the modem to verify.
-            appendLog("Waiting for the phone to come back...")
-            setTaskProgress(0.8f)
-            var verified = ""
-            val deadline = System.currentTimeMillis() + 120_000
-            while (System.currentTimeMillis() < deadline && verified.isEmpty()) {
+            if (preRebootRead.equals(sn, true)) {
+                appendLog("│ ✓ Immediate read-back matches target serial.")
+            } else if (preRebootRead.isNotBlank()) {
+                appendLog("│ ⚠ Pre-reboot read-back: $preRebootRead (may change after reboot)")
+            } else {
+                appendLog("│ ⚠ Could not read back serial yet — will verify after reboot.")
+            }
+
+            // ── Stage 3: Verified reboot with AT+POWRESET (from MA UNLOCKER) ─────
+            setTaskProgress(0.65f)
+            appendLog("├─ Rebooting device with AT+POWRESET=0,0...")
+            var rebooted = false
+            for (dev in mtpDevices) {
+                rebooted = runCatching {
+                    AtCommandTransport(context).use { at ->
+                        at.onProgress = { f -> setTaskProgress(0.65f + f * 0.2f) }
+                        at.rebootVerifiedWithPowerReset(dev, log = ::appendLog)
+                    }
+                }.getOrElse { e ->
+                    appendLog("✗ AT communication error during reboot: ${e.message}")
+                    false
+                }
+                if (rebooted) break
+            }
+            if (rebooted) {
+                appendLog("│ ✓ Verified reboot completed (device left USB bus).")
+            } else {
+                appendLog("│ ⚠ Reboot may have failed — device stayed connected.")
+                appendLog("  Try restarting manually: hold Power + Vol Down for 10 seconds.")
+            }
+
+            // ── Stage 4: Wait for device to return & verify ───────────────────────
+            setTaskProgress(0.85f)
+            appendLog("├─ Waiting for device to return...")
+            var finalVerified = ""
+            val deadline = System.currentTimeMillis() + 120_000 // 2 min max
+            while (System.currentTimeMillis() < deadline && finalVerified.isEmpty()) {
                 delay(3000)
-                setTaskProgress((0.8f + 0.19f * (1f - (deadline - System.currentTimeMillis()) / 120_000f)).coerceIn(0.8f, 0.99f))
+                val elapsed = (deadline - System.currentTimeMillis()) / 1000
+                val pct = 0.85f + 0.10f.coerceAtMost(elapsed / 120f)
+                setTaskProgress(pct.coerceIn(0.85f, 0.95f))
                 val back = MtpInfoReader.findModemDevices(context)
                 if (back.isEmpty()) continue
-                delay(4000) // let the modem port come up
-                val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                delay(4000) // let the modem port enumerate
                 for (listed in back) {
+                    val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
                     val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
-                    val value = runCatching { AtCommandTransport(context).use { it.readModemSerial(dev, 3) } }.getOrDefault("")
-                    if (value.isNotBlank()) { verified = value; break }
+                    finalVerified = runCatching {
+                        AtCommandTransport(context).use { at -> at.readModemSerial(dev, attempts = 3) }
+                    }.getOrDefault("")
+                    if (finalVerified.isNotBlank()) break
                 }
+                if (finalVerified.isNotEmpty()) break
             }
-            _uiState.update { it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = "") }
+
+            // ── Stage 5: Final result ─────────────────────────────────────────────
+            _uiState.update {
+                it.copy(
+                    mtpInfoText = "", mtpStorageText = "",
+                    infoImei = "", infoSerial = finalVerified.ifBlank { sn }
+                )
+            }
+
+            appendLog("└─ Final Result")
             when {
-                verified.equals(sn, true) -> appendLog("SUCCESS: serial is now $verified.")
-                verified.isNotBlank() -> appendLog("WARNING: the phone still reports serial $verified instead of $sn. This firmware may not allow changing it.")
-                else -> appendLog("The phone is back but its serial could not be read. Allow USB access, set a USB mode with MODEM (*#0808#), then tap Read Info to check.")
+                finalVerified.equals(sn, true) -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("✓ SUCCESS: serial is now "$finalVerified" 🎉")
+                    appendLog("═══════════════════════════════════════")
+                }
+                finalVerified.isNotBlank() -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("⚠ Still reads "$finalVerified" instead of "$sn"")
+                    appendLog("  This firmware may not allow changing the serial.")
+                    appendLog("═══════════════════════════════════════")
+                }
+                else -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("⚠ Phone returned but serial could not be read.")
+                    appendLog("  Reconnect in MTP mode → tap 'Read Info' to check.")
+                    appendLog("═══════════════════════════════════════")
+                }
             }
         }
     }
