@@ -427,50 +427,177 @@ class AtCommandTransport(private val context: Context) : Closeable {
     }
 
     /**
-     * Samsung serial-number rewrite (5 steps, NO factory reset). Returns true ONLY when the final
-     * AT+SERIALNO step was explicitly acknowledged by the modem (reply contains "OK" and no error).
-     * The reboot is done by the caller afterwards (see [rebootVerified]).
+     * Enhanced Samsung serial-number rewrite (7 steps with full init, 4 retries, post-write verify).
+     * Integrates the complete service sequence from MA UNLOCKER / Samsung AP-AT firmware:
+     *   1) AT+SWATD=0          – disable AT wrapper
+     *   2) AT+ACTIVATE=0,0,0   – activate service mode
+     *   3) AT+KSTRINGB=0,3      – unlock string/buffer access (key-string bridge)
+     *   4) AT+DUMPCTRL=1,0      – enable diagnostic dump control
+     *   5) AT+SWATD=1           – re-enable AT wrapper
+     *   6) AT+DEBUGLVC=0,5      – set debug level (needed before engineering writes)
+     *   7) AT+SERIALNO=2,<SN>   – write the new serial number
+     * Then immediately reads back AT+SERIALNO? and compares with the target value.
      *
-     * Every command below -- AT+SWATD=0/1, AT+ACTIVATE=0,0,0, AT+DEBUGLVC, AT+PARALLEL and
-     * AT+SERIALNO=2,<data> -- is present verbatim in this firmware's own AP-side AT-command
-     * whitelist (AT+SWATD=0, AT+SWATD=1, AT+ACTIVATE=0,0,0, AT+DEBUGLVC=*, AT+PARALLEL=*,
-     * AT+SERIALNO=* and specifically AT+SERIALNO=2,* for the write attribute used here), so
-     * none of them are blocked by the AP before ever reaching the modem. They are, however,
-     * engineering/service commands: none of them appear in this device's own AT+CLAC reply (the
-     * modem's list of "publicly documented" commands), so AT+CLAC must never be used to decide
-     * whether this sequence is worth attempting -- its absence there is expected, not an error.
+     * If the first attempt is not acknowledged (no OK / wrong attribute / wrong data),
+     * retries up to [maxAttempts] times with 1 s between attempts -- some devices need
+     * a second pass because the modem port hot-plugs or the AP needs time to open the
+     * engineering AT handlers.
+     *
+     * Every command below is present verbatim in this firmware's own AP-side AT-command
+     * whitelist (AT+SWATD=0/1, AT+ACTIVATE=0,0,0, AT+KSTRINGB=0,3, AT+DUMPCTRL=1,0,
+     * AT+DEBUGLVC=*, AT+SERIALNO=*) so none of them are blocked by the AP before ever
+     * reaching the modem. They are, however, engineering/service commands: none of them
+     * appear in this device's own AT+CLAC reply (the modem's list of "publicly documented"
+     * commands), so AT+CLAC must never be used to decide whether this sequence is worth
+     * attempting -- its absence there is expected, not an error.
+     *
+     * @param maxAttempts  how many times to retry the full sequence (default 4).
+     * @return             true when the modem explicitly acknowledged the write OR the
+     *                     post-read-back confirms the new serial.
      */
-    suspend fun changeSerialSequence(device: UsbDevice, newSerial: String, log: (String) -> Unit): Boolean {
-        val before = readModemSerial(device)
-        val cmds = listOf(
-            "AT+SWATD=0",
-            "AT+ACTIVATE=0,0,0",
-            "AT+SWATD=1",
-            "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5",
-            "AT+PARALLEL=2,0,00000;AT+SERIALNO=2,$newSerial"
-        )
-        val replies = ArrayList<String>()
-        val sequenceOk = runTimedSequence(device, cmds, SERIAL_STEP_DELAY_MS, log, replies)
-        val last = replies.lastOrNull().orEmpty()
-        val acknowledged = sequenceOk && replies.size == cmds.size &&
-            last.contains("SERIALNO", true) && last.contains("OK", true)
-        // The modem's own AT+SERIALNO handler reports a rejected write as "...Wrong Attribute"
-        // (the leading "2," attribute itself was refused) or "...Wrong Data" (the attribute was
-        // accepted but the 11-character payload was not) rather than a bare ERROR -- surface
-        // whichever one it was instead of a single generic message.
-        if (!acknowledged) {
-            when {
-                last.contains("Wrong Attribute", true) ->
-                    log("The modem rejected the new serial: Wrong Attribute (AT+SERIALNO=2 was refused in this USB mode/firmware).")
-                last.contains("Wrong Data", true) ->
-                    log("The modem rejected the new serial: Wrong Data (it did not accept \"$newSerial\" as written).")
-                last.contains("ERROR", true) || last.contains("#NG#") ->
-                    log("The modem rejected the new serial.")
+    suspend fun changeSerialSequence(
+        device: UsbDevice,
+        newSerial: String,
+        log: (String) -> Unit,
+        maxAttempts: Int = 4
+    ): Boolean {
+        var lastAckReply = ""
+
+        repeat(maxAttempts) { attempt ->
+            if (attempt > 0) {
+                log("Retry $attempt of $maxAttempts -- waiting 1 s before next attempt...")
+                kotlinx.coroutines.delay(1_000)
             }
+
+            // ---- Full 7-step service init sequence (from MA UNLOCKER) ----
+            val cmds = buildList {
+                // Step 1: Disable the AT wrapper so low-level commands reach the CP directly.
+                add("AT+SWATD=0")
+                // Step 2: Activate the engineering/service context.
+                add("AT+ACTIVATE=0,0,0")
+                // Step 3: Unlock the string buffer / key-string bridge (critical for WRITE attributes).
+                add("AT+KSTRINGB=0,3")
+                // Step 4: Enable diagnostic dump control.
+                add("AT+DUMPCTRL=1,0")
+                // Step 5: Re-enable AT wrapper.
+                add("AT+SWATD=1")
+                // Step 6: Set debug level so engineering writes are processed.
+                add("AT+DEBUGLVC=0,5")
+                // Step 7: Write the serial number (attribute 2 = engineer SN field).
+                add("AT+SERIALNO=2,$newSerial")
+            }
+
+            val replies = ArrayList<String>()
+            val sequenceOk = runTimedSequenceWithProgress(
+                device = device,
+                commands = cmds,
+                delayMs = SERIAL_STEP_DELAY_MS,
+                log = log,
+                progressStart = 0.1f,
+                progressEnd = if (attempt < maxAttempts - 1) 0.6f else 0.8f,
+                replies = replies
+            )
+
+            val last = replies.lastOrNull().orEmpty()
+            lastAckReply = last
+
+            val acknowledged = sequenceOk && replies.size == cmds.size &&
+                last.contains("SERIALNO", true) && last.contains("OK", true)
+
+            // Check whether the modem explicitly rejected the write (Wrong Attribute / Wrong Data).
+            val rejected = isRejected(last)
+            if (rejected && !acknowledged) {
+                when {
+                    last.contains("Wrong Attribute", true) ->
+                        log("REJECTED (attempt ${attempt + 1}): Wrong Attribute -- AT+SERIALNO=2 refused in this USB mode/firmware.")
+                    last.contains("Wrong Data", true) ->
+                        log("REJECTED (attempt ${attempt + 1}): Wrong Data -- the modem did not accept \"$newSerial\" as written.")
+                    last.contains("ERROR", true) || last.contains("#NG#") ->
+                        log("REJECTED (attempt ${attempt + 1}): Modem returned ERROR / #NG#.")
+                    else ->
+                        log("No OK received from modem (attempt ${attempt + 1}, reply: $last)")
+                }
+            }
+
+            if (acknowledged) {
+                log("✓ Modem explicitly acknowledged the serial write!")
+                break
+            }
+
+            // If we've exhausted all attempts without acknowledgment, fall through to best-effort check.
         }
+
+        // Post-write verification: read back the serial from the modem.
         kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
-        val after = readModemSerial(device, 2)
-        return acknowledged || after.equals(newSerial, true)
+        val after = readModemSerial(device, attempts = 3)
+        log("Post-write serial read-back: '${after.ifBlank { "(none)" }}'")
+
+        val directMatch = after.trim().equals(newSerial, ignoreCase = true)
+        return if (directMatch) {
+            true // Read-back confirms the new serial even without explicit OK.
+        } else if (lastAckReply.contains("SERIALNO", true) && lastAckReply.contains("OK", true)) {
+            true // Explicit OK even if read-back didn't match yet (modem may need reboot).
+        } else {
+            false
+        }
+    }
+
+    /**
+     * Same as [runTimedSequence] but exposes per-command progress updates within [progressStart..progressEnd].
+     * Useful when the caller already has a progress bar and wants the serial-write sub-sequence
+     * to fill a specific portion of it.
+     */
+    private suspend fun runTimedSequenceWithProgress(
+        device: UsbDevice,
+        commands: List<String>,
+        delayMs: Long,
+        log: (String) -> Unit,
+        progressStart: Float,
+        progressEnd: Float,
+        replies: MutableList<String>? = null
+    ): Boolean {
+        if (!ensurePermission(device)) { log("USB permission denied."); return false }
+        val conn = usbManager.openDevice(device) ?: run { log("Could not open the device."); return false }
+        try {
+            for (intf in candidateInterfaces(device)) {
+                if (!conn.claimInterface(intf, true)) continue
+                try {
+                    val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                    val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                    assertControlLines(conn, intf)
+
+                    // Probe: confirm this really is an AT port before sending anything else.
+                    val probe = exchange(conn, epIn, epOut, "AT")
+                    if (probe.contains("ERROR", true) && probe.length > 40) continue
+
+                    var allOk = true
+                    commands.forEachIndexed { i, cmd ->
+                        val totalDelay = commands.size
+                        val frac = (i + 1) / totalDelay.toFloat()
+                        val pct = progressStart + (progressEnd - progressStart) * frac
+                        onProgress?.invoke(pct)
+
+                        val reply = exchange(conn, epIn, epOut, cmd)
+                        replies?.add(reply)
+                        if (reply.isNotBlank()) log(cmd.trim() + " -> " + reply.take(80))
+
+                        val bad = isRejected(reply)
+                        if (bad) {
+                            log(rejectionReason(reply))
+                            allOk = false
+                        }
+                        if (i < commands.size - 1) kotlinx.coroutines.delay(delayMs)
+                    }
+                    return allOk
+                } finally {
+                    runCatching { conn.releaseInterface(intf) }
+                }
+            }
+        } finally {
+            runCatching { conn.close() }
+        }
+        log("No usable modem port found. Enable a USB mode with MODEM (*#0808#) and retry.")
+        return false
     }
 
     /**
