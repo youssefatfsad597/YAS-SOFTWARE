@@ -235,6 +235,7 @@ class MainActivity : ComponentActivity() {
                     onAdbScript = viewModel::runAdbScript,
                     onMtpFormatAt = viewModel::atFormatDevice,
                     onChangeSerial = viewModel::changeSamsungSerial,
+                    onChangeCsc = viewModel::changeSamsungCsc,
                     onShowInfoPopup = viewModel::showPhoneInfoPopup
                 )
                 }
