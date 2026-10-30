@@ -414,13 +414,39 @@ class AtCommandTransport(private val context: Context) : Closeable {
         return false
     }
 
-    /** Reads the modem-side serial (SN field of AT+DEVCONINFO), retrying because the modem port
-     *  is often not ready on the first query. Returns "" when unreadable. */
+    /** Reads back the engineering serial via AT+SERIALNO? -- the same attribute that
+     *  [changeSerialSequence] writes with AT+SERIALNO=2,<sn> -- so the value returned here is
+     *  guaranteed to reflect that write (AT+DEVCONINFO's own "SN" field is a separate attribute
+     *  and does not). Mirrors MA UNLOCKER's ReadSerial parsing: look for a "+SERIALNO:" line,
+     *  strip commas and a leading attribute-index "1" if present; otherwise fall back to any
+     *  bare all-caps/digits token of at least 11 characters. Retries because the modem port is
+     *  often not ready on the first query. Returns "" when unreadable. */
     suspend fun readModemSerial(device: UsbDevice, attempts: Int = 3): String {
         repeat(attempts) {
-            val raw = queryReadOnly(device, listOf("AT+DEVCONINFO"))["AT+DEVCONINFO"].orEmpty()
-            val sn = Regex("SN\\(([^)]*)\\)").find(raw)?.groupValues?.get(1)?.replace(Regex("\\s+"), "").orEmpty()
-            if (sn.isNotBlank()) return sn
+            val raw = queryReadOnly(device, listOf("AT+SERIALNO?"))["AT+SERIALNO?"].orEmpty()
+            val lines = raw.split(Regex("[\\r\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
+            for (line in lines) {
+                if (line.contains("+SERIALNO:", ignoreCase = true)) {
+                    val value = line.substringAfter(':').trim().replace(",", "")
+                    val sn = if (value.startsWith("1")) value.substring(1).trim() else value
+                    if (sn.isNotBlank()) return sn
+                } else if (line.length >= 11 && Regex("^[A-Z0-9]+$").matches(line)) {
+                    return line
+                }
+            }
+            kotlinx.coroutines.delay(800)
+        }
+        return ""
+    }
+
+    /** Reads the modem-side Sales Code (CSC) via AT+PRECONFG=1,0, retrying because the modem
+     *  port is often not ready on the first query. Returns "" when unreadable. */
+    suspend fun readModemCsc(device: UsbDevice, attempts: Int = 3): String {
+        repeat(attempts) {
+            val raw = queryReadOnly(device, listOf("AT+PRECONFG=1,0"))["AT+PRECONFG=1,0"].orEmpty()
+            val tagged = Regex("\\+PRECONFG:\\s*1,\\s*([A-Za-z]{3})").find(raw)?.groupValues?.get(1)
+            val csc = tagged ?: Regex("[A-Z]{3}", RegexOption.IGNORE_CASE).find(raw)?.value
+            if (!csc.isNullOrBlank()) return csc.uppercase()
             kotlinx.coroutines.delay(800)
         }
         return ""
@@ -463,7 +489,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
     ): Boolean {
         var lastAckReply = ""
 
-        repeat(maxAttempts) { attempt ->
+        for (attempt in 0 until maxAttempts) {
             if (attempt > 0) {
                 log("Retry $attempt of $maxAttempts -- waiting 1 s before next attempt...")
                 kotlinx.coroutines.delay(1_000)
@@ -740,7 +766,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             }
 
             if (acknowledged) {
-                log("✓ Modem acknowledged CSC written to "$upperCsc"!")
+                log("✓ Modem acknowledged CSC written to \"$upperCsc\"!")
                 return true
             }
         }
