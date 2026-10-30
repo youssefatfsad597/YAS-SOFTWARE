@@ -659,6 +659,96 @@ class AtCommandTransport(private val context: Context) : Closeable {
         return rebootVerified(device, log)
     }
 
+    /**
+     * CSC (Sales Code) rewrite — same service sequence as [changeSerialSequence] but targets
+     * the AT+PRECONFG attribute that stores the region / carrier code.
+     *
+     * Steps (from MA UNLOCKER C# source):
+     *   1) AT+SWATD=0        – disable AT wrapper
+     *   2) AT+ACTIVATE=0,0,0 – activate engineering context
+     *   3) AT+SWATD=1        – re-enable wrapper
+     *   4) AT+KSTRINGB=0,3   – unlock key-string bridge
+     *   5) AT+PRECONFG=2,<CSC> – write the new 3-letter sales code
+     *   6) AT+PRECONFG=1,0   – read back to confirm
+     *
+     * After the write the device normally does NOT reboot by itself (unlike serial changes).
+     * The caller must reboot separately (e.g. via [rebootVerified]) so the new CSC takes effect
+     * on next boot.
+     *
+     * @return true when the modem explicitly acknowledged the write (OK received).
+     */
+    suspend fun changeCscSequence(
+        device: UsbDevice,
+        newCsc: String,
+        log: (String) -> Unit,
+        maxAttempts: Int = 3
+    ): Boolean {
+        require(newCsc.length == 3 && newCsc.all { it in 'A'..'Z' || it in 'a'..'z' }) {
+            "CSC must be exactly 3 letters (A-Z)."
+        }
+        val upperCsc = newCsc.uppercase()
+
+        var lastAckReply = ""
+
+        repeat(maxAttempts) { attempt ->
+            if (attempt > 0) {
+                log("CSC retry $attempt of $maxAttempts -- waiting 1 s...")
+                kotlinx.coroutines.delay(1_000)
+            }
+
+            val cmds = listOf(
+                "AT+SWATD=0",
+                "AT+ACTIVATE=0,0,0",
+                "AT+SWATD=1",
+                "AT+KSTRINGB=0,3",
+                "AT+PRECONFG=2,$upperCsc",
+                "AT+PRECONFG=1,0"   // verify-readback
+            )
+
+            val replies = ArrayList<String>()
+            val sequenceOk = runTimedSequenceWithProgress(
+                device = device,
+                commands = cmds,
+                delayMs = SERIAL_STEP_DELAY_MS,
+                log = log,
+                progressStart = 0.1f,
+                progressEnd = if (attempt < maxAttempts - 1) 0.7f else 0.9f,
+                replies = replies
+            )
+
+            val last = replies.lastOrNull().orEmpty()
+            lastAckReply = last
+            val acknowledged = sequenceOk && replies.size == cmds.size &&
+                last.contains("PRECONFG", true) && last.contains(upperCsc, ignoreCase = true)
+
+            if (!acknowledged) {
+                val rejected = isRejected(last)
+                if (rejected) {
+                    when {
+                        last.contains("Wrong Attribute", true) ->
+                            log("CSC REJECTED (attempt ${attempt + 1}): Wrong Attribute -- PRECONFG refused.")
+                        last.contains("Wrong Data", true) ->
+                            log("CSC REJECTED (attempt ${attempt + 1}): Wrong Data -- \"$upperCsc\" not accepted.")
+                        last.contains("ERROR", true) || last.contains("#NG#") ->
+                            log("CSC REJECTED (attempt ${attempt + 1}): Modem returned ERROR.")
+                        else ->
+                            log("No OK for CSC (attempt ${attempt + 1}, reply: $last.take(80))")
+                    }
+                } else {
+                    log("CSC step incomplete (attempt ${attempt + 1}/${maxAttempts}).")
+                }
+            }
+
+            if (acknowledged) {
+                log("✓ Modem acknowledged CSC written to "$upperCsc"!")
+                return true
+            }
+        }
+
+        log("CSC write was not confirmed after $maxAttempts attempts.")
+        return false
+    }
+
     /** Forces Download (Odin) mode via [DOWNLOAD_MODE_COMMANDS]. */
     suspend fun tryRebootToDownloadMode(device: UsbDevice, log: (String) -> Unit): Boolean =
         runAtSequence(device, DOWNLOAD_MODE_COMMANDS, log, stopOnSuccess = true)
