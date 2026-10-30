@@ -2297,10 +2297,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 written = runCatching {
                     AtCommandTransport(context).use { at ->
                         at.onProgress = { f -> setTaskProgress(0.1f + f * 0.45f) }
-                        val ok = at.changeSerialSequence(dev, sn, maxAttempts = 4) { msg ->
+                        val ok = at.changeSerialSequence(dev, sn, maxAttempts = 4, log = { msg ->
                             lastWriteReply = msg
                             appendLog(msg)
-                        }
+                        })
                         ok
                     }
                 }.getOrElse { e ->
@@ -2470,7 +2470,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 written = runCatching {
                     AtCommandTransport(context).use { at ->
                         at.onProgress = { f -> setTaskProgress(0.1f + f * 0.55f) }
-                        at.changeCscSequence(dev, csc, maxAttempts = 3) { msg -> appendLog(msg) }
+                        at.changeCscSequence(dev, csc, maxAttempts = 3, log = { msg -> appendLog(msg) })
                     }
                 }.getOrElse { e ->
                     appendLog("✗ AT communication error: ${e.message}")
