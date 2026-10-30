@@ -759,6 +759,75 @@ class AtCommandTransport(private val context: Context) : Closeable {
     suspend fun tryRebootToBrom(device: UsbDevice, log: (String) -> Unit): Boolean =
         runAtSequence(device, BROM_MODE_COMMANDS, log, stopOnSuccess = true)
 
+    /**
+     * Same as [tryReboot] but with an extra AT+POWRESET=0,0 step after the standard
+     * reboot commands — taken directly from MA UNLOCKER's WriteSerial sequence.
+     * This is important when the normal REBOOT_COMMANDS only reset the modem stack
+     * instead of forcing a full hardware reboot.
+     */
+    suspend fun rebootVerifiedWithPowerReset(device: UsbDevice, log: (String) -> Unit): Boolean {
+        if (!ensurePermission(device)) { log("USB permission denied."); return false }
+        val conn = usbManager.openDevice(device) ?: run { log("Could not open the device."); return false }
+        try {
+            val interfaces = candidateInterfaces(device)
+            if (interfaces.isEmpty()) {
+                log("No modem port available. Dial *#0808# → include MODEM → retry.")
+                return false
+            }
+            for (intf in interfaces) {
+                if (!conn.claimInterface(intf, true)) continue
+                try {
+                    val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
+                    val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                    assertControlLines(conn, intf)
+
+                    // Probe
+                    val probe = exchange(conn, epIn, epOut, "AT")
+                    if (probe.contains("ERROR", true) && probe.length > 40) continue
+
+                    var anySuccess = false
+                    // First try standard reboot commands
+                    for ((ci, cmd) in REBOOT_COMMANDS.withIndex()) {
+                        onProgress?.invoke(ci.toFloat() / REBOOT_COMMANDS.size)
+                        val bytes = cmd.toByteArray(Charsets.US_ASCII)
+                        val sent = conn.bulkTransfer(epOut, bytes, bytes.size, 2000)
+                                if (sent < 0) continue
+                        val buf = ByteArray(READ_BUF)
+                        val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
+                        if (waitForDetach(device, 10000)) {
+                            log("✓ USB link dropped after $cmd — device is rebooting.")
+                            anySuccess = true
+                            break
+                        }
+                    }
+                    // If device stayed connected, try AT+POWRESET=0,0 (from MA UNLOCKER)
+                    if (!anySuccess) {
+                        log("Standard reboot failed — trying AT+POWRESET=0,0...")
+                        val powresetBytes = "AT+POWRESET=0,0\r\n".toByteArray(Charsets.US_ASCII)
+                        val sent = conn.bulkTransfer(epOut, powresetBytes, powresetBytes.size, 2000)
+                        if (sent >= 0) {
+                            log("✓ Sent AT+POWRESET=0,0 — waiting for detach...")
+                            kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS) // Give modem time to process
+                            if (waitForDetach(device, 8000)) {
+                                log("✓ USB link dropped after POWRESET — device is rebooting.")
+                                anySuccess = true
+                            } else {
+                                log("⚠ POWRESET sent but device did not drop off USB.")
+                            }
+                        }
+                    }
+                    if (anySuccess) return true
+                } finally {
+                    runCatching { conn.releaseInterface(intf) }
+                }
+            }
+        } finally {
+            runCatching { conn.close() }
+        }
+        log("The phone did not reboot. You may need to restart manually.")
+        return false
+    }
+
     /** Reboots the device via [REBOOT_COMMANDS]. */
     suspend fun tryReboot(device: UsbDevice, log: (String) -> Unit): Boolean =
         rebootVerified(device, log)
