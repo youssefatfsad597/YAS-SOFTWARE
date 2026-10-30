@@ -569,7 +569,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
     }
 
     /**
-     * Same as [runTimedSequence] but exposes per-command progress updates within [progressStart..progressEnd].
+     * Same as [runTimedSequence] but exposes per-command progress updates within the
+     * progressStart to progressEnd range.
      * Useful when the caller already has a progress bar and wants the serial-write sub-sequence
      * to fill a specific portion of it.
      */
