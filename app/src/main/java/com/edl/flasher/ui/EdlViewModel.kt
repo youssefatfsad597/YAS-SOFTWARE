@@ -2398,18 +2398,161 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             when {
                 finalVerified.equals(sn, true) -> {
                     appendLog("═══════════════════════════════════════")
-                    appendLog("✓ SUCCESS: serial is now "$finalVerified" 🎉")
+                    appendLog("✓ SUCCESS: serial is now \"$finalVerified\" 🎉")
                     appendLog("═══════════════════════════════════════")
                 }
                 finalVerified.isNotBlank() -> {
                     appendLog("═══════════════════════════════════════")
-                    appendLog("⚠ Still reads "$finalVerified" instead of "$sn"")
+                    appendLog("⚠ Still reads \"$finalVerified\" instead of \"$sn\"")
                     appendLog("  This firmware may not allow changing the serial.")
                     appendLog("═══════════════════════════════════════")
                 }
                 else -> {
                     appendLog("═══════════════════════════════════════")
                     appendLog("⚠ Phone returned but serial could not be read.")
+                    appendLog("  Reconnect in MTP mode → tap 'Read Info' to check.")
+                    appendLog("═══════════════════════════════════════")
+                }
+            }
+        }
+    }
+
+    /** Writes a new 3-letter Sales Code (CSC / region code) to the device over its AT port
+     *  (MTP mode, no ADB / root needed). Based on MA UNLOCKER's CSC service sequence:
+     *  SWATD → ACTIVATE → SWATD → KSTRINGB → PRECONFG write → verified reboot → read-back.
+     *
+     * Progress stages:
+     *   0%–10 %   Read current CSC
+     *   10%–90 %  Service-init sequence + AT+PRECONFG write with automatic retries (up to 3)
+     *   65%–85 %  Verified reboot (AT+POWRESET=0,0)
+     *   85%–100 % Waiting for device to return and final confirmation read-back
+     */
+    fun changeSamsungCsc(newCsc: String) {
+        val csc = newCsc.trim().uppercase()
+        if (!Regex("^[A-Z]{3}$").matches(csc)) {
+            appendLog("ERROR: CSC must be exactly 3 letters (A-Z).")
+            return
+        }
+        runTask("Change Sales Code (CSC)") {
+            appendLog("═══════════════════════════════════════")
+            appendLog("        CHANGE SALES CODE (CSC)")
+            appendLog("═══════════════════════════════════════")
+            appendLog("Target CSC: $csc")
+
+            // ── Stage 0: Read current CSC before write ───────────────────────────
+            setTaskProgress(0.05f)
+            appendLog("Reading current CSC...")
+            val mtpDevices = MtpInfoReader.findModemDevices(context)
+            if (mtpDevices.isEmpty()) {
+                appendLog("ERROR: No device with a modem port found.")
+                appendLog("Connect the phone via USB → dial *#0808# → choose a mode that includes MODEM.")
+                return@runTask
+            }
+            var currentCsc = ""
+            for (dev in mtpDevices) {
+                currentCsc = runCatching {
+                    AtCommandTransport(context).use { at -> at.readModemCsc(dev, attempts = 3) }
+                }.getOrDefault("")
+                if (currentCsc.isNotBlank()) break
+            }
+            if (currentCsc.isNotBlank()) {
+                appendLog("Current CSC: $currentCsc")
+            } else {
+                appendLog("⚠ Could not read current CSC — proceeding with write anyway.")
+            }
+
+            // ── Stage 1: Write new CSC (service-init + PRECONFG write with retries) ──
+            setTaskProgress(0.1f)
+            appendLog("┌─ Writing new CSC...")
+            appendLog("│  Steps: SWATD→ACTIVATE→SWATD→KSTRINGB→PRECONFG")
+            var written = false
+            for (dev in mtpDevices) {
+                written = runCatching {
+                    AtCommandTransport(context).use { at ->
+                        at.onProgress = { f -> setTaskProgress(0.1f + f * 0.55f) }
+                        at.changeCscSequence(dev, csc, maxAttempts = 3) { msg -> appendLog(msg) }
+                    }
+                }.getOrElse { e ->
+                    appendLog("✗ AT communication error: ${e.message}")
+                    false
+                }
+                if (written) break
+            }
+
+            if (!written) {
+                appendLog("│ ✗ FAILED — modem did not acknowledge the CSC write.")
+                appendLog("  Possible reasons:")
+                appendLog("  • Wrong USB mode (dial *#0808# → include MODEM)")
+                appendLog("  • Firmware rejects engineering writes")
+                appendLog("  • Device locked by Knox / corporate policy")
+                return@runTask
+            }
+            appendLog("│ ✓ Modem acknowledged the CSC write!")
+
+            // ── Stage 2: Verified reboot with AT+POWRESET (from MA UNLOCKER) ─────
+            setTaskProgress(0.65f)
+            appendLog("├─ Rebooting device with AT+POWRESET=0,0...")
+            var rebooted = false
+            for (dev in mtpDevices) {
+                rebooted = runCatching {
+                    AtCommandTransport(context).use { at ->
+                        at.onProgress = { f -> setTaskProgress(0.65f + f * 0.2f) }
+                        at.rebootVerifiedWithPowerReset(dev, log = ::appendLog)
+                    }
+                }.getOrElse { e ->
+                    appendLog("✗ AT communication error during reboot: ${e.message}")
+                    false
+                }
+                if (rebooted) break
+            }
+            if (rebooted) {
+                appendLog("│ ✓ Verified reboot completed (device left USB bus).")
+            } else {
+                appendLog("│ ⚠ Reboot may have failed — device stayed connected.")
+                appendLog("  Try restarting manually: hold Power + Vol Down for 10 seconds.")
+            }
+
+            // ── Stage 3: Wait for device to return & verify ───────────────────────
+            setTaskProgress(0.85f)
+            appendLog("├─ Waiting for device to return...")
+            var finalVerified = ""
+            val deadline = System.currentTimeMillis() + 120_000 // 2 min max
+            while (System.currentTimeMillis() < deadline && finalVerified.isEmpty()) {
+                delay(3000)
+                val elapsed = (deadline - System.currentTimeMillis()) / 1000
+                val pct = 0.85f + 0.10f.coerceAtMost(elapsed / 120f)
+                setTaskProgress(pct.coerceIn(0.85f, 0.95f))
+                val back = MtpInfoReader.findModemDevices(context)
+                if (back.isEmpty()) continue
+                delay(4000) // let the modem port enumerate
+                for (listed in back) {
+                    val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                    val dev = usbManager.deviceList.values.firstOrNull { it.deviceName == listed.deviceName } ?: listed
+                    finalVerified = runCatching {
+                        AtCommandTransport(context).use { at -> at.readModemCsc(dev, attempts = 3) }
+                    }.getOrDefault("")
+                    if (finalVerified.isNotBlank()) break
+                }
+                if (finalVerified.isNotEmpty()) break
+            }
+
+            // ── Stage 4: Final result ─────────────────────────────────────────────
+            appendLog("└─ Final Result")
+            when {
+                finalVerified.equals(csc, true) -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("✓ SUCCESS: CSC is now \"$finalVerified\" 🎉")
+                    appendLog("═══════════════════════════════════════")
+                }
+                finalVerified.isNotBlank() -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("⚠ Still reads \"$finalVerified\" instead of \"$csc\"")
+                    appendLog("  This firmware may not allow changing the CSC.")
+                    appendLog("═══════════════════════════════════════")
+                }
+                else -> {
+                    appendLog("═══════════════════════════════════════")
+                    appendLog("⚠ Phone returned but CSC could not be read.")
                     appendLog("  Reconnect in MTP mode → tap 'Read Info' to check.")
                     appendLog("═══════════════════════════════════════")
                 }

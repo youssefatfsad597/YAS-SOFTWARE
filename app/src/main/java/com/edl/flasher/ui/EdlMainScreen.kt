@@ -709,6 +709,7 @@ fun EdlMainScreen(
     // MTP storage read + AT format ("restore original space"). Optional so older call sites compile.
     onMtpFormatAt: (() -> Unit)? = null,
     onChangeSerial: ((String) -> Unit)? = null,
+    onChangeCsc: ((String) -> Unit)? = null,
     onShowInfoPopup: ((String) -> Unit)? = null,
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
@@ -849,6 +850,7 @@ fun EdlMainScreen(
                 onAdbReboot = onAdbReboot,
                 onAdbShell = onAdbShell,
                 onChangeSerial = onChangeSerial,
+                onChangeCsc = onChangeCsc,
                 onShowInfoPopup = onShowInfoPopup,
                 onMtpFormatAt = onMtpFormatAt
             )
@@ -2856,6 +2858,7 @@ private fun AdbMtpTab(
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
     onChangeSerial: ((String) -> Unit)? = null,
+    onChangeCsc: ((String) -> Unit)? = null,
     onShowInfoPopup: ((String) -> Unit)? = null,
     onMtpFormatAt: (() -> Unit)? = null
 ) {
@@ -2864,9 +2867,12 @@ private fun AdbMtpTab(
     var shellCmd by remember { mutableStateOf("") }
     var newSerial by remember { mutableStateOf("") }
     var showSerialConfirm by remember { mutableStateOf(false) }
+    var newCsc by remember { mutableStateOf("") }
+    var showCscConfirm by remember { mutableStateOf(false) }
     var showRemoveFrpConfirm by remember { mutableStateOf(false) }
 
     val serialValid = Regex("^[A-Z0-9]{11}$").matches(newSerial)
+    val cscValid = Regex("^[A-Z]{3}$").matches(newCsc)
     if (showRemoveFrpConfirm) {
         YASConfirmDialog(
             title = "Remove FRP?",
@@ -2904,6 +2910,19 @@ private fun AdbMtpTab(
                 onChangeSerial?.invoke(newSerial)
             },
             onDismiss = { showSerialConfirm = false }
+        )
+    }
+    if (showCscConfirm) {
+        YASConfirmDialog(
+            title = "Change CSC?",
+            message = "Change the device Sales Code (CSC) to \"$newCsc\" via AT commands (MTP mode). The phone will reboot so the new region settings take effect, then the new CSC is read back to confirm.",
+            confirmText = "Change",
+            danger = true,
+            onConfirm = {
+                showCscConfirm = false
+                onChangeCsc?.invoke(newCsc)
+            },
+            onDismiss = { showCscConfirm = false }
         )
     }
     val sendShell: () -> Unit = {
@@ -2981,6 +3000,33 @@ private fun AdbMtpTab(
                     )
                 }
                 Hint("Exactly 11 characters, A-Z and 0-9.")
+            }
+
+            if (onChangeCsc != null) {
+                YDivider()
+                SectionLabel("CHANGE CSC (SALES CODE)")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    YASTextField(
+                        value = newCsc,
+                        onValueChange = { v ->
+                            newCsc = v.uppercase().filter { it.isLetter() }.take(3)
+                        },
+                        placeholder = "3-letter CSC, e.g. XSG",
+                        modifier = Modifier.weight(1f),
+                        mono = true
+                    )
+                    YASButton(
+                        "Change",
+                        { showCscConfirm = true },
+                        style = BtnStyle.Danger,
+                        enabled = !state.isBusy && cscValid
+                    )
+                }
+                Hint("Exactly 3 letters, A-Z. Device reboots to apply the new region settings.")
             }
         }
 
