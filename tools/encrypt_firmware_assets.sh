@@ -55,9 +55,6 @@ encrypt_dir "firmware/x216b" "app/src/main/assets/x216b"
 echo "Encrypting T509 firmware assets..."
 encrypt_dir "firmware/t509" "app/src/main/assets/t509"
 
-echo "Encrypting T509N firmware assets..."
-encrypt_dir "firmware/t509n" "app/src/main/assets/t509n"
-
 echo "Encrypting T505N firmware assets..."
 encrypt_dir "firmware/t505n" "app/src/main/assets/t505n"
 
