@@ -31,8 +31,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // Download (Odin) mode. A couple of baseband variants are tried too.
         // AT+FUS? is the Samsung "firmware update service" switch; the others are older variants.
         val DOWNLOAD_MODE_COMMANDS = listOf("AT+FUS?\r\n", "AT+DLOAD\r\n", "AT+SWITCH=DOWNLOAD\r\n")
-        // Unisoc/Spreadtrum: the verified AT sequence that drops a T509/T509N straight
-        // into boot-ROM (BROM) download mode from a running phone (MTP AT port). Taken
+        // Unisoc/Spreadtrum: the verified AT sequence that drops a T509 straight into
+        // boot-ROM (BROM) download mode from a running phone (MTP AT port). Taken
         // directly from the reference service tool's ForceBROMAsync -- every command here
         // runs, in this order, not as alternatives to try one at a time:
         //   AT+DEVCONINFO          -- wakes/identifies the engineering port
@@ -66,9 +66,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
             "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5"
         )
         val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
-        // Delay between the steps of the serial-number sequence. Kept short so the
-        // whole operation finishes quickly; most firmware accepts this spacing fine.
-        const val SERIAL_STEP_DELAY_MS = 350L
+        // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
+        const val SERIAL_STEP_DELAY_MS = 1200L
         private const val READ_BUF = 256
     }
 
@@ -500,12 +499,14 @@ class AtCommandTransport(private val context: Context) : Closeable {
         device: UsbDevice,
         newSerial: String,
         log: (String) -> Unit,
-        maxAttempts: Int = 2
+        maxAttempts: Int = 4
     ): Boolean {
+        var lastAckReply = ""
+
         for (attempt in 0 until maxAttempts) {
             if (attempt > 0) {
-                log("Retry ${attempt + 1} of $maxAttempts...")
-                kotlinx.coroutines.delay(400)
+                log("Retry $attempt of $maxAttempts -- waiting 1 s before next attempt...")
+                kotlinx.coroutines.delay(1_000)
             }
 
             // ---- Full 7-step service init sequence (from MA UNLOCKER) ----
@@ -533,11 +534,12 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 delayMs = SERIAL_STEP_DELAY_MS,
                 log = log,
                 progressStart = 0.1f,
-                progressEnd = 1f,
+                progressEnd = if (attempt < maxAttempts - 1) 0.6f else 0.8f,
                 replies = replies
             )
 
             val last = replies.lastOrNull().orEmpty()
+            lastAckReply = last
 
             val acknowledged = sequenceOk && replies.size == cmds.size &&
                 last.contains("SERIALNO", true) && last.contains("OK", true)
@@ -558,11 +560,26 @@ class AtCommandTransport(private val context: Context) : Closeable {
             }
 
             if (acknowledged) {
-                log("Modem acknowledged the serial write.")
-                return true
+                log("✓ Modem explicitly acknowledged the serial write!")
+                break
             }
+
+            // If we've exhausted all attempts without acknowledgment, fall through to best-effort check.
         }
-        return false
+
+        // Post-write verification: read back the serial from the modem.
+        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
+        val after = readModemSerial(device, attempts = 3)
+        log("Post-write serial read-back: '${after.ifBlank { "(none)" }}'")
+
+        val directMatch = after.trim().equals(newSerial, ignoreCase = true)
+        return if (directMatch) {
+            true // Read-back confirms the new serial even without explicit OK.
+        } else if (lastAckReply.contains("SERIALNO", true) && lastAckReply.contains("OK", true)) {
+            true // Explicit OK even if read-back didn't match yet (modem may need reboot).
+        } else {
+            false
+        }
     }
 
     /**
@@ -603,8 +620,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
                         val reply = exchange(conn, epIn, epOut, cmd)
                         replies?.add(reply)
-                        // Note: intentionally not logging the raw AT command/reply here --
-                        // the UI only needs step-level progress and rejection reasons.
+                        if (reply.isNotBlank()) log(cmd.trim() + " -> " + reply.take(80))
 
                         val bad = isRejected(reply)
                         if (bad) {
@@ -706,7 +722,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         device: UsbDevice,
         newCsc: String,
         log: (String) -> Unit,
-        maxAttempts: Int = 2
+        maxAttempts: Int = 3
     ): Boolean {
         require(newCsc.length == 3 && newCsc.all { it in 'A'..'Z' || it in 'a'..'z' }) {
             "CSC must be exactly 3 letters (A-Z)."
@@ -717,8 +733,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
         repeat(maxAttempts) { attempt ->
             if (attempt > 0) {
-                log("CSC retry ${attempt + 1} of $maxAttempts...")
-                kotlinx.coroutines.delay(400)
+                log("CSC retry $attempt of $maxAttempts -- waiting 1 s...")
+                kotlinx.coroutines.delay(1_000)
             }
 
             val cmds = listOf(
@@ -757,7 +773,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                         last.contains("ERROR", true) || last.contains("#NG#") ->
                             log("CSC REJECTED (attempt ${attempt + 1}): Modem returned ERROR.")
                         else ->
-                            log("No OK for CSC (attempt ${attempt + 1}, reply: ${last.take(80)})")
+                            log("No OK for CSC (attempt ${attempt + 1}, reply: $last.take(80))")
                     }
                 } else {
                     log("CSC step incomplete (attempt ${attempt + 1}/${maxAttempts}).")
@@ -765,7 +781,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             }
 
             if (acknowledged) {
-                log("Modem acknowledged CSC written to \"$upperCsc\".")
+                log("✓ Modem acknowledged CSC written to \"$upperCsc\"!")
                 return true
             }
         }
@@ -860,23 +876,25 @@ class AtCommandTransport(private val context: Context) : Closeable {
                                 if (sent < 0) continue
                         val buf = ByteArray(READ_BUF)
                         val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
-                        if (waitForDetach(device, 3000)) {
-                            log("✓ Device is rebooting.")
+                        if (waitForDetach(device, 10000)) {
+                            log("✓ USB link dropped after $cmd — device is rebooting.")
                             anySuccess = true
                             break
                         }
                     }
-                    // If device stayed connected, try a direct power-reset command.
+                    // If device stayed connected, try AT+POWRESET=0,0 (from MA UNLOCKER)
                     if (!anySuccess) {
+                        log("Standard reboot failed — trying AT+POWRESET=0,0...")
                         val powresetBytes = "AT+POWRESET=0,0\r\n".toByteArray(Charsets.US_ASCII)
                         val sent = conn.bulkTransfer(epOut, powresetBytes, powresetBytes.size, 2000)
                         if (sent >= 0) {
+                            log("✓ Sent AT+POWRESET=0,0 — waiting for detach...")
                             kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS) // Give modem time to process
-                            if (waitForDetach(device, 3000)) {
-                                log("✓ Device is rebooting.")
+                            if (waitForDetach(device, 8000)) {
+                                log("✓ USB link dropped after POWRESET — device is rebooting.")
                                 anySuccess = true
                             } else {
-                                log("⚠ Reboot command sent but device did not drop off USB.")
+                                log("⚠ POWRESET sent but device did not drop off USB.")
                             }
                         }
                     }

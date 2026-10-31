@@ -23,7 +23,7 @@ class EdlUsbTransport(private val context: Context) : Closeable {
         const val SAMSUNG_VID = 0x04E8
         val SAMSUNG_DOWNLOAD_MODE_PIDS = listOf(0x6601, 0x685D, 0x68C3)
         // Unisoc / Spreadtrum boot ROM (BROM) USB identity, exposed for a few hundred ms
-        // right after the SoC powers on with no valid FDL yet. T509 / T509N enumerate here.
+        // right after the SoC powers on with no valid FDL yet. T509 enumerates here.
         const val SPRD_BROM_VID = 0x1782
         val SPRD_BROM_PIDS = listOf(0x4D00, 0x4D01)
         const val ACTION_USB_PERMISSION = "com.yas.flashedl.USB_PERMISSION"
