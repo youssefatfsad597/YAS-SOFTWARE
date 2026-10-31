@@ -5,7 +5,7 @@ import java.io.IOException
 
 /**
  * Minimal Unisoc / Spreadtrum boot-ROM (BROM) + FDL1/FDL2 downloader, used by the
- * T509 / T509N tab.
+ * T509 tab.
  *
  * This talks the classic SPRD "BSL" HDLC framing that every public Unisoc flash
  * tool (research-download style) is built on:
@@ -28,7 +28,7 @@ class SprdFdlProtocol(
     private val transport: EdlUsbTransport,
     private val log: (String) -> Unit,
     /** Where the boot ROM should place FDL1 / FDL2 in RAM. These are SoC specific (0 is never
-     *  valid). Values below come from this device's own address.txt (T509N): FDL1 = 0x5500,
+     *  valid). Values below come from this device's own address.txt: FDL1 = 0x5500,
      *  FDL2 = 0x9EFFFE00 -- the FDL2 address happened to already match the old generic default,
      *  which is why only FDL1 changed here. If upload still fails at START_DATA, recalibrate
      *  against a fresh address dump for the exact chip in hand. */

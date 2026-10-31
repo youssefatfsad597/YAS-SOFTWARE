@@ -7,7 +7,7 @@ import javax.crypto.spec.IvParameterSpec
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Decrypts the embedded firmware assets (X216B.elf, *.bin, T509/T509N fdl images) that are
+ * Decrypts the embedded firmware assets (X216B.elf, *.bin, T509 fdl images) that are
  * AES-256-CTR encrypted at build time (see `.github/workflows/main.yml` /
  * `encrypt_firmware_assets.sh`) before being packed into `app/src/main/assets/`.
  *

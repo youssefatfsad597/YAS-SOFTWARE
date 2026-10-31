@@ -12,7 +12,7 @@ import java.io.InputStream
  *
  * Committed into the repo under firmware/t505n/ and copied into
  * app/src/main/assets/t505n/ as "<name>.enc" by the same AES-256-CTR encryption
- * step (tools/encrypt_firmware_assets.sh) used for X216B / T509 / T509N. Decrypted
+ * step (tools/encrypt_firmware_assets.sh) used for X216B / T509. Decrypted
  * on the fly through FirmwareCipher so the raw files are never written to disk and
  * are not sitting plaintext inside the shipped APK.
  *
