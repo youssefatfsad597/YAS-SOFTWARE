@@ -40,7 +40,6 @@ data class EdlUiState(
     // images, same shape as embeddedFirmwareReady/embeddedFirmwareStatus for X216B.
     val t505nFirmwareReady: Boolean = false,
     val t505nFirmwareStatus: String = "Checking embedded assets...",
-    val t509Variant: T509Variant = T509Variant.T509N,
     val t509FirmwareReady: Boolean = false,
     val t509FirmwareStatus: String = "Checking embedded assets...",
     val t509BromConnected: Boolean = false,
@@ -127,7 +126,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     init {
         checkEmbeddedFirmware()
         checkT505NFirmware()
-        checkT509Firmware(T509Variant.T509N)
+        checkT509Firmware()
         transport.registerDetachListener(
             onDetached = { onUsbDetached(); scanUsb() },
             onAttached = { scanUsb() },
@@ -231,18 +230,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         )
     }
 
-    fun checkT509Firmware(variant: T509Variant) {
+    fun checkT509Firmware() {
         viewModelScope.launch(Dispatchers.IO) {
-            val ready = T509Firmware.allPresent(context, variant)
-            val status = T509Firmware.describeStatus(context, variant)
-            _uiState.update { it.copy(t509Variant = variant, t509FirmwareReady = ready, t509FirmwareStatus = status) }
-            if (ready) appendLog("${variant.label} firmware ready.")
+            val ready = T509Firmware.allPresent(context)
+            val status = T509Firmware.describeStatus(context)
+            _uiState.update { it.copy(t509FirmwareReady = ready, t509FirmwareStatus = status) }
+            if (ready) appendLog("T509 firmware ready.")
+            else appendLog("WARNING: T509 firmware is not ready.")
         }
-    }
-
-    fun setT509Variant(variant: T509Variant) {
-        checkT509Firmware(variant)
-        appendLog("T509 variant set to ${variant.label}.")
     }
 
     /** Attempts to drop the connected device into Unisoc BROM mode -- no ADB needed.
@@ -340,12 +335,11 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Full T509/T509N service flow: FDL1 -> FDL2 -> erase userdata/frp/persist -> reset. */
+    /** Full T509 service flow: FDL1 -> FDL2 -> erase userdata/frp/persist -> reset. */
     fun t509FormatFrp() {
         runTask("T509 Format + FRP") {
-            val variant = _uiState.value.t509Variant
-            if (!T509Firmware.allPresent(context, variant)) {
-                throw IllegalStateException("${variant.label} firmware is not ready.")
+            if (!T509Firmware.allPresent(context)) {
+                throw IllegalStateException("T509 firmware is not ready. ${T509Firmware.describeStatus(context)}")
             }
             if (!_uiState.value.t509BromConnected) {
                 val bromDevice = transport.findSprdBromDevice()
@@ -356,9 +350,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(t509BromConnected = true, usbConnected = true, deviceDescription = "Unisoc BROM") }
             }
 
-            appendLog("=== STEP 1: Uploading ${variant.label} FDL1/FDL2 ===")
-            sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, variant, T509Firmware.FDL1))
-            sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, variant, T509Firmware.FDL2))
+            appendLog("=== STEP 1: Uploading FDL1/FDL2 ===")
+            sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, T509Firmware.FDL1))
+            sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, T509Firmware.FDL2))
 
             appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->

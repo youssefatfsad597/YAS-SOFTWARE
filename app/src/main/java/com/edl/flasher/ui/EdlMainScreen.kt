@@ -94,7 +94,6 @@ import com.edl.flasher.R
 import com.edl.flasher.protocol.OdinTarFlasher
 import com.edl.flasher.protocol.PartitionEntry
 import com.edl.flasher.protocol.StorageType
-import com.edl.flasher.protocol.T509Variant
 import java.util.Locale
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -659,7 +658,6 @@ fun EdlMainScreen(
     onPickX216BFolder: () -> Unit,
     onRunX216BWipeAndWrite: () -> Unit,
     onToggleEmbeddedFirmware: (Boolean) -> Unit,
-    onSetT509Variant: (T509Variant) -> Unit,
     onForceBrom: () -> Unit,
     onFixHandshake: () -> Unit,
     onExitBrom: () -> Unit,
@@ -784,7 +782,6 @@ fun EdlMainScreen(
             )
             2 -> T509Tab(
                 state = state,
-                onSetVariant = onSetT509Variant,
                 onForceBrom = onForceBrom,
                 onFixHandshake = onFixHandshake,
                 onExitBrom = onExitBrom,
@@ -1579,7 +1576,6 @@ private val T509_ADB_COMMAND = """
 @Composable
 private fun T509Tab(
     state: EdlUiState,
-    onSetVariant: (T509Variant) -> Unit,
     onForceBrom: () -> Unit,
     onFixHandshake: () -> Unit,
     onExitBrom: () -> Unit,
@@ -1605,7 +1601,7 @@ private fun T509Tab(
     if (showFormatConfirm) {
         YASConfirmDialog(
             title = "Format + FRP?",
-            message = "Uploads FDL1 / FDL2 over BROM and erases userdata, FRP and persist on the connected ${state.t509Variant.label}. User data will be lost.",
+            message = "Uploads FDL1 / FDL2 over BROM and erases userdata, FRP and persist on the connected T509. User data will be lost.",
             confirmText = "Format + FRP",
             danger = true,
             onConfirm = {
@@ -1673,7 +1669,7 @@ private fun T509Tab(
                 style = BtnStyle.Danger,
                 enabled = !state.isBusy
             )
-            Hint("BROM: uploads FDL1 / FDL2, then erases userdata, FRP and persist.")
+            Hint("BROM: uploads FDL1 / FDL2 (falls back to splloader.bin for stage-1 if FDL1 fails), then erases userdata, FRP and persist.")
         }
 
         YASCard(
@@ -3146,7 +3142,7 @@ private data class ExplainSection(val title: String, val body: String)
 private data class ExplainQA(val q: String, val a: String)
 
 private val EXPLAIN_INTRO = """
-التطبيق ده بيشتغل على أجهزة Samsung اللي فيها شرائح Qualcomm (X216B / T505N) وشرائح Unisoc (T509 / T509N).
+التطبيق ده بيشتغل على أجهزة Samsung اللي فيها شرائح Qualcomm (X216B / T505N) وشرائح Unisoc (T509).
 بيغطي: الدخول في وضع الصيانة، الفورمات، إزالة FRP و Knox، وتفليش فيرموير كامل عن طريق Odin.
 ## إزاي تستخدم الشرح ده
 1. اقرا قسم "EDL بالكابل المعدل" مرة واحدة لو جهازك Qualcomm.
@@ -3191,11 +3187,10 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
         title = "تبويب X216B",
         body = """
 ## "Format + FRP + MDM"
-الزرار الرئيسي لتجهيز الجهاز لإزالة FRP و MDM (الاسم القديم كان "Format FRP MDM"). بيشتغل والجهاز في EDL (9008)، برفع اللودر المدمج تلقائيًا، قراءة الـ GPT، وبعدين بيكتب الملفات بالترتيب ده: frp ← persistent ← misc ← sec_efs، واللوج بيوضح كل خطوة.
+النتيجة: الجهاز بيترجع لإعدادات المصنع بالكامل، وبتتشال حماية حساب جوجل (FRP) وأي قفل إدارة أجهزة (MDM) كان شغال عليه. الجهاز لازم يكون في EDL (9008) قبل ما تضغطه، والعملية بتاخد شوية دقايق واللوج بيوضح تقدمها.
 
 ## "X216B Remove KNOX"
-1. بيلغي باكدجات Knox والـ MDM عن طريق ADB.
-2. الجهاز لازم يكون شغال أندرويد عادي و USB Debugging مفعّل.
+النتيجة: شاشة الإعداد الأولي بتتخطى، وتنبيهات/قيود Knox بتختفي، وبعدها الجهاز بيعمل reboot لوحده. محتاج الجهاز يكون شغال أندرويد عادي و USB Debugging مفعّل.
 
 ملحوظة: زراري "Erase FRP" و"Factory Reset" مش هنا تاني -- اتنقلوا للشريط العلوي (جنب "Reboot" و"Power Off")، عشان يبقوا متاحين من أي تبويب. شوف قسم "الشريط العلوي" تحت.
 """.trimIndent()
@@ -3206,59 +3201,54 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 الأربع أزرار دي ظاهرة فوق في كل التبويبات (جنب بعض)، مش جوه تبويب معيّن.
 
 ## "Reboot" و"Power Off"
-بيشتغلوا مع أي وضع متصل (EDL 9008، Download Mode، BROM): بيبعتوا أمر إعادة تشغيل أو إطفاء للجهاز المتصل حاليًا.
+النتيجة: الجهاز المتصل حاليًا (أي وضع: EDL 9008، Download Mode، BROM) بيعيد التشغيل أو بيتطفي فورًا.
 
 ## "Erase FRP"
-بيمسح أي partition اسمه "frp" أو "config" أو "persistent" (وبدائلها المكتوبة غلط زي "persestent"/"presistent") من جدول الـ GPT اللي اتقرا. لازم:
-1. ادخل الجهاز في EDL (9008) بالكابل المعدل.
-2. افتح تبويب Read GPT (أو استخدم أي زرار بيرفع اللودر زي "Format + FRP + MDM" في X216B أو "Format + FRP"/"Erase FRP" في T505N).
-3. حدد اللودر المناسب واضغط "Upload Loader + Read GPT" واستنى لحد ما جدول الـ partitions يظهر.
-4. دلوقتي الزرار يبقى شغال من الشريط العلوي.
+النتيجة: حماية حساب جوجل (FRP) بتتشال بس، من غير ما يتمسح الباقي. محتاج الجهاز يكون في EDL (9008) وجدول partitions الجهاز مقروء قبلها (من تبويب Read GPT، أو أي زرار بيرفع لودر تلقائي زي "Format + FRP + MDM"/"Format + FRP"/"Erase FRP")، وبعدها الزرار يشتغل من الشريط العلوي.
 
 ## "Factory Reset"
-زي "Erase FRP" بالظبط في الخطوات، لكن بيمسح partitions الـ "userdata"/"metadata"/"cache" بدل الـ FRP. لازم GPT مقروء الأول (نفس خطوات فوق).
+النتيجة: الجهاز بيترجع لإعدادات المصنع (زي ما يبقى جديد) وبتتمسح كل بياناته وتطبيقاته. نفس شرط "Erase FRP": لازم الجهاز في EDL وجدول الـ partitions مقروء الأول.
 """.trimIndent()
     ),
     ExplainSection(
         title = "تبويب T505N",
         body = """
 ## "MTP Download"
-بيبعت الجهاز لـ Download Mode وهو شغال عادي بالأندرويد، عن طريق أوامر AT، من غير كومبينيشن أزرار.
+النتيجة: الجهاز وهو شغال عادي بالأندرويد بيدخل Download Mode من غير ما تحتاج تعمل كومبينيشن أزرار.
 
 ## "Format"
-بتختاره والجهاز في Download Mode، وبعد ما يخلص الجهاز بيعمل reboot لوحده.
+النتيجة: الجهاز بيتمسح (فورمات)، وبعد ما يخلص بيعمل reboot لوحده. محتاج الجهاز يكون في Download Mode قبلها.
 
 ## "Restore Storage"
-بتضغطه والجهاز شغال عادي (مش في Download Mode) بعد زرار "Format". بعده الجهاز بيعمل reboot لوحده.
+النتيجة: مساحة التخزين بترجع لحجمها الكامل الأصلي (لو كانت اتقللت من فورمات سريع)، وبعدها الجهاز بيعمل reboot لوحده. محتاج الجهاز يكون شغال عادي (مش في Download Mode).
 
 ## "Remove Knox"
-زي X216B بالظبط، ومحتاج ADB شغال (أندرويد عادي + USB Debugging).
+زي X216B بالظبط: النتيجة شاشة الإعداد بتتخطى وتنبيهات Knox بتختفي، ومحتاج ADB شغال (أندرويد عادي + USB Debugging).
 
 ## "Format + FRP"  (EDL 9008 -- كارت "EDL 9008 Service")
-زي زرار X216B بالظبط، بس بالملفات المناسبة لـ T505N: بيرفع لودر T505N المدمج تلقائيًا، يقرا الـ GPT كامل (الذاكرة eMMC، مش UFS، والتطبيق بيظبط ده لوحده)، وبعدين بيكتب misc ← frp ← persistent، وبعد ما يخلص بيعمل reboot لوحده. مفيش sec_efs/MDM هنا، عكس X216B.
-لازم الجهاز يكون داخل EDL (9008) بالكابل المعدل، ومفيش داعي تفتح تبويب Read GPT -- اللودر بيترفع تلقائيًا.
+النتيجة: الجهاز بيتمسح بالكامل وبتتشال حماية حساب جوجل (FRP) مع بعض، وبعد ما يخلص بيعمل reboot لوحده. محتاج الجهاز في EDL (9008) بس -- مفيش داعي تفتح تبويب Read GPT، كل حاجة بتترفع تلقائي.
 
 ## "Erase FRP"  (EDL 9008 -- كارت "EDL 9008 Service")
-نفس خطوات "Format + FRP" (لودر T505N المدمج + قراءة GPT)، لكن بيكتب بس frp ← persistent من غير ما يلمس misc، وبعدين بيعمل reboot.
+النتيجة: زي اللي فوق، بس حماية حساب جوجل (FRP) بس هي اللي بتتشال من غير ما يتمسح باقي بيانات الجهاز، وبعدها reboot تلقائي.
 """.trimIndent()
     ),
     ExplainSection(
         title = "تبويب T509",
         body = """
 ## "Force BROM"
-بيدخّل الجهاز وضع BROM بتاع Unisoc (زي EDL عند Qualcomm) من غير كومبينيشن أزرار. بيشتغل بأوامر AT لما يكون الجهاز شغال في وضع MTP.
+النتيجة: الجهاز بيدخل وضع الصيانة بتاع Unisoc (BROM، زي EDL عند Qualcomm) من غير كومبينيشن أزرار. محتاج الجهاز يكون شغال في وضع MTP قبلها.
 
 ## "Fix Handshake"
-لو الاتصال في BROM اتعلّق أو مش بيرد، بيعيد فتح الاتصال ويحاول الـ handshake تاني من غير ما يغيّر وضع الجهاز.
+النتيجة: لو الاتصال مع الجهاز وهو في BROM اتعلّق أو مش بيرد، الزرار ده بيعيد المحاولة من غير ما يغيّر وضع الجهاز نفسه.
 
 ## "Exit BROM"
-بيطلّع الجهاز من BROM بإعادة تشغيل عادية.
+النتيجة: الجهاز بيخرج من BROM ويرجع يشتغل عادي (إعادة تشغيل طبيعية).
 
 ## "Format + FRP"
-بتضغطه بعد ما الجهاز يدخل BROM (بزرار "Force BROM"). بعد ما يخلص الجهاز بيعيد التشغيل.
+النتيجة: الجهاز بيتمسح بالكامل وبتتشال حماية حساب جوجل (FRP) مع بعض، وبعد ما يخلص الجهاز بيعيد التشغيل لوحده. محتاج الجهاز يكون داخل BROM الأول (زرار "Force BROM").
 
 ## "T509 Remove Knox"
-عن طريق ADB، ومحتاج أندرويد عادي + USB Debugging.
+زي باقي التبويبات: شاشة الإعداد بتتخطى وتنبيهات Knox بتختفي، عن طريق ADB، ومحتاج أندرويد عادي + USB Debugging.
 """.trimIndent()
     ),
     ExplainSection(
