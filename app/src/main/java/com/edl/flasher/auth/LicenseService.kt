@@ -107,21 +107,8 @@ class LicenseService(context: Context) {
     }
 
     suspend fun resetPassword(email: String): String = withContext(Dispatchers.IO) {
-        try {
-            request("/auth/v1/recover?redirect_to=" + java.net.URLEncoder.encode(BuildConfig.RESET_REDIRECT_URL, "UTF-8"),
-                "POST", JSONObject().put("email", email.trim()), authenticated = false)
-        } catch (e: Exception) {
-            val reason = e.message.orEmpty().lowercase()
-            if (reason.contains("error sending recovery email") || reason.contains("error sending confirmation") ||
-                reason.contains("smtp") || (reason.contains("email") && reason.contains("rate limit"))
-            ) {
-                throw IllegalStateException(
-                    "تعذر إرسال بريد الاستعادة. خدمة الإيميل الافتراضية في Supabase محدودة جدًا — " +
-                    "يجب على المسؤول تفعيل SMTP مخصص من لوحة Supabase (Authentication → Settings → SMTP Settings)."
-                )
-            }
-            throw e
-        }
+        request("/auth/v1/recover?redirect_to=" + java.net.URLEncoder.encode(BuildConfig.RESET_REDIRECT_URL, "UTF-8"),
+            "POST", JSONObject().put("email", email.trim()), authenticated = false)
         "إذا كان هذا البريد مسجلاً لدينا، فستصلك رسالة لإعادة تعيين كلمة المرور خلال دقائق."
     }
 
@@ -129,15 +116,7 @@ class LicenseService(context: Context) {
      *  access token from the deep link (never stored as a session) to set the new password. */
     suspend fun completePasswordReset(recoveryToken: String, newPassword: String): String = withContext(Dispatchers.IO) {
         if (newPassword.length < 8) throw IllegalStateException("كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف.")
-        val result = try {
-            request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true, bearerOverride = recoveryToken)
-        } catch (e: Exception) {
-            val r = e.message.orEmpty().lowercase()
-            if (r.contains("jwt") || r.contains("expired") || r.contains("invalid")) {
-                throw IllegalStateException("رابط الاستعادة منتهي أو مستخدم من قبل. اطلب رابطًا جديدًا من \"نسيت كلمة المرور؟\".")
-            }
-            throw e
-        }
+        val result = request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true, bearerOverride = recoveryToken)
         val mail = result.optString("email")
         if (mail.isNotBlank() && rememberEnabled() && mail.equals(email(), ignoreCase = true)) saveCredentials(mail, newPassword, true)
         "تم تغيير كلمة المرور بنجاح. سجّل الدخول بالباسورد الجديد."
@@ -165,7 +144,8 @@ class LicenseService(context: Context) {
         }
         val result = request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true)
         if (result.optString("id").isBlank()) {
-            throw IllegalStateException(result.optString("msg", result.optString("message", "تعذر تحديث كلمة المرور.")))
+            val raw = result.optString("msg", result.optString("message", ""))
+            throw IllegalStateException(if (raw.isBlank()) "تعذر تحديث كلمة المرور." else translateAuthError(raw))
         }
         // Keep the saved remember-me password (if any) in sync so auto-fill still works.
         if (rememberEnabled()) saveCredentials(userEmail, newPassword, true)
@@ -178,9 +158,8 @@ class LicenseService(context: Context) {
             val body = identityBody().put("p_device_name", deviceName())
             val result = try {
                 request("/rest/v1/rpc/authorize_device", "POST", body, authenticated = true)
-            } catch (e: Exception) {
-                val reason = e.message.orEmpty().lowercase()
-                if (reason.contains("jwt") || reason.contains("token") || reason.contains("401")) {
+            } catch (e: AuthHttpException) {
+                if (e.httpCode == 401) {
                     refreshSession()
                     request("/rest/v1/rpc/authorize_device", "POST", body, authenticated = true)
                 } else throw e
@@ -206,7 +185,10 @@ class LicenseService(context: Context) {
 
     private fun saveSession(result: JSONObject, email: String) {
         val access = result.optString("access_token")
-        if (access.isBlank()) throw IllegalStateException(result.optString("msg", result.optString("message", "لم يرجع الخادم جلسة دخول. تأكد من تأكيد البريد.")))
+        if (access.isBlank()) {
+            val raw = result.optString("msg", result.optString("message", ""))
+            throw IllegalStateException(if (raw.isBlank()) "لم يرجع الخادم جلسة دخول. تأكد من تأكيد البريد." else translateAuthError(raw))
+        }
         prefs.edit().putString("access_token", access)
             .putString("refresh_token", result.optString("refresh_token"))
             .putString("email", email.trim()).apply()
@@ -222,32 +204,95 @@ class LicenseService(context: Context) {
         if (baseUrl.contains("YOUR_PROJECT") || anonKey == "YOUR_SUPABASE_ANON_KEY") {
             throw IllegalStateException("لم يتم إعداد Supabase بعد. اتبع ملف SETUP.md وأضف SUPABASE_URL وSUPABASE_ANON_KEY.")
         }
-        val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
-            requestMethod = method
-            connectTimeout = 15000
-            readTimeout = 20000
-            setRequestProperty("apikey", anonKey)
-            setRequestProperty("Accept", "application/json")
-            if (authenticated) {
-                val token = bearerOverride ?: prefs.getString("access_token", null) ?: ""
-                setRequestProperty("Authorization", "Bearer $token")
-            } else setRequestProperty("Authorization", "Bearer $anonKey")
-            if (body != null) {
-                doOutput = true
-                setRequestProperty("Content-Type", "application/json")
-                outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+        val (code, text) = try {
+            val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+                requestMethod = method
+                connectTimeout = 15000
+                readTimeout = 20000
+                setRequestProperty("apikey", anonKey)
+                setRequestProperty("Accept", "application/json")
+                if (authenticated) {
+                    val token = bearerOverride ?: prefs.getString("access_token", null) ?: ""
+                    setRequestProperty("Authorization", "Bearer $token")
+                } else setRequestProperty("Authorization", "Bearer $anonKey")
+                if (body != null) {
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    outputStream.use { it.write(body.toString().toByteArray(Charsets.UTF_8)) }
+                }
             }
+            val c = conn.responseCode
+            val stream = if (c in 200..299) conn.inputStream else conn.errorStream
+            val t = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            conn.disconnect()
+            c to t
+        } catch (e: Exception) {
+            // Never reached a response -- host unreachable, timed out, TLS failure, etc.
+            // There is no JSON body to read here, so translate straight from the raw
+            // (English, Java-exception-shaped) message instead of letting it reach the UI.
+            throw IllegalStateException(translateAuthError(e.message.orEmpty()))
         }
-        val code = conn.responseCode
-        val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-        val text = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-        conn.disconnect()
         val json = try { if (text.startsWith("[")) JSONObject().put("items", org.json.JSONArray(text)) else JSONObject(text.ifBlank { "{}" }) }
             catch (_: Exception) { JSONObject().put("message", text) }
         if (code !in 200..299) {
             val msg = json.optString("msg", json.optString("message", json.optString("error_description", "HTTP $code")))
-            throw IllegalStateException(msg)
+            throw AuthHttpException(code, translateAuthError(msg))
         }
         return json
+    }
+}
+
+/** Thrown by [LicenseService.request] for an HTTP-level error response (as opposed to a
+ *  network/connectivity failure, which stays a plain IllegalStateException). Carries the
+ *  real status code so callers -- [LicenseService.authorize] in particular, to decide
+ *  whether to retry once after a token refresh -- can branch on the actual HTTP code
+ *  instead of pattern-matching the (now Arabic, translated) error text for "401". */
+private class AuthHttpException(val httpCode: Int, message: String) : IllegalStateException(message)
+
+/** Maps raw Supabase/GoTrue auth error text and low-level network exception messages to a
+ *  short, friendly Arabic message. Both of those are English/technical by nature (GoTrue
+ *  errors like "Invalid login credentials", Java network exceptions like "Unable to
+ *  resolve host ...") and were leaking straight onto the login screen before -- this is
+ *  the single place that text gets translated, so every call site (signIn/signUp/
+ *  resetPassword/completePasswordReset/authorize/changePassword, all of which end up
+ *  calling LicenseService.request) gets a consistent, readable message instead of each
+ *  one pattern-matching the raw text on its own. */
+private fun translateAuthError(raw: String): String {
+    if (raw.isBlank()) return "حدث خطأ غير متوقع. حاول مرة أخرى."
+    val r = raw.lowercase()
+    return when {
+        r.contains("invalid login credentials") || r.contains("invalid_grant") ||
+            r.contains("invalid email or password") ->
+            "البريد الإلكتروني أو كلمة المرور غير صحيحة."
+        r.contains("email not confirmed") ->
+            "لم يتم تأكيد البريد الإلكتروني بعد. افحص بريدك واضغط على رابط التأكيد."
+        r.contains("user already registered") || r.contains("already registered") ||
+            (r.contains("already") && r.contains("exists")) ->
+            "هذا البريد مسجل بالفعل. سجّل الدخول بدلًا من إنشاء حساب جديد."
+        r.contains("password should be at least") || r.contains("password is too short") ||
+            r.contains("should contain at least") ->
+            "كلمة المرور قصيرة جدًا، يجب ألا تقل عن 8 أحرف."
+        r.contains("weak password") || r.contains("password is known to be weak") ->
+            "كلمة المرور ضعيفة وسهلة التخمين. استخدم كلمة مرور أقوى."
+        r.contains("error sending recovery email") || r.contains("error sending confirmation") ||
+            r.contains("smtp") || (r.contains("email") && r.contains("rate limit")) ->
+            "تعذر إرسال البريد الإلكتروني حاليًا. حاول مرة أخرى بعد قليل، أو تواصل مع الإدارة لو المشكلة استمرت."
+        r.contains("rate limit") || r.contains("too many requests") || r.contains("429") ->
+            "تم إرسال عدد كبير من المحاولات. انتظر شوية وحاول تاني."
+        r.contains("signups not allowed") || r.contains("signup is disabled") ->
+            "إنشاء حسابات جديدة متوقف حاليًا. تواصل مع الإدارة."
+        r.contains("jwt") || r.contains("token is expired") ->
+            "انتهت صلاحية الجلسة أو الرابط. حاول تسجيل الدخول من جديد، أو اطلب رابطًا جديدًا لو كنت بتستعيد كلمة المرور."
+        r.contains("unable to resolve host") || r.contains("no address associated") ||
+            r.contains("unknownhost") ->
+            "تعذر الاتصال بالخادم. تأكد من اتصال الإنترنت على الجهاز."
+        r.contains("timeout") || r.contains("timed out") ->
+            "انتهت مهلة الاتصال بالخادم. تأكد من الإنترنت وحاول مرة أخرى."
+        r.contains("connection refused") || r.contains("failed to connect") ||
+            r.contains("econnrefused") || r.contains("network is unreachable") ->
+            "تعذر الاتصال بالخادم. حاول مرة أخرى بعد قليل."
+        r.contains("certificate") || r.contains("sslhandshake") || r.contains("trust anchor") ->
+            "تعذر إنشاء اتصال آمن بالخادم. تأكد من ضبط التاريخ والوقت على الجهاز وحاول مرة أخرى."
+        else -> "حدث خطأ غير متوقع. حاول مرة أخرى."
     }
 }
