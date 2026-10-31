@@ -175,7 +175,6 @@ class MainActivity : ComponentActivity() {
                     onPickX216BFolder = { x216bFolderPicker.launch(null) },
                     onRunX216BWipeAndWrite = viewModel::runX216BWipeAndWriteSequence,
                     onToggleEmbeddedFirmware = viewModel::setUseEmbeddedFirmware,
-                    onSetT509Variant = viewModel::setT509Variant,
                     onForceBrom = viewModel::t509ForceBrom,
                     onFixHandshake = viewModel::t509FixHandshake,
                     onExitBrom = viewModel::t509ExitBrom,
