@@ -3010,7 +3010,7 @@ private fun AdbMtpTab(
     if (showSerialConfirm) {
         YASConfirmDialog(
             title = "Change Serial?",
-            message = "Reads the device's current serial / modem / IMEI in the background over AT (MTP mode), then asks you for the new 11-character serial. The phone reboots normally once it's written.",
+            message = "Reads ONLY the device's current serial in the background over AT (MTP mode, one quick query, not a full info read), then asks you for the new 11-character serial. The phone reboots normally once it's written.",
             confirmText = "Start",
             danger = true,
             onConfirm = {
@@ -3023,7 +3023,7 @@ private fun AdbMtpTab(
     if (showCscConfirm) {
         YASConfirmDialog(
             title = "Change CSC?",
-            message = "Reads the device's current info and Sales Code in the background over AT (MTP mode), then asks you for the new 3-letter CSC. The phone reboots once it's written so the new region settings take effect.",
+            message = "Reads ONLY the device's current Sales Code in the background over AT (MTP mode, one quick query, not a full info read), then asks you for the new 3-letter CSC. The phone reboots once it's written so the new region settings take effect.",
             confirmText = "Start",
             danger = true,
             onConfirm = {
@@ -3094,7 +3094,7 @@ private fun AdbMtpTab(
                     enabled = !state.isBusy,
                     large = true
                 )
-                Hint("Reads the device in the background, then asks for the new 11-character serial (A-Z, 0-9) mid-operation.")
+                Hint("Reads only the current serial in the background (fast), then asks for the new 11-character serial (A-Z, 0-9) mid-operation.")
             }
 
             if (onChangeCsc != null) {
@@ -3108,7 +3108,7 @@ private fun AdbMtpTab(
                     enabled = !state.isBusy,
                     large = true
                 )
-                Hint("Reads the device in the background, then asks for the new 3-letter Sales Code mid-operation.")
+                Hint("Reads only the current Sales Code in the background (fast), then asks for the new 3-letter Sales Code mid-operation.")
             }
         }
 
@@ -3296,16 +3296,16 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
     ExplainSection(
         title = "الشريط العلوي (Reboot / Power Off / Erase FRP / Factory Reset)",
         body = """
-الأربع أزرار دي ظاهرة فوق في كل التبويبات (جنب بعض)، مش جوه تبويب معيّن.
+الأربع أزرار دي ظاهرة فوق في كل التبويبات (جنب بعض)، مش جوه تبويب معيّن -- بس الأربعة كلهم، من غير استثناء، وضع EDL (9008) بس.
 
 ## "Reboot" و"Power Off"
-النتيجة: الجهاز المتصل حاليًا (أي وضع: EDL 9008، Download Mode، BROM) بيعيد التشغيل أو بيتطفي فورًا.
+بيبعتوا أمر <power> عن طريق Firehose، وده بروتوكول EDL بس. الزرارين دول شكلهم شغال (مش رمادي) حتى لو الجهاز مش في EDL -- لكن لو ضغطتهم برّه EDL (مثلاً في Download Mode أو BROM) هيدّوا "ERROR: Firehose not ready" في اللوج من غير ما يحصل حاجة فعليًا. المفروض يتستخدموا بعد "Upload Loader + Read GPT" أو أي زرار بيرفع لودر تلقائي.
 
-## "Erase FRP"
-النتيجة: حماية حساب جوجل (FRP) بتتشال بس، من غير ما يتمسح الباقي. محتاج الجهاز يكون في EDL (9008) وجدول partitions الجهاز مقروء قبلها (من تبويب Read GPT، أو أي زرار بيرفع لودر تلقائي زي "Format + FRP + MDM"/"Format + FRP"/"Erase FRP")، وبعدها الزرار يشتغل من الشريط العلوي.
+## "Erase FRP" و"Factory Reset"
+نفس الشرط بالظبط (EDL + جدول partitions مقروء)، بس هنا الزرارين فاضلين متعطلين (رمادي) فعليًا لحد ما الشرط يتحقق، عكس Reboot/Power Off اللي بتفضل شكلها شغال.
 
-## "Factory Reset"
-النتيجة: الجهاز بيترجع لإعدادات المصنع (زي ما يبقى جديد) وبتتمسح كل بياناته وتطبيقاته. نفس شرط "Erase FRP": لازم الجهاز في EDL وجدول الـ partitions مقروء الأول.
+• "Erase FRP": بتتشال حماية حساب جوجل (FRP) بس، من غير ما يتمسح الباقي.
+• "Factory Reset": الجهاز بيترجع لإعدادات المصنع (زي ما يبقى جديد) وبتتمسح كل بياناته وتطبيقاته.
 """.trimIndent()
     ),
     ExplainSection(
@@ -3423,7 +3423,8 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 • "Download Mode": يبعت الجهاز لوضع التحميل.
 • "Reboot": إعادة تشغيل عادية.
 • "FORMAT MTP": نفس وظيفة "Restore Storage" في تبويب T505N، بس من هنا.
-• "Change Serial": بيغيّر رقم السيريال (11 حرف/رقم) عن طريق أوامر AT في أجهزة سامسونج.
+• "Change Serial": بيقرا السيريال الحالي بسرعة (استعلام واحد بس، مش قراءة كاملة)، وبعدين بيغيّره (11 حرف/رقم) عن طريق أوامر AT في أجهزة سامسونج. محاولة واحدة سريعة، بعدها الجهاز بيعمل reboot لوحده.
+• "Change CSC": نفس الآلية بالظبط بس لـ Sales Code (3 حروف): يقرا الـ CSC الحالي بسرعة، يغيّره بمحاولة واحدة، وبعدها الجهاز بيعمل reboot لوحده عشان الكود الجديد يسري.
 
 ## قسم ADB (لازم أندرويد عادي + USB Debugging شغال)
 • "Read Info": بيقرا SN / IMEI عن طريق ADB.

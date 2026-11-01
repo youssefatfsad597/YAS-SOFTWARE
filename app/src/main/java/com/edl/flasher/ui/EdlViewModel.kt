@@ -837,6 +837,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         val open: () -> InputStream
     )
 
+    /** openInputStream() is declared nullable (the provider can return null, e.g. the file was
+     *  deleted/moved or access was revoked after it was picked). A bare `!!` here used to throw
+     *  a bare NullPointerException with no message, which runTask's catch block then logs as
+     *  "ERROR [...]: null" -- unhelpful. This throws a clear, user-facing reason instead. */
+    private fun openInputStreamOrThrow(uri: android.net.Uri): InputStream =
+        context.contentResolver.openInputStream(uri)
+            ?: throw IllegalStateException("تعذر فتح الملف المحدد. تأكد أنه لسه موجود ولم يتم نقله أو حذفه، ثم اختره تاني.")
+
     fun runX216BWipeAndWriteSequence() {
         runTask("X216B Auto Wipe & Write") {
             val useEmbedded = true
@@ -907,19 +915,19 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.value.frpFileUri?.let { uri ->
                         val doc = DocumentFile.fromSingleUri(context, uri)
                         WriteJob("frp", setOf("frp"), doc?.name ?: "frp", doc?.length() ?: 0L, "مسح frp 1") {
-                            context.contentResolver.openInputStream(uri)!!
+                            openInputStreamOrThrow(uri)
                         }
                     },
                     _uiState.value.persistentFileUri?.let { uri ->
                         val doc = DocumentFile.fromSingleUri(context, uri)
                         WriteJob("persistent", setOf("persistent", "persestent", "presistent"), doc?.name ?: "persistent", doc?.length() ?: 0L, "مسح frp 2") {
-                            context.contentResolver.openInputStream(uri)!!
+                            openInputStreamOrThrow(uri)
                         }
                     },
                     _uiState.value.secEfsFileUri?.let { uri ->
                         val doc = DocumentFile.fromSingleUri(context, uri)
                         WriteJob("sec_efs", setOf("sec_efs"), doc?.name ?: "sec_efs", doc?.length() ?: 0L, "مسح MDM") {
-                            context.contentResolver.openInputStream(uri)!!
+                            openInputStreamOrThrow(uri)
                         }
                     }
                 )
@@ -2410,16 +2418,17 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  port (MTP mode, no ADB / root needed), then reboots it so the change takes effect.
      *
      *  One-button flow: nothing has to be typed before pressing the button. The task connects
-     *  on its own, reads everything it can about the device in the background (serial, IMEI,
-     *  model, firmware, storage -- the same read "Read Info" does), THEN pauses and asks the
-     *  user for the new serial, showing them the current one as context. It does not wait for
-     *  the phone to come back on the USB bus after rebooting -- the task reports success as
-     *  soon as the write is acknowledged and the reboot command is sent.
+     *  on its own, reads ONLY the current serial in the background (fast -- not the full
+     *  device-info read "Read Info" does), THEN pauses and asks the user for the new serial,
+     *  showing them the current one as context. It does not wait for the phone to come back on
+     *  the USB bus after rebooting -- the task reports success as soon as the write is
+     *  acknowledged and the reboot command is sent.
      *
      * Progress stages:
-     *   0%–15 %   Connect + read full device info in the background
+     *   0%–15 %   Connect + read ONLY the current serial in the background (fast: a single
+     *             AT+SERIALNO? query, not the full device-info read "Read Info" does)
      *   15%       Ask the user for the new serial (task is suspended here, not failed)
-     *   15%–60 %  Write sequence (service-init + AT+SERIALNO=2,<SN>), up to 2 attempts
+     *   15%–60 %  Write sequence (service-init + AT+SERIALNO=2,<SN>), 1 attempt
      *   65%–95 %  Reboot command sent
      */
     fun runChangeSerial() {
@@ -2434,9 +2443,19 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read everything about the device in the background first ──
-            appendLog("Reading current device info (serial / modem / IMEI / firmware)...")
-            val currentSerial = performFullDeviceInfoRead()
+            // ── Stage 1: Read ONLY the current serial (fast) -- not the full device info ──
+            appendLog("Reading current serial...")
+            var currentSerial = ""
+            for (dev in mtpDevices) {
+                currentSerial = runCatching {
+                    AtCommandTransport(context).use { at -> at.readModemSerial(dev) }
+                }.getOrElse { e ->
+                    appendLog("Could not read current serial: ${e.message}")
+                    ""
+                }
+                if (currentSerial.isNotBlank()) break
+            }
+            if (currentSerial.isNotBlank()) _uiState.update { it.copy(infoSerial = currentSerial) }
             appendLog(
                 if (currentSerial.isNotBlank()) "Current serial: $currentSerial"
                 else "Current serial: unreadable (continuing anyway)"
@@ -2472,7 +2491,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 written = runCatching {
                     AtCommandTransport(context).use { at ->
                         at.onProgress = { f -> setTaskProgress(0.15f + f * 0.45f) }
-                        at.changeSerialSequence(dev, sn, maxAttempts = 2, log = { msg -> appendLog(msg) })
+                        at.changeSerialSequence(dev, sn, maxAttempts = 1, log = { msg -> appendLog(msg) })
                     }
                 }.getOrElse { e ->
                     appendLog("ERROR: AT communication error: ${e.message}")
@@ -2518,16 +2537,17 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  (MTP mode, no ADB / root needed), then reboots it so the change takes effect.
      *
      *  One-button flow, same shape as Change Serial: nothing has to be typed before pressing
-     *  the button. The task connects on its own, reads everything it can about the device in
-     *  the background (full info read, plus the current CSC specifically), THEN pauses and
-     *  asks the user for the new CSC. It does not wait for the phone to come back on the USB
-     *  bus after rebooting -- the task reports success as soon as the write is acknowledged
-     *  and the reboot command is sent.
+     *  the button. The task connects on its own, reads ONLY the current CSC in the background
+     *  (fast -- not the full device-info read "Read Info" does), THEN pauses and asks the user
+     *  for the new CSC. It does not wait for the phone to come back on the USB bus after
+     *  rebooting -- the task reports success as soon as the write is acknowledged and the
+     *  reboot command is sent.
      *
      * Progress stages:
-     *   0%–15 %   Connect + read full device info (incl. current CSC) in the background
+     *   0%–15 %   Connect + read ONLY the current CSC in the background (fast: a single
+     *             AT+PRECONFG=1,0 query, not the full device-info read "Read Info" does)
      *   15%       Ask the user for the new CSC (task is suspended here, not failed)
-     *   15%–60 %  Write sequence (service-init + AT+PRECONFG), up to 2 attempts
+     *   15%–60 %  Write sequence (service-init + AT+PRECONFG), 1 attempt
      *   65%–95 %  Reboot command sent
      */
     fun runChangeCsc() {
@@ -2542,9 +2562,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read everything about the device in the background first ──
-            appendLog("Reading current device info (serial / modem / IMEI / firmware)...")
-            performFullDeviceInfoRead()
+            // ── Stage 1: Read ONLY the current CSC (fast) -- not the full device info ──
             appendLog("Reading current CSC...")
             var currentCsc = ""
             for (dev in mtpDevices) {
@@ -2591,7 +2609,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 written = runCatching {
                     AtCommandTransport(context).use { at ->
                         at.onProgress = { f -> setTaskProgress(0.15f + f * 0.45f) }
-                        at.changeCscSequence(dev, csc, maxAttempts = 2, log = { msg -> appendLog(msg) })
+                        at.changeCscSequence(dev, csc, maxAttempts = 1, log = { msg -> appendLog(msg) })
                     }
                 }.getOrElse { e ->
                     appendLog("ERROR: AT communication error: ${e.message}")
