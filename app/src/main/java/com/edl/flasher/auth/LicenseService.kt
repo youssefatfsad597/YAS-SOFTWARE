@@ -27,6 +27,14 @@ class LicenseService(context: Context) {
     private val baseUrl = BuildConfig.SUPABASE_URL.trimEnd('/')
     private val anonKey = BuildConfig.SUPABASE_ANON_KEY
 
+    init {
+        // Migration: versions before the refresh-token-based "remember me" stored the
+        // account password directly (encrypted at rest, but still the real password).
+        // Scrub any leftover copy on first run after upgrading -- it is never written
+        // again and is no longer needed for anything.
+        if (prefs.contains("saved_password")) prefs.edit().remove("saved_password").apply()
+    }
+
     data class License(val active: Boolean, val status: String, val expiresAt: String?, val message: String = "")
 
     fun hasSession(): Boolean = !prefs.getString("access_token", null).isNullOrBlank()
@@ -39,12 +47,18 @@ class LicenseService(context: Context) {
     fun email(): String = prefs.getString("email", "") ?: ""
 
     fun rememberEnabled(): Boolean = prefs.getBoolean("remember_me", false)
-    fun savedPassword(): String = if (rememberEnabled()) prefs.getString("saved_password", "") ?: "" else ""
 
-    fun saveCredentials(email: String, password: String, remember: Boolean) {
-        val editor = prefs.edit().putString("email", email.trim()).putBoolean("remember_me", remember)
-        if (remember) editor.putString("saved_password", password) else editor.remove("saved_password")
-        editor.apply()
+    /** True if a remembered refresh token is on hand to sign back in without the password
+     *  (see signInWithRememberedSession). This is what "تذكرني" actually means now -- the
+     *  password itself is never stored, only this capability. */
+    fun canAutoSignIn(): Boolean = rememberEnabled() && !prefs.getString("remembered_refresh_token", null).isNullOrBlank()
+
+    /** Explicit sign-out: forgets the remember-me preference and any remembered refresh
+     *  token. Deliberately NOT called from clearSession()/onDestroy() -- an ordinary app
+     *  close must still let "تذكرني" skip the password on the next launch; only an
+     *  explicit "تسجيل الخروج" should give that up. */
+    fun forgetRememberedSession() {
+        prefs.edit().remove("remembered_refresh_token").putBoolean("remember_me", false).apply()
     }
 
     private fun deviceId(): String {
@@ -100,9 +114,32 @@ class LicenseService(context: Context) {
         }
     }
 
-    suspend fun signIn(email: String, password: String): License = withContext(Dispatchers.IO) {
+    suspend fun signIn(email: String, password: String, remember: Boolean): License = withContext(Dispatchers.IO) {
         val result = request("/auth/v1/token?grant_type=password", "POST", JSONObject().put("email", email.trim()).put("password", password), authenticated = false)
         saveSession(result, email)
+        val editor = prefs.edit().putBoolean("remember_me", remember)
+        if (remember) {
+            val refresh = result.optString("refresh_token")
+            if (refresh.isNotBlank()) editor.putString("remembered_refresh_token", refresh)
+        } else {
+            editor.remove("remembered_refresh_token")
+        }
+        editor.apply()
+        authorize()
+    }
+
+    /** Signs back in using the refresh token captured at the last remembered sign-in --
+     *  no password involved. Supabase rotates refresh tokens on use, so the remembered
+     *  copy is updated to the new one on success. Throws if the remembered token is no
+     *  longer valid (expired, revoked, or already consumed elsewhere); the caller should
+     *  fall back to the normal e-mail/password form in that case. */
+    suspend fun signInWithRememberedSession(): License = withContext(Dispatchers.IO) {
+        val remembered = prefs.getString("remembered_refresh_token", null)
+            ?: throw IllegalStateException("لا توجد جلسة محفوظة.")
+        val result = request("/auth/v1/token?grant_type=refresh_token", "POST", JSONObject().put("refresh_token", remembered), authenticated = false)
+        saveSession(result, email())
+        val newRefresh = result.optString("refresh_token")
+        if (newRefresh.isNotBlank()) prefs.edit().putString("remembered_refresh_token", newRefresh).apply()
         authorize()
     }
 
@@ -116,9 +153,10 @@ class LicenseService(context: Context) {
      *  access token from the deep link (never stored as a session) to set the new password. */
     suspend fun completePasswordReset(recoveryToken: String, newPassword: String): String = withContext(Dispatchers.IO) {
         if (newPassword.length < 8) throw IllegalStateException("كلمة المرور الجديدة يجب ألا تقل عن 8 أحرف.")
-        val result = request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true, bearerOverride = recoveryToken)
-        val mail = result.optString("email")
-        if (mail.isNotBlank() && rememberEnabled() && mail.equals(email(), ignoreCase = true)) saveCredentials(mail, newPassword, true)
+        request("/auth/v1/user", "PUT", JSONObject().put("password", newPassword), authenticated = true, bearerOverride = recoveryToken)
+        // A password reset invalidates any remembered refresh token tied to the old
+        // password: let it fail naturally on the next launch rather than remember a
+        // stale one here.
         "تم تغيير كلمة المرور بنجاح. سجّل الدخول بالباسورد الجديد."
     }
 
@@ -147,8 +185,6 @@ class LicenseService(context: Context) {
             val raw = result.optString("msg", result.optString("message", ""))
             throw IllegalStateException(if (raw.isBlank()) "تعذر تحديث كلمة المرور." else translateAuthError(raw))
         }
-        // Keep the saved remember-me password (if any) in sync so auto-fill still works.
-        if (rememberEnabled()) saveCredentials(userEmail, newPassword, true)
         "تم تغيير كلمة المرور بنجاح."
     }
 

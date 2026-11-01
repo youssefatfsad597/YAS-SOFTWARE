@@ -77,7 +77,7 @@ fun AuthGate(
     var registerMode by remember { mutableStateOf(false) }
     var forgotMode by remember { mutableStateOf(false) }
     var email by remember { mutableStateOf(service.email()) }
-    var password by remember { mutableStateOf(service.savedPassword()) }
+    var password by remember { mutableStateOf("") }
     var rememberMe by remember { mutableStateOf(service.rememberEnabled()) }
     var showPassword by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf("") }
@@ -101,9 +101,30 @@ fun AuthGate(
             checking = false
             return
         }
+        // Root access and runtime hooking/injection tools (Frida/Xposed/etc.) are both
+        // treated as tampering and hard-blocked, same as a bad signature. Debugger
+        // detection is intentionally not checked here (product decision).
+        if (TamperGuard.hasRootIndicators() || TamperGuard.hasHookingFrameworkIndicators()) {
+            tamperBlocked = true
+            checking = false
+            return
+        }
         checking = true
         scope.launch {
-            val result = service.authorize()
+            val result = if (!service.hasSession() && service.canAutoSignIn()) {
+                try {
+                    service.signInWithRememberedSession()
+                } catch (_: Exception) {
+                    // Remembered refresh token no longer valid (expired, revoked, or
+                    // already rotated by a sign-in elsewhere) -- forget it and fall back
+                    // to the normal e-mail/password form instead of retrying forever.
+                    service.forgetRememberedSession()
+                    rememberMe = false
+                    LicenseService.License(false, "signed_out", null, "")
+                }
+            } else {
+                service.authorize()
+            }
             license = result
             if (result.status == "device_banned") banned = true
             authorized = result.active
@@ -171,6 +192,8 @@ fun AuthGate(
             onDone = { msg ->
                 // The old session (if any) belongs to the old password: force a fresh sign-in.
                 service.clearSession()
+                service.forgetRememberedSession()
+                rememberMe = false
                 authorized = false; enteredApp = false; license = null; forgotMode = false; registerMode = false
                 message = msg; isError = false
                 onRecoveryDone()
@@ -199,6 +222,8 @@ fun AuthGate(
             onChangePassword = { cpMessage = ""; cpError = false; showChangePassword = true },
             onSignOut = {
                 service.clearSession()
+                service.forgetRememberedSession()
+                rememberMe = false
                 authorized = false
                 enteredApp = false
                 license = null
@@ -252,6 +277,8 @@ fun AuthGate(
         onRetry = { verify() },
         onSignOutStaleSession = {
             service.clearSession()
+            service.forgetRememberedSession()
+            rememberMe = false
             license = null
             message = "تم تسجيل الخروج."
             isError = false
@@ -269,13 +296,12 @@ fun AuthGate(
                             message = service.signUp(email, password)
                         }
                         else -> {
-                            val result = service.signIn(email, password)
+                            val result = service.signIn(email, password, rememberMe)
                             license = result
                             if (result.status == "device_banned") banned = true
                             message = result.message.ifBlank { if (result.active) "تم التحقق من الترخيص." else "الحساب غير مفعّل أو انتهت مدة الترخيص." }
                             isError = !result.active
                             authorized = result.active
-                            service.saveCredentials(email, password, rememberMe)
                         }
                     }
                 } catch (e: Exception) {

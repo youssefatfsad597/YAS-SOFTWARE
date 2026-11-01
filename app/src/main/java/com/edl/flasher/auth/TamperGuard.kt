@@ -72,8 +72,50 @@ object TamperGuard {
             "/system/bin/failsafe/su", "/data/local/su", "/su/bin/su"
         )
         if (paths.any { File(it).exists() }) return true
+        var process: Process? = null
         return try {
-            Runtime.getRuntime().exec(arrayOf("which", "su")).inputStream.bufferedReader().readLine() != null
+            process = Runtime.getRuntime().exec(arrayOf("which", "su"))
+            process.inputStream.bufferedReader().use { it.readLine() != null }
+        } catch (_: Exception) {
+            false
+        } finally {
+            // exec() leaks a live process + open streams if never cleaned up.
+            process?.destroy()
+        }
+    }
+
+    /**
+     * Detects common runtime hooking/injection frameworks (Frida, Xposed/LSPosed,
+     * Substrate) that patch the app's behavior in memory, without necessarily changing
+     * its signing certificate — so verifySigningCertificate() alone won't catch them.
+     * Cheap, non-exhaustive signal, same spirit as hasRootIndicators(): raise the bar,
+     * not a guarantee against a determined attacker.
+     */
+    fun hasHookingFrameworkIndicators(): Boolean {
+        // Known Xposed/LSPosed bridge class, present in the classloader once hooked.
+        try {
+            Class.forName("de.robv.android.xposed.XposedBridge")
+            return true
+        } catch (_: ClassNotFoundException) {
+            // expected on a clean device
+        } catch (_: Exception) {
+            // reflection quirk — don't let it crash the check either way
+        }
+
+        // Frida's default on-device server / injected-agent artifacts.
+        val suspiciousPaths = arrayOf(
+            "/data/local/tmp/frida-server", "/data/local/tmp/re.frida.server",
+            "/data/local/tmp/frida-agent-32.so", "/data/local/tmp/frida-agent-64.so"
+        )
+        if (suspiciousPaths.any { File(it).exists() }) return true
+
+        // Loaded libraries mentioning known hooking frameworks in this process's own
+        // memory map — catches injection even when no file was dropped on disk.
+        return try {
+            File("/proc/self/maps").readLines().any { line ->
+                val l = line.lowercase()
+                "frida" in l || "substrate" in l || "xposed" in l
+            }
         } catch (_: Exception) {
             false
         }
