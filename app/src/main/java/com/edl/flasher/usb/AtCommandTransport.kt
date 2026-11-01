@@ -68,24 +68,27 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
         // Delay between the steps of the serial-number sequence. Each exchange() already
         // blocks until the device replies (or its own idle timeout) -- this is extra padding
-        // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms; halved after the same
-        // testing pass that shortened CSC's.
-        const val SERIAL_STEP_DELAY_MS = 600L
+        // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms, then 600ms; cut again since
+        // the flow now does a single attempt and a quick serial-only read beforehand, so every
+        // extra ms here is pure added latency on the one shot we take.
+        const val SERIAL_STEP_DELAY_MS = 300L
         // Settle time after the serial write before reading it back, so the modem has a moment
         // to commit the NV value -- separate from SERIAL_STEP_DELAY_MS so it can be tuned on
         // its own. readModemSerial() retries with its own delay if this isn't quite enough.
-        const val SERIAL_POST_WRITE_SETTLE_MS = 500L
+        const val SERIAL_POST_WRITE_SETTLE_MS = 300L
         // CSC (Sales Code) writes are a handful of lightweight AT+PRECONFG/activation
         // commands with no flash-heavy work behind them, so they tolerate a shorter
         // inter-command gap than the serial sequence. Each exchange() already blocks until
         // the device replies (or its own idle timeout), so this is pure extra padding on
-        // top of that -- 250 ms has been reliable in testing; lower it further only if your
-        // modem consistently keeps up.
-        const val CSC_STEP_DELAY_MS = 250L
+        // top of that -- cut in step with SERIAL_STEP_DELAY_MS for the same single-attempt,
+        // fastest-possible flow.
+        const val CSC_STEP_DELAY_MS = 150L
         // Wait before a CSC retry attempt (separate from the serial retry delay above).
-        const val CSC_RETRY_DELAY_MS = 300L
+        // Only matters if maxAttempts is ever raised above 1 again.
+        const val CSC_RETRY_DELAY_MS = 150L
         // Wait before a serial-write retry attempt -- just the gap between whole attempts.
-        const val SERIAL_RETRY_DELAY_MS = 300L
+        // Only matters if maxAttempts is ever raised above 1 again.
+        const val SERIAL_RETRY_DELAY_MS = 150L
         // How long to wait for the device to drop off USB after each individual command in
         // REBOOT_COMMANDS. A command that will actually cause a full reboot shows it quickly;
         // this only needs to be long enough to catch that, not to patiently wait out a command
@@ -477,8 +480,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
      *  strip commas and a leading attribute-index "1" if present; otherwise fall back to any
      *  bare all-caps/digits token of at least 11 characters. Retries because the modem port is
      *  often not ready on the first query. Returns "" when unreadable. */
-    suspend fun readModemSerial(device: UsbDevice, attempts: Int = 3): String {
-        repeat(attempts) {
+    suspend fun readModemSerial(device: UsbDevice, attempts: Int = 2): String {
+        repeat(attempts) { attempt ->
             val raw = queryReadOnly(device, listOf("AT+SERIALNO?"))["AT+SERIALNO?"].orEmpty()
             val lines = raw.split(Regex("[\\r\\n]+")).map { it.trim() }.filter { it.isNotEmpty() }
             for (line in lines) {
@@ -490,20 +493,20 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     return line
                 }
             }
-            kotlinx.coroutines.delay(500)
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(300)
         }
         return ""
     }
 
     /** Reads the modem-side Sales Code (CSC) via AT+PRECONFG=1,0, retrying because the modem
      *  port is often not ready on the first query. Returns "" when unreadable. */
-    suspend fun readModemCsc(device: UsbDevice, attempts: Int = 3): String {
-        repeat(attempts) {
+    suspend fun readModemCsc(device: UsbDevice, attempts: Int = 2): String {
+        repeat(attempts) { attempt ->
             val raw = queryReadOnly(device, listOf("AT+PRECONFG=1,0"))["AT+PRECONFG=1,0"].orEmpty()
             val tagged = Regex("\\+PRECONFG:\\s*1,\\s*([A-Za-z]{3})").find(raw)?.groupValues?.get(1)
             val csc = tagged ?: Regex("[A-Z]{3}", RegexOption.IGNORE_CASE).find(raw)?.value
             if (!csc.isNullOrBlank()) return csc.uppercase()
-            kotlinx.coroutines.delay(500)
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(300)
         }
         return ""
     }
@@ -520,10 +523,10 @@ class AtCommandTransport(private val context: Context) : Closeable {
      *   7) AT+SERIALNO=2,<SN>   – write the new serial number
      * Then immediately reads back AT+SERIALNO? and compares with the target value.
      *
-     * If the first attempt is not acknowledged (no OK / wrong attribute / wrong data),
-     * retries up to [maxAttempts] times with 1 s between attempts -- some devices need
-     * a second pass because the modem port hot-plugs or the AP needs time to open the
-     * engineering AT handlers.
+     * Runs [maxAttempts] pass(es) of the sequence (default 1 -- a single, fastest-possible
+     * attempt); if a caller does raise it above 1, extra passes wait [SERIAL_RETRY_DELAY_MS]
+     * apart, for the rare device that needs a second pass because the modem port hot-plugs or
+     * the AP needs time to open the engineering AT handlers.
      *
      * Every command below is present verbatim in this firmware's own AP-side AT-command
      * whitelist (AT+SWATD=0/1, AT+ACTIVATE=0,0,0, AT+KSTRINGB=0,3, AT+DUMPCTRL=1,0,
@@ -533,7 +536,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
      * commands), so AT+CLAC must never be used to decide whether this sequence is worth
      * attempting -- its absence there is expected, not an error.
      *
-     * @param maxAttempts  how many times to retry the full sequence (default 4).
+     * @param maxAttempts  how many times to run the full sequence (default 1: one fast pass).
      * @return             true when the modem explicitly acknowledged the write OR the
      *                     post-read-back confirms the new serial.
      */
@@ -541,7 +544,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         device: UsbDevice,
         newSerial: String,
         log: (String) -> Unit,
-        maxAttempts: Int = 4
+        maxAttempts: Int = 1
     ): Boolean {
         var lastAckReply = ""
 
@@ -611,7 +614,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
         // Post-write verification: read back the serial from the modem.
         kotlinx.coroutines.delay(SERIAL_POST_WRITE_SETTLE_MS)
-        val after = readModemSerial(device, attempts = 3)
+        val after = readModemSerial(device, attempts = 2)
         log("Post-write serial read-back: '${after.ifBlank { "(none)" }}'")
 
         val directMatch = after.trim().equals(newSerial, ignoreCase = true)
@@ -764,7 +767,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         device: UsbDevice,
         newCsc: String,
         log: (String) -> Unit,
-        maxAttempts: Int = 3
+        maxAttempts: Int = 1
     ): Boolean {
         require(newCsc.length == 3 && newCsc.all { it in 'A'..'Z' || it in 'a'..'z' }) {
             "CSC must be exactly 3 letters (A-Z)."
