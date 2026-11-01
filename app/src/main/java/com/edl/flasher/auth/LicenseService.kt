@@ -61,7 +61,7 @@ class LicenseService(context: Context) {
         prefs.edit().remove("remembered_refresh_token").putBoolean("remember_me", false).apply()
     }
 
-    private fun deviceId(): String {
+    internal fun deviceId(): String {
         val existing = prefs.getString("device_id", null)
         if (!existing.isNullOrBlank()) return existing
         val generated = UUID.randomUUID().toString()
@@ -70,7 +70,7 @@ class LicenseService(context: Context) {
     }
 
     /** ANDROID_ID: survives app reinstall (same signing key); changes only on factory reset. */
-    private fun androidId(): String = try {
+    internal fun androidId(): String = try {
         Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
     } catch (_: Exception) { "" }
 
