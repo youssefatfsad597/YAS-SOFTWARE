@@ -143,7 +143,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 } catch (e: Exception) {
                     // keep watching
                 }
-                delay(1000)
+                delay(500)
             }
         }
     }
