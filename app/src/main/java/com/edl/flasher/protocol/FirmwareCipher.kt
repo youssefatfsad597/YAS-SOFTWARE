@@ -74,13 +74,26 @@ internal object FirmwareCipher {
         return ByteArray(KEY_MATERIAL.size) { i -> (KEY_MATERIAL[i].toInt() xor mask[i].toInt()).toByte() }
     }
 
-    /** Final AES key = SHA-256(obfuscated material || lowercase-hex cert SHA-256 bytes). */
+    /** Cert-bound half of the key = SHA-256(obfuscated material || lowercase-hex cert SHA-256 bytes). */
     private fun deriveKey(certSha256Hex: String): ByteArray {
         val material = reconstructKeyMaterial()
         val digest = MessageDigest.getInstance("SHA-256")
         digest.update(material)
         java.util.Arrays.fill(material, 0)
         digest.update(certSha256Hex.lowercase().toByteArray(Charsets.US_ASCII))
+        return digest.digest()
+    }
+
+    /** Final AES key = SHA-256(cert-bound key || serverKey). Requires BOTH ingredients:
+     *  the real signing certificate (as before) AND a fresh key fragment that only the
+     *  server hands out via authorize_operation for a currently-allowed operation (see
+     *  SensitiveOperationGate). Neither half alone decrypts anything. */
+    private fun deriveBoundKey(certSha256Hex: String, serverKey: ByteArray): ByteArray {
+        val certKey = deriveKey(certSha256Hex)
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(certKey)
+        java.util.Arrays.fill(certKey, 0)
+        digest.update(serverKey)
         return digest.digest()
     }
 
@@ -92,10 +105,16 @@ internal object FirmwareCipher {
      * Wraps a raw (encrypted) asset InputStream with a decrypting CipherInputStream.
      * Reads and consumes the leading 16-byte IV itself, then streams the rest through
      * AES/CTR so callers never hold the whole file in memory. `context` is required to
-     * read this APK's real signing certificate (see class doc) -- it is NOT optional and
-     * must not be defaulted to a fixed value, or the key-binding above does nothing.
+     * read this APK's real signing certificate (see class doc).
+     *
+     * `serverKey` MUST come from a fresh, server-granted operation (see
+     * SensitiveOperationGate.authorize / OperationKeyClient.deriveFirmwareKey). This is
+     * deliberately the ONLY overload: there is no "decrypt with just the cert hash"
+     * path left, so every call site is forced to obtain and pass a live server grant --
+     * skipping the gate is a compile error, not just a UI choice someone could patch
+     * around.
      */
-    fun decryptingStream(context: Context, rawAssetStream: InputStream): InputStream {
+    fun decryptingStream(context: Context, rawAssetStream: InputStream, serverKey: ByteArray): InputStream {
         val iv = ByteArray(IV_LEN)
         var read = 0
         while (read < IV_LEN) {
@@ -104,7 +123,7 @@ internal object FirmwareCipher {
             read += n
         }
         val certHash = TamperGuard.currentCertSha256(context) ?: DEBUG_CERT_SHA256
-        val keyBytes = deriveKey(certHash)
+        val keyBytes = deriveBoundKey(certHash, serverKey)
         val cipher = Cipher.getInstance("AES/CTR/NoPadding")
         cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(iv))
         java.util.Arrays.fill(keyBytes, 0) // best-effort: don't keep the raw key around longer than needed

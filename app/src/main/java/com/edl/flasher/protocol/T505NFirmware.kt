@@ -46,11 +46,13 @@ object T505NFirmware {
             FirmwareCipher.plaintextSize(context.assets.openFd(path(name)).use { it.length })
         }.getOrDefault(-1L)
 
-    fun openStream(context: Context, name: String): InputStream =
-        FirmwareCipher.decryptingStream(context, context.assets.open(path(name)))
+    /** `serverKey`: a fresh grant from SensitiveOperationGate.authorize(...) for the
+     *  operation currently in progress. Required -- see FirmwareCipher.decryptingStream. */
+    fun openStream(context: Context, name: String, serverKey: ByteArray): InputStream =
+        FirmwareCipher.decryptingStream(context, context.assets.open(path(name)), serverKey)
 
-    fun readAllBytes(context: Context, name: String): ByteArray =
-        openStream(context, name).use { it.readBytes() }
+    fun readAllBytes(context: Context, name: String, serverKey: ByteArray): ByteArray =
+        openStream(context, name, serverKey).use { it.readBytes() }
 
     fun describeStatus(context: Context): String {
         val missing = ALL_FILES.filterNot { exists(context, it) }
