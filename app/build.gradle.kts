@@ -16,8 +16,20 @@ android {
     }
 
     val hasReleaseSigning = project.hasProperty("KEYSTORE_FILE")
-    if (hasReleaseSigning) {
-        signingConfigs {
+    signingConfigs {
+        // Fixed, committed debug keystore (app/debug.keystore) so every debug APK -
+        // whether built locally or by a fresh GitHub Actions runner - is signed with
+        // the SAME certificate every time. Without this, Gradle falls back to
+        // ~/.android/debug.keystore, which CI regenerates randomly on every run,
+        // causing "App not installed as package conflicts with an existing package"
+        // when installing a newer debug build over an older one.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+        if (hasReleaseSigning) {
             create("release") {
                 storeFile = file(project.property("KEYSTORE_FILE") as String)
                 storePassword = project.property("KEYSTORE_PASSWORD") as String
