@@ -7,6 +7,8 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.edl.flasher.protocol.*
+import com.edl.flasher.auth.LicenseService
+import com.edl.flasher.auth.SensitiveOperationGate
 import android.content.Context
 import android.hardware.usb.UsbManager
 import com.edl.flasher.usb.MtpDeviceInfoReader
@@ -163,6 +165,22 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     private val sprdFdl = SprdFdlProtocol(transport, ::appendLog)
     @Volatile private var quietInfoRead = false
     private val adbClient = AdbClient(context) { msg -> if (!quietInfoRead) appendLog(msg) }
+    private val licenseService by lazy { LicenseService(context) }
+
+    /** Asks the server to authorize ONE sensitive operation right before it runs (see
+     *  SensitiveOperationGate / SETUP.md). Every function that flashes, erases, or
+     *  otherwise touches the device's protected state must call this FIRST, inside its
+     *  runTask{} block, so a denial throws and is logged exactly like any other
+     *  precondition failure already in this file -- it never silently continues.
+     *  Returns the server-derived key for operations that decrypt bundled firmware;
+     *  callers that don't need a key (Odin/manual-file flows) can ignore the result. */
+    private suspend fun requireOperationAuthorized(operation: String): ByteArray {
+        return when (val outcome = SensitiveOperationGate.authorize(context, licenseService, operation)) {
+            is SensitiveOperationGate.Outcome.Key -> outcome.key
+            is SensitiveOperationGate.Outcome.Denied ->
+                throw IllegalStateException("رفض الخادم العملية (${operation}): ${outcome.reason}")
+        }
+    }
 
     private val _uiState = MutableStateFlow(EdlUiState())
     val uiState: StateFlow<EdlUiState> = _uiState.asStateFlow()
@@ -387,6 +405,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     /** Full T509 service flow: FDL1 -> FDL2 -> erase userdata/frp/persist -> reset. */
     fun t509FormatFrp() {
         runTask("T509 Format + FRP") {
+            val opKey = requireOperationAuthorized("flash_frp_t509")
             if (!T509Firmware.allPresent(context)) {
                 throw IllegalStateException("T509 firmware is not ready. ${T509Firmware.describeStatus(context)}")
             }
@@ -400,8 +419,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             appendLog("=== STEP 1: Uploading FDL1/FDL2 ===")
-            sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, T509Firmware.FDL1))
-            sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, T509Firmware.FDL2))
+            sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, T509Firmware.FDL1, opKey))
+            sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, T509Firmware.FDL2, opKey))
 
             appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->
@@ -783,9 +802,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         bootFirehoseWithBytes(loaderBytes)
     }
 
-    private fun bootFirehoseFromEmbeddedLoader() {
+    private fun bootFirehoseFromEmbeddedLoader(serverKey: ByteArray) {
         appendLog("Loading loader...")
-        val loaderBytes = EmbeddedFirmware.readAllBytes(context, EmbeddedFirmware.LOADER)
+        val loaderBytes = EmbeddedFirmware.readAllBytes(context, EmbeddedFirmware.LOADER, serverKey)
         bootFirehoseWithBytes(loaderBytes)
     }
 
@@ -809,11 +828,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runTask("Booting Firehose & Reading GPT") {
+            // Every path here either boots a licensed, encrypted embedded loader, or at
+            // minimum reads the device's GPT -- both require a live, authorized session.
+            val opKey = requireOperationAuthorized("boot_firehose_read_gpt")
             if (!_uiState.value.firehoseReady) {
                 val cur = _uiState.value
                 when (cur.gptLoaderChoice) {
-                    GptLoaderChoice.X216B -> bootFirehoseFromEmbeddedLoader()
-                    GptLoaderChoice.T505N -> bootFirehoseFromEmbeddedT505NLoader()
+                    GptLoaderChoice.X216B -> bootFirehoseFromEmbeddedLoader(opKey)
+                    GptLoaderChoice.T505N -> bootFirehoseFromEmbeddedT505NLoader(opKey)
                     GptLoaderChoice.MANUAL -> {
                         val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
                         appendLog("Uploading manual loader (${cur.loaderName})...")
@@ -847,6 +869,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runX216BWipeAndWriteSequence() {
         runTask("X216B Auto Wipe & Write") {
+            val opKey = requireOperationAuthorized("flash_frp_x216b")
             val useEmbedded = true
 
             if (useEmbedded && !EmbeddedFirmware.allPresent(context)) {
@@ -871,7 +894,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             if (!_uiState.value.firehoseReady) {
                 if (useEmbedded) {
-                    bootFirehoseFromEmbeddedLoader()
+                    bootFirehoseFromEmbeddedLoader(opKey)
                 } else {
                     val loaderUri = _uiState.value.loaderUri
                         ?: throw IllegalStateException("Please select a custom loader first, or enable embedded firmware!")
@@ -895,19 +918,19 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 listOf(
                     WriteJob("frp", setOf("frp"), "frp",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "Erasing FRP 1") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP)
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP, opKey)
                     },
                     WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "Erasing FRP 2") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT)
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT, opKey)
                     },
                     WriteJob("misc", setOf("misc"), "misc",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "Erasing DATA") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC)
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC, opKey)
                     },
                     WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
                         EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "Erasing MDM") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS)
+                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS, opKey)
                     }
                 )
             } else {
@@ -974,15 +997,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     // T505N's storage is eMMC (not UFS like X216B), so both sequences force that before
     // booting the loader / reading the GPT.
 
-    private fun bootFirehoseFromEmbeddedT505NLoader() {
+    private fun bootFirehoseFromEmbeddedT505NLoader(serverKey: ByteArray) {
         appendLog("Loading T505N loader...")
-        val loaderBytes = T505NFirmware.readAllBytes(context, T505NFirmware.LOADER)
+        val loaderBytes = T505NFirmware.readAllBytes(context, T505NFirmware.LOADER, serverKey)
         bootFirehoseWithBytes(loaderBytes)
     }
 
     /** Opens the 9008 USB device if needed, forces eMMC storage, and boots the T505N loader
      *  into Firehose if it isn't already up. Shared by both T505N one-tap buttons below. */
-    private suspend fun prepareT505NFirehose() {
+    private suspend fun prepareT505NFirehose(serverKey: ByteArray) {
         if (!T505NFirmware.allPresent(context)) {
             throw IllegalStateException("T505N firmware is not ready. ${T505NFirmware.describeStatus(context)}")
         }
@@ -1009,31 +1032,31 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (!_uiState.value.firehoseReady) {
-            bootFirehoseFromEmbeddedT505NLoader()
+            bootFirehoseFromEmbeddedT505NLoader(serverKey)
         }
     }
 
     /** Writes frp(+persistent)(+misc) to the GPT partitions matching those names, in the
      *  same "FRP 1 / FRP 2 / DATA" step order and typo-tolerant aliases as X216B's sequence. */
-    private suspend fun writeT505NPartitions(currentParts: List<PartitionEntry>, includeMisc: Boolean) {
+    private suspend fun writeT505NPartitions(currentParts: List<PartitionEntry>, includeMisc: Boolean, serverKey: ByteArray) {
         val jobs = buildList {
             add(
                 WriteJob("frp", setOf("frp"), "frp",
                     T505NFirmware.sizeOf(context, T505NFirmware.FRP), "Erasing FRP 1") {
-                    T505NFirmware.openStream(context, T505NFirmware.FRP)
+                    T505NFirmware.openStream(context, T505NFirmware.FRP, serverKey)
                 }
             )
             add(
                 WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
                     T505NFirmware.sizeOf(context, T505NFirmware.PERSISTENT), "Erasing FRP 2") {
-                    T505NFirmware.openStream(context, T505NFirmware.PERSISTENT)
+                    T505NFirmware.openStream(context, T505NFirmware.PERSISTENT, serverKey)
                 }
             )
             if (includeMisc) {
                 add(
                     WriteJob("misc", setOf("misc"), "misc",
                         T505NFirmware.sizeOf(context, T505NFirmware.MISC), "Erasing DATA") {
-                        T505NFirmware.openStream(context, T505NFirmware.MISC)
+                        T505NFirmware.openStream(context, T505NFirmware.MISC, serverKey)
                     }
                 )
             }
@@ -1068,7 +1091,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  device (see [T505NFirmware]). */
     fun runT505NFormatFrpSequence() {
         runTask("T505N Format + FRP") {
-            prepareT505NFirehose()
+            val opKey = requireOperationAuthorized("flash_frp_t505n")
+            prepareT505NFirehose(opKey)
 
             appendLog("Reading Full GPT Partition Table...")
             scanAllGptInternal()
@@ -1079,7 +1103,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             appendLog("=== WRITING PARTITIONS (MISC, FRP, PERSISTENT) ===")
             appendLog("Writing firmware images...")
-            writeT505NPartitions(currentParts, includeMisc = true)
+            writeT505NPartitions(currentParts, includeMisc = true, serverKey = opKey)
 
             appendLog("Operation completed successfully.")
             appendLog("Rebooting device...")
@@ -1091,7 +1115,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  frp + persistent (misc/DATA is left untouched), then reboots. */
     fun runT505NEraseFrpSequence() {
         runTask("T505N Erase FRP") {
-            prepareT505NFirehose()
+            val opKey = requireOperationAuthorized("flash_frp_t505n")
+            prepareT505NFirehose(opKey)
 
             appendLog("Reading Full GPT Partition Table...")
             scanAllGptInternal()
@@ -1102,7 +1127,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT) ===")
             appendLog("Writing firmware images...")
-            writeT505NPartitions(currentParts, includeMisc = false)
+            writeT505NPartitions(currentParts, includeMisc = false, serverKey = opKey)
 
             appendLog("Operation completed successfully.")
             appendLog("Rebooting device...")
@@ -1643,6 +1668,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runOdinFlashSequence() {
         runTask("Samsung Odin Flash") {
+            requireOperationAuthorized("flash_odin")
             val slots = listOf(
                 "BL" to _uiState.value.blTarUri,
                 "AP" to _uiState.value.apTarUri,
@@ -1678,6 +1704,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun formatT505N() {
         runTask("Format T505N (Download Mode)") {
+            requireOperationAuthorized("format_userdata")
             val uri = _uiState.value.userdataTarUri
                 ?: throw IllegalStateException("Select the userdata.tar / userdata.img first.")
 
@@ -1851,6 +1878,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun flashSinglePartition(partition: PartitionEntry, sourceImageUri: Uri) {
         runTask("Writing '${partition.name}'") {
+            requireOperationAuthorized("flash_partition")
             val doc = DocumentFile.fromSingleUri(context, sourceImageUri)
             val totalBytes = doc?.length() ?: 0L
             val startNs = System.nanoTime()
@@ -1873,6 +1901,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun eraseSinglePartition(partition: PartitionEntry) {
         runTask("Erasing '${partition.name}'") {
+            requireOperationAuthorized("erase_partition")
             appendLog("Erasing '${partition.name}' (LUN ${partition.lun}, ${partition.numSectors} sectors)...")
             firehose.eraseSectors(partition.lun, partition.firstLba, partition.numSectors)
             appendLog("Operation completed successfully.")
@@ -1888,6 +1917,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runTask("Erasing ${targets.size} Selected Partitions") {
+            requireOperationAuthorized("erase_partition")
             targets.forEachIndexed { idx, part ->
                 appendLog("[${idx + 1}/${targets.size}] Erasing '${part.name}' (LUN ${part.lun})...")
                 firehose.eraseSectors(part.lun, part.firstLba, part.numSectors)
@@ -1914,6 +1944,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         runTask("Resetting FRP Lock") {
+            requireOperationAuthorized("flash_frp")
             frpTargets.forEach { part ->
                 appendLog("Erasing FRP partition '${part.name}' on LUN ${part.lun}...")
                 firehose.eraseSectors(part.lun, part.firstLba, part.numSectors)
@@ -1931,6 +1962,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         runTask("Factory Reset (Wiping Userdata)") {
+            requireOperationAuthorized("factory_reset")
             targets.forEach { part ->
                 val sectorsToWipe = if (part.name.equals("userdata", true) && part.numSectors > 8192) 8192L else part.numSectors
                 appendLog("Formatting '${part.name}' (LUN ${part.lun})...")
@@ -1953,6 +1985,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runTask("Flashing Full XML Firmware") {
+            requireOperationAuthorized("flash_full")
             val treeDoc = DocumentFile.fromTreeUri(context, dirUri)
                 ?: throw IllegalStateException("Cannot access firmware folder")
             val fileMap = treeDoc.listFiles().associateBy { it.name.orEmpty() }
@@ -2393,6 +2426,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     /** "Restore Storage": formats the phone (userdata wipe) with AT commands while it is
      *  in MTP mode and reboots it, so userdata is re-created at the full original size. */
     fun atFormatDevice() = runTask("Format MTP") {
+        requireOperationAuthorized("factory_reset")
         val devices = MtpInfoReader.findModemDevices(context)
         if (devices.isEmpty()) {
             appendLog("ERROR: No device with a modem port found. Connect the phone by USB and select a mode that includes MODEM (*#0808#).")
@@ -2433,6 +2467,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun runChangeSerial() {
         runTask("Change Serial Number") {
+            requireOperationAuthorized("change_serial")
             appendLog("=== CHANGE SERIAL NUMBER ===")
 
             setTaskProgress(0.02f)
@@ -2552,6 +2587,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      */
     fun runChangeCsc() {
         runTask("Change Sales Code (CSC)") {
+            requireOperationAuthorized("change_csc")
             appendLog("=== CHANGE SALES CODE (CSC) ===")
 
             setTaskProgress(0.02f)
