@@ -104,7 +104,7 @@ fun AuthGate(
         // Root access and runtime hooking/injection tools (Frida/Xposed/etc.) are both
         // treated as tampering and hard-blocked, same as a bad signature. Debugger
         // detection is intentionally not checked here (product decision).
-        if (TamperGuard.hasRootIndicators() || TamperGuard.hasHookingFrameworkIndicators()) {
+        if (TamperGuard.hasRootIndicators() || TamperGuard.hasHookingFrameworkIndicators() || TamperGuard.hasEmulatorIndicators()) {
             tamperBlocked = true
             checking = false
             return
@@ -661,6 +661,45 @@ private fun ResetPasswordScreen(
     }
 }
 
+/** 0 (empty) to 5 (strong): length, case mix, digits, symbols. Purely a visual nudge for
+ *  the person creating an account -- the server is the real gate (it rejects anything
+ *  under 8 characters and known-weak/breached passwords regardless of what this shows). */
+private fun passwordStrengthScore(pw: String): Int {
+    if (pw.isEmpty()) return 0
+    var score = 0
+    if (pw.length >= 8) score++
+    if (pw.length >= 12) score++
+    if (pw.any { it.isDigit() }) score++
+    if (pw.any { it.isUpperCase() } && pw.any { it.isLowerCase() }) score++
+    if (pw.any { !it.isLetterOrDigit() }) score++
+    return score
+}
+
+@Composable
+private fun PasswordStrengthMeter(password: String) {
+    if (password.isEmpty()) return
+    val score = passwordStrengthScore(password)
+    val (label, color) = when {
+        score <= 1 -> "ضعيفة" to Yas.DangerText
+        score <= 3 -> "متوسطة" to Yas.WarningText
+        else -> "قوية" to Yas.Success
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            repeat(5) { i ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(if (i < score) color else Yas.Border)
+                )
+            }
+        }
+        Text("قوة كلمة المرور: $label", style = MaterialTheme.typography.bodySmall, color = Yas.Muted)
+    }
+}
+
 @Composable
 private fun LoginScreen(
     checking: Boolean,
@@ -755,6 +794,7 @@ private fun LoginScreen(
                     colors = fieldColors,
                     modifier = Modifier.fillMaxWidth()
                 )
+                if (registerMode) PasswordStrengthMeter(password)
             }
 
             if (!forgotMode && !registerMode) {

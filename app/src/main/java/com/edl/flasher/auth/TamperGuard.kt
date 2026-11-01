@@ -5,9 +5,26 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Debug
+import android.util.Base64
 import com.edl.flasher.BuildConfig
 import java.io.File
 import java.security.MessageDigest
+
+/**
+ * Keeps the root/hook-framework signature strings (su paths, frida-server paths, the
+ * Xposed bridge class name...) out of a plain `strings`/grep pass over the APK. This is
+ * NOT encryption and doesn't resist dynamic analysis (a debugger or Frida script reads
+ * the decoded value in memory just fine) — it only raises the cost of the cheapest,
+ * most common first step someone takes to locate and patch this exact check: grepping
+ * the dex/so files for readable indicator strings.
+ */
+private object Obf {
+    private const val KEY = 0x5A
+    fun d(encoded: String): String {
+        val x = Base64.decode(encoded, Base64.NO_WRAP)
+        return String(ByteArray(x.size) { (x[it].toInt() xor KEY).toByte() }, Charsets.UTF_8)
+    }
+}
 
 /**
  * Lightweight anti-tamper / anti-repackaging checks.
@@ -67,14 +84,15 @@ object TamperGuard {
     /** Cheap, non-exhaustive root signal. Not meant to be bulletproof, just raise the bar. */
     fun hasRootIndicators(): Boolean {
         val paths = arrayOf(
-            "/system/app/Superuser.apk", "/sbin/su", "/system/bin/su", "/system/xbin/su",
-            "/data/local/xbin/su", "/data/local/bin/su", "/system/sd/xbin/su",
-            "/system/bin/failsafe/su", "/data/local/su", "/su/bin/su"
-        )
+            "dSkjKS4/N3U7Kip1CS8qPygvKT8odDsqMQ==", "dSk4MzR1KS8=", "dSkjKS4/N3U4MzR1KS8=",
+            "dSkjKS4/N3UiODM0dSkv", "dT47Ljt1NjU5OzZ1IjgzNHUpLw==", "dT47Ljt1NjU5OzZ1ODM0dSkv",
+            "dSkjKS4/N3UpPnUiODM0dSkv", "dSkjKS4/N3U4MzR1PDszNik7PD91KS8=",
+            "dT47Ljt1NjU5OzZ1KS8=", "dSkvdTgzNHUpLw=="
+        ).map(Obf::d)
         if (paths.any { File(it).exists() }) return true
         var process: Process? = null
         return try {
-            process = Runtime.getRuntime().exec(arrayOf("which", "su"))
+            process = Runtime.getRuntime().exec(arrayOf(Obf.d("LTIzOTI="), Obf.d("KS8=")))
             process.inputStream.bufferedReader().use { it.readLine() != null }
         } catch (_: Exception) {
             false
@@ -94,7 +112,7 @@ object TamperGuard {
     fun hasHookingFrameworkIndicators(): Boolean {
         // Known Xposed/LSPosed bridge class, present in the classloader once hooked.
         try {
-            Class.forName("de.robv.android.xposed.XposedBridge")
+            Class.forName(Obf.d("Pj90KDU4LHQ7ND4oNTM+dCIqNSk/PnQCKjUpPz4YKDM+PT8="))
             return true
         } catch (_: ClassNotFoundException) {
             // expected on a clean device
@@ -104,21 +122,54 @@ object TamperGuard {
 
         // Frida's default on-device server / injected-agent artifacts.
         val suspiciousPaths = arrayOf(
-            "/data/local/tmp/frida-server", "/data/local/tmp/re.frida.server",
-            "/data/local/tmp/frida-agent-32.so", "/data/local/tmp/frida-agent-64.so"
-        )
+            "dT47Ljt1NjU5OzZ1LjcqdTwoMz47dyk/KCw/KA==", "dT47Ljt1NjU5OzZ1LjcqdSg/dDwoMz47dCk/KCw/KA==",
+            "dT47Ljt1NjU5OzZ1LjcqdTwoMz47dzs9PzQud2lodCk1", "dT47Ljt1NjU5OzZ1LjcqdTwoMz47dzs9PzQud2xudCk1"
+        ).map(Obf::d)
         if (suspiciousPaths.any { File(it).exists() }) return true
 
         // Loaded libraries mentioning known hooking frameworks in this process's own
         // memory map — catches injection even when no file was dropped on disk.
+        val needles = listOf("PCgzPjs=", "KS84KS4oOy4/", "Iio1KT8+").map(Obf::d)
         return try {
-            File("/proc/self/maps").readLines().any { line ->
+            File(Obf.d("dSooNTl1KT82PHU3Oyop")).readLines().any { line ->
                 val l = line.lowercase()
-                "frida" in l || "substrate" in l || "xposed" in l
+                needles.any { it in l }
             }
         } catch (_: Exception) {
             false
         }
+    }
+
+    /**
+     * Detects a common Android emulator/VM. Unlike root, this is safe to treat as hard
+     * evidence of tampering *for this specific app*: flashing a Qualcomm device needs a
+     * real device physically connected over USB/EDL, so there is no legitimate workflow
+     * where a technician runs this app inside an emulator. Automated cracking/analysis
+     * farms, on the other hand, run almost exclusively on emulators. Still non-exhaustive
+     * (a well-configured emulator can hide most of these), same caveat as the rest of
+     * this file.
+     */
+    fun hasEmulatorIndicators(): Boolean {
+        val fingerprint = Build.FINGERPRINT.lowercase()
+        val model = Build.MODEL.lowercase()
+        val manufacturer = Build.MANUFACTURER.lowercase()
+        val hardware = Build.HARDWARE.lowercase()
+        val product = Build.PRODUCT.lowercase()
+        val brand = Build.BRAND.lowercase()
+        val device = Build.DEVICE.lowercase()
+
+        val looksLikeEmulator =
+            fingerprint.startsWith("generic") || fingerprint.contains("vbox") ||
+            fingerprint.contains("test-keys") && (brand.startsWith("generic") && device.startsWith("generic")) ||
+            manufacturer.contains("genymotion") ||
+            model.contains("google_sdk") || model.contains("emulator") || model.contains("android sdk built for") ||
+            hardware.contains("goldfish") || hardware.contains("ranchu") || hardware.contains("vbox86") ||
+            product.contains("sdk_gphone") || product.contains("vbox86p") || product.endsWith("_sdk")
+
+        if (looksLikeEmulator) return true
+
+        val qemuArtifacts = arrayOf("/dev/qemu_pipe", "/dev/socket/qemud", "/system/lib/libc_malloc_debug_qemu.so")
+        return qemuArtifacts.any { File(it).exists() }
     }
 
     /** Detects an APK installed under a different applicationId than the one it was built for
