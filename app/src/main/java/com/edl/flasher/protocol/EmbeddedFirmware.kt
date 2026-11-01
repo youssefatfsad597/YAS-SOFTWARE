@@ -46,7 +46,7 @@ object EmbeddedFirmware {
         }.getOrDefault(-1L)
 
     fun openStream(context: Context, name: String): InputStream =
-        FirmwareCipher.decryptingStream(context.assets.open(path(name)))
+        FirmwareCipher.decryptingStream(context, context.assets.open(path(name)))
 
     fun readAllBytes(context: Context, name: String): ByteArray =
         openStream(context, name).use { it.readBytes() }
