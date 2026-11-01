@@ -3,6 +3,9 @@ package com.edl.flasher.protocol
 import java.io.IOException
 import java.io.InputStream
 import java.nio.charset.Charset
+import java.security.MessageDigest
+import java.util.Locale
+import kotlin.math.min
 
 /**
  * Reads a standard POSIX/GNU .tar archive (such as Samsung's userdata.tar, or
@@ -37,28 +40,137 @@ object OdinTarFlasher {
             "capacity. Flashing it would leave most of the partition unusable."
     }
 
-    /** One component found inside a firmware package. */
-    data class PackageEntry(val name: String, val label: String, val size: Long)
+    /**
+     * One component found inside a firmware package, annotated against this device's own PIT
+     * table (when one is supplied) exactly the way real Odin resolves a destination before it
+     * will show the entry as flashable: by exact (case-sensitive) file name match.
+     *  - [pitPartitionId] / [pitPartitionName]: the matched PIT entry, or null if this file
+     *    doesn't correspond to anything on this device -- real Odin silently ignores such files.
+     *  - [pitPartitionSizeBytes]: the device's own declared size for that partition (0 if unknown).
+     *  - [sizeMismatch]: true when the image is larger than the partition declares, or (for
+     *    userdata) suspiciously smaller than it -- the same class of problem Odin's bootloader
+     *    would reject with ack=-124 "image is too big for the partition".
+     */
+    data class PackageEntry(
+        val name: String,
+        val label: String,
+        val size: Long,
+        val pitPartitionId: Int? = null,
+        val pitPartitionName: String? = null,
+        val pitPartitionSizeBytes: Long = 0L,
+        val sizeMismatch: Boolean = false
+    )
 
     /**
      * Reads only the tar headers of [tarInput] (skipping data with seeks where possible) and returns
-     * every regular file inside, so the UI can show the user what the package contains.
+     * every regular file inside, so the UI can show the user what the package contains. When [pit]
+     * is supplied, each entry is cross-matched against it the same way the flashing pass does, so
+     * the file-selection UI can show, per file, exactly which PIT partition it will land on.
      * A bare image (not a tar) is handled by the caller.
      */
     @Throws(IOException::class)
-    fun listEntries(tarInput: InputStream): List<PackageEntry> {
+    fun listEntries(tarInput: InputStream, pit: OdinPitTable? = null): List<PackageEntry> {
         val out = mutableListOf<PackageEntry>()
         while (true) {
             val header = readTarHeader(tarInput) ?: break
             if (header.typeFlag == '0' || header.typeFlag == '\u0000') {
                 val base = header.name.substringAfterLast('/')
                 if (base.isNotBlank()) {
-                    out.add(PackageEntry(header.name, displayLabel(base), header.size))
+                    val part = pit?.findByFileName(base)
+                    val partBytes = part?.partitionSizeBytes ?: 0L
+                    val mismatch = part != null && partBytes > 0L && (
+                        header.size > partBytes ||
+                            undersizedUserdataReason(displayLabel(base), header.size, part) != null
+                        )
+                    out.add(
+                        PackageEntry(
+                            name = header.name,
+                            label = displayLabel(base),
+                            size = header.size,
+                            pitPartitionId = part?.id,
+                            pitPartitionName = part?.name?.ifBlank { part.fileName },
+                            pitPartitionSizeBytes = partBytes,
+                            sizeMismatch = mismatch
+                        )
+                    )
                 }
             }
             fastSkip(tarInput, header.size + (512 - (header.size % 512)) % 512)
         }
         return out
+    }
+
+    /** Result of checking a `.tar.md5` package's appended checksum line against its own content. */
+    data class Md5CheckResult(
+        /** False for a plain `.tar` with no trailer -- there is nothing to verify. */
+        val hasTrailer: Boolean,
+        val passed: Boolean,
+        val expected: String? = null,
+        val computed: String? = null
+    )
+
+    // No anchor at the start: the tar's own end-of-archive marker (two 512-byte zero blocks)
+    // sits immediately before this line with no newline separator, so the match is found by
+    // scanning for it, not by splitting on '\n'.
+    private val MD5_TRAILER_LINE = Regex("""[0-9a-fA-F]{32}[ \t]{1,2}\S[^\r\n]*$""")
+
+    /**
+     * Re-implements the checksum pass real Odin always runs on a `.tar.md5` package before it
+     * will flash it ("Checking MD5 finished Sucessfully.." / a hard-abort "Odin checksum fails."
+     * on mismatch). Samsung builds these files as a plain .tar with one text line appended after
+     * the tar data: the exact output of `md5sum package.tar` ("<32 hex chars>  package.tar\n").
+     * MD5 is computed streaming, over the tar portion only -- the trailer line itself is excluded
+     * by holding back a small tail buffer until we can see whether it's the trailer or still data.
+     */
+    @Throws(IOException::class)
+    fun verifyPackageMd5(input: InputStream): Md5CheckResult {
+        val digest = MessageDigest.getInstance("MD5")
+        val holdBack = 512 // generous for "<32 hex>  <filename>\n" even with a long file name
+        val tail = ByteArray(holdBack)
+        var tailLen = 0
+        val chunk = ByteArray(65536)
+        while (true) {
+            val r = input.read(chunk)
+            if (r < 0) break
+            var o = 0
+            while (o < r) {
+                val room = holdBack - tailLen
+                if (room > 0) {
+                    val take = min(room, r - o)
+                    System.arraycopy(chunk, o, tail, tailLen, take)
+                    tailLen += take
+                    o += take
+                } else {
+                    digest.update(tail, 0, 1)
+                    System.arraycopy(tail, 1, tail, 0, holdBack - 1)
+                    tail[holdBack - 1] = chunk[o]
+                    o++
+                }
+            }
+        }
+        // ISO-8859-1 maps every byte to exactly one char (no multi-byte decoding, no lossy
+        // replacement), so a match's character offset is also its exact byte offset in [tail].
+        val tailText = String(tail, 0, tailLen, Charsets.ISO_8859_1)
+        val trimmed = tailText.trimEnd('\n', '\r')
+        val match = MD5_TRAILER_LINE.find(trimmed)
+        if (match == null) {
+            // No recognizable trailer (a plain .tar): everything held back is tar data.
+            digest.update(tail, 0, tailLen)
+            return Md5CheckResult(hasTrailer = false, passed = true, computed = hex(digest.digest()))
+        }
+        val expected = match.value.substring(0, 32).lowercase(Locale.US)
+        val trailerStartInTail = match.range.first
+        if (trailerStartInTail > 0) digest.update(tail, 0, trailerStartInTail)
+        val computed = hex(digest.digest())
+        return Md5CheckResult(hasTrailer = true, passed = computed.equals(expected, ignoreCase = true), expected = expected, computed = computed)
+    }
+
+    private fun hex(bytes: ByteArray): String = bytes.joinToString("") { "%02x".format(it) }
+
+    /** "12.3 MB (12,912,640 bytes)" -- same two numbers Odin's own log lines show. */
+    fun formatBytes(n: Long): String {
+        val mb = n / (1024.0 * 1024.0)
+        return "%.1f MB (%,d bytes)".format(Locale.US, mb, n)
     }
 
     private fun fastSkip(input: InputStream, count: Long) {
@@ -136,17 +248,17 @@ object OdinTarFlasher {
             val part = pit.findByFileName(baseName)
 
             if (part == null) {
-                logger("Skipping '${header.name}': no matching PIT entry on this device.")
+                logger("<ODIN> Skip '${header.name}': no PIT entry on this device matches that file name.")
                 skipEntry(tarInput, header.size)
                 continue
             }
             if (header.size <= 0L) {
-                logger("Skipping '$label': empty entry.")
+                logger("<ODIN> Skip '$label': empty entry (0 bytes).")
                 skipEntry(tarInput, header.size)
                 continue
             }
             if (!shouldFlash(label)) {
-                logger("Skipping '$label' (not selected).")
+                logger("<ODIN> Skip '$label': not ticked in the component list.")
                 skipEntry(tarInput, header.size)
                 continue
             }
@@ -165,7 +277,11 @@ object OdinTarFlasher {
                 continue
             }
 
-            logger("Found '${header.name}' -> flashing PIT partition '${part.name.ifBlank { part.fileName }}' (id=${part.id}, ${header.size} bytes)")
+            logger(
+                "<ODIN> NAND Write Start.. '${part.name.ifBlank { part.fileName }}' " +
+                    "[PIT id=${part.id} dev=${part.devType} bin=${part.binType}] " +
+                    "from '${header.name}' (${formatBytes(header.size)})"
+            )
             val bounded = BoundedInputStream(tarInput, header.size)
             val quickFormat = allowUndersizedUserdata && undersizedReason != null
             val isUserdata = label.equals("userdata", ignoreCase = true)
@@ -211,6 +327,8 @@ object OdinTarFlasher {
             }
             bounded.drainRemaining()
             skipPaddingOnly(tarInput, header.size)
+            val tookMs = (System.nanoTime() - startNs) / 1_000_000
+            logger("<ODIN> RQT_CLOSE '${label}' -> RES OK (${formatBytes(header.size)} in ${tookMs}ms)")
             flashed.add(label)
         }
         return flashed

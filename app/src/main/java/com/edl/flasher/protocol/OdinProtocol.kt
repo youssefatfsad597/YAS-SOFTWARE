@@ -254,12 +254,12 @@ class OdinProtocol(
         transport.readFully(resp, timeoutMs = 10000)
         val got = String(resp, Charsets.US_ASCII)
         if (got != "LOKE") throw IOException("ODIN handshake failed (expected 'LOKE', got '$got')")
-        logger("ODIN handshake OK (LOKE).")
+        logger("<ODIN> Added!! handshake OK (ODIN/LOKE).")
+        logger("<ODIN> Initialization..")
 
         val ackWord = rpc(OdinWire.CMD_INIT, OdinWire.INIT_TARGET, intArrayOf(5), allowNegativeAck = true)
         val protoRaw = ((ackWord.toLong() and 0xFFFFFFFFL) ushr 16).toInt() and 0xFFFF
         val protoVersion = if (protoRaw == 0) 1 else protoRaw
-        logger("ODIN protocol version: $protoVersion")
 
         packetSize = if (protoVersion >= 2) {
             val pkt = (1 * 1024 * 1024)
@@ -268,8 +268,9 @@ class OdinProtocol(
         } else {
             128 * 1024
         }
+        logger("<ODIN> protocol v$protoVersion negotiated, packet size ${packetSize / 1024} KiB.")
 
-        logger("Downloading PIT table...")
+        logger("<ODIN> Get PIT for mapping..")
         val pitSize = rpc(OdinWire.CMD_PIT, OdinWire.PIT_GET, allowNegativeAck = true)
         if (pitSize <= 0) throw IOException("Device returned an invalid PIT size ($pitSize)")
 
@@ -287,7 +288,7 @@ class OdinProtocol(
         rpc(OdinWire.CMD_PIT, OdinWire.PIT_COMPLETE)
 
         val table = OdinWire.parsePit(pitBytes)
-        logger("PIT downloaded: ${table.partitions.size} partitions (cpu_bl_id='${table.cpuBlId}').")
+        logger("<ODIN> PIT OK: ${table.partitions.size} partitions mapped (cpu_bl_id='${table.cpuBlId}').")
         pitTable = table
         return table
     }
@@ -403,13 +404,13 @@ class OdinProtocol(
     @Throws(IOException::class)
     fun shutdown(reboot: Boolean) {
         rpc(OdinWire.CMD_CLOSE, OdinWire.CLOSE_END)
-        logger("ODIN session closed.")
+        logger("<ODIN> Remove!! session closed.")
         if (reboot) {
             runCatching {
                 sendRequest(OdinWire.CMD_CLOSE, OdinWire.CLOSE_REBOOT)
                 transport.readFully(ByteArray(OdinWire.RESPONSE_SIZE), timeoutMs = 500)
             }
-            logger("Reboot command sent.")
+            logger("<ODIN> Reboot command sent.")
         }
     }
 }
