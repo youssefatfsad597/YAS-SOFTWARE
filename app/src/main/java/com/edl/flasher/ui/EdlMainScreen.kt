@@ -712,7 +712,7 @@ fun EdlMainScreen(
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
     onClearLoader: (() -> Unit)? = null,
-    onSetReadGptBuiltInLoader: (Boolean) -> Unit = {},
+    onSetGptLoaderChoice: (GptLoaderChoice) -> Unit = {},
     onClearRawProgram: (() -> Unit)? = null,
     onClearPatchXml: (() -> Unit)? = null,
     onClearFirmwareDir: (() -> Unit)? = null,
@@ -793,7 +793,7 @@ fun EdlMainScreen(
                 onProbeChipInfo = onProbeChipInfo,
                 onPickLoader = onPickLoader,
                 onClearLoader = onClearLoader,
-                onSetBuiltInLoader = onSetReadGptBuiltInLoader,
+                onSetLoaderChoice = onSetGptLoaderChoice,
                 onStorageSelected = onStorageSelected,
                 onRunSaharaAndFirehose = onRunSaharaAndFirehose,
                 onReadGpt = onReadGpt,
@@ -1705,7 +1705,7 @@ private fun ReadGptTab(
     onProbeChipInfo: () -> Unit,
     onPickLoader: () -> Unit,
     onClearLoader: (() -> Unit)?,
-    onSetBuiltInLoader: (Boolean) -> Unit,
+    onSetLoaderChoice: (GptLoaderChoice) -> Unit,
     onStorageSelected: (StorageType) -> Unit,
     onRunSaharaAndFirehose: () -> Unit,
     onReadGpt: () -> Unit,
@@ -1727,11 +1727,17 @@ private fun ReadGptTab(
                     Column(modifier = m, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         SectionLabel("PROGRAMMER / LOADER")
                         Segmented(
-                            options = listOf(true, false),
-                            selected = state.readGptBuiltInLoader,
-                            label = { builtIn -> if (builtIn) "Built-in" else "Manual" },
+                            options = listOf(GptLoaderChoice.X216B, GptLoaderChoice.T505N, GptLoaderChoice.MANUAL),
+                            selected = state.gptLoaderChoice,
+                            label = { choice ->
+                                when (choice) {
+                                    GptLoaderChoice.X216B -> "X216B"
+                                    GptLoaderChoice.T505N -> "T505N"
+                                    GptLoaderChoice.MANUAL -> "Manual"
+                                }
+                            },
                             enabled = !state.isBusy && !state.firehoseReady,
-                            onSelect = onSetBuiltInLoader
+                            onSelect = onSetLoaderChoice
                         )
                         Row(
                             modifier = Modifier
@@ -1742,31 +1748,38 @@ private fun ReadGptTab(
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(10.dp)
                         ) {
-                            if (state.readGptBuiltInLoader) {
-                                YText("X216B.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-                                StatusBadge(text = "BUILT-IN", color = Yas.Success)
-                            } else {
-                                val picked = state.loaderUri != null
-                                YText(
-                                    if (picked) state.loaderName else "No loader selected",
-                                    size = 13.sp, mono = true, weight = FontWeight.SemiBold,
-                                    modifier = Modifier.weight(1f)
-                                )
-                                YASButton(
-                                    if (picked) "Change" else "Choose loader",
-                                    onPickLoader,
-                                    style = BtnStyle.Secondary,
-                                    compact = true,
-                                    enabled = !state.isBusy && !state.firehoseReady
-                                )
-                                if (picked && onClearLoader != null) {
+                            when (state.gptLoaderChoice) {
+                                GptLoaderChoice.X216B -> {
+                                    YText("X216B.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                    StatusBadge(text = "BUILT-IN \u00B7 UFS", color = Yas.Success)
+                                }
+                                GptLoaderChoice.T505N -> {
+                                    YText("T505N.elf", size = 13.sp, mono = true, weight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                                    StatusBadge(text = "BUILT-IN \u00B7 eMMC", color = Yas.Success)
+                                }
+                                GptLoaderChoice.MANUAL -> {
+                                    val picked = state.loaderUri != null
+                                    YText(
+                                        if (picked) state.loaderName else "No loader selected",
+                                        size = 13.sp, mono = true, weight = FontWeight.SemiBold,
+                                        modifier = Modifier.weight(1f)
+                                    )
                                     YASButton(
-                                        "Clear",
-                                        onClearLoader,
+                                        if (picked) "Change" else "Choose loader",
+                                        onPickLoader,
                                         style = BtnStyle.Secondary,
                                         compact = true,
                                         enabled = !state.isBusy && !state.firehoseReady
                                     )
+                                    if (picked && onClearLoader != null) {
+                                        YASButton(
+                                            "Clear",
+                                            onClearLoader,
+                                            style = BtnStyle.Secondary,
+                                            compact = true,
+                                            enabled = !state.isBusy && !state.firehoseReady
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -1815,7 +1828,7 @@ private fun ReadGptTab(
                     onRunSaharaAndFirehose,
                     style = BtnStyle.Primary,
                     enabled = state.usbConnected && !state.isBusy &&
-                        (state.readGptBuiltInLoader || state.loaderUri != null || state.firehoseReady)
+                        (state.gptLoaderChoice != GptLoaderChoice.MANUAL || state.loaderUri != null || state.firehoseReady)
                 )
                 YASButton(
                     "Read GPT (${state.partitions.size})",
@@ -1830,7 +1843,7 @@ private fun ReadGptTab(
                 )
             }
             Hint("EDL 9008: Read HWID / PK_HASH reads the chip ID. Upload Loader + Read GPT starts Firehose and reads partitions. Read GPT re-reads them.")
-            Hint("T505N also has a built-in loader (its own Format + FRP / Erase FRP buttons load it automatically) and its memory is eMMC, not UFS -- pick \"eMMC\" above if you upload its loader manually from here.")
+            Hint("Pick \"T505N\" above for the SM-T505N: its own Firehose loader is built in (same as the T505N tab's one-tap buttons) and the storage selector switches to eMMC automatically, since the T505N is eMMC, not UFS like X216B.")
         }
 
         PartitionTable(
@@ -3255,20 +3268,20 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
         title = "تبويب Read GPT",
         body = """
 ## اختيار اللودر
-• Built-in X216B: بيستخدم X216B.elf المدمج تلقائيًا.
-• Manual: تختار ملف .elf أو .mbn بنفسك، استخدمه لو عندك لودر تاني أنسب لجهازك.
-• T505N: عنده لودر مدمج هو كمان (T505N.elf)، بس مش من هنا -- زراري "Format + FRP" و"Erase FRP" في تبويب T505N بترفعه لوحدها تلقائيًا وتظبط نوع التخزين على eMMC قبل ما تقرا الـ GPT.
+• X216B: بيستخدم X216B.elf المدمج تلقائيًا (التخزين UFS).
+• T505N: بيستخدم T505N.elf المدمج تلقائيًا، وده نفس اللودر اللي زراري "Format + FRP" و"Erase FRP" في تبويب T505N بيرفعوه -- لكن هنا تقدر تختاره من Read GPT نفسه عشان تقرا الـ GPT بس من غير ما تكتب حاجة. اختياره بيظبط نوع التخزين على eMMC تلقائيًا (التخزين الحقيقي للـ T505N).
+• Manual: تختار ملف .elf أو .mbn بنفسك، استخدمه لو عندك لودر تاني أنسب لجهازك (لازم تظبط نوع التخزين يدويًا في الحالة دي).
 
 ## اختيار نوع التخزين
 حدده قبل القراءة عشان حجم الـ sector يتظبط:
-• UFS = 4096 بايت.
-• eMMC = 512 بايت. (ده نوع تخزين الـ T505N -- لو هترفع لودره من هنا يدويًا، اختار eMMC.)
+• UFS = 4096 بايت. (X216B.)
+• eMMC = 512 بايت. (T505N -- بيتظبط لوحده لو اخترت لودر T505N.)
 
 ## "Read HWID / PK_HASH"
 بيقرا هوية الشريحة. بيشتغل أول ما الجهاز يبقى في EDL (9008)، من غير ما ترفع اللودر.
 
 ## "Upload Loader + Read GPT"
-بيشغّل اللودر اللي حددته ويقرا جدول الـ partitions. ده أول زرار تضغطه بعد دخول EDL وبعد ما تحدد اللودر (Built-in لو X216B، أو Manual لو غيره).
+بيشغّل اللودر اللي حددته ويقرا جدول الـ partitions. ده أول زرار تضغطه بعد دخول EDL وبعد ما تحدد اللودر (X216B أو T505N built-in، أو Manual لو غيره).
 
 ## "Read GPT"
 بيعيد قراءة جدول الـ partitions بس، بعد ما تكون ضغطت "Upload Loader + Read GPT" مرة (مفيش داعي تعيدها).
@@ -3291,7 +3304,7 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 
 ## الخطوات
 1. ادخل EDL (اقرا قسم "EDL" فوق).
-2. في تبويب Read GPT حدد اللودر: "Built-in X216B" لو X216B، أو "Manual" واختار الملف لو غيره، وبعدها اضغط "Upload Loader + Read GPT".
+2. في تبويب Read GPT حدد اللودر: "X216B" أو "T505N" (الاتنين built-in)، أو "Manual" واختار الملف لو غيره، وبعدها اضغط "Upload Loader + Read GPT".
 3. ارجع لتبويب XML Flasher واختار RAWPROGRAM XML.
 4. اختار PATCH XML لو الفيرموير فيه واحد.
 5. اختار FIRMWARE FOLDER.

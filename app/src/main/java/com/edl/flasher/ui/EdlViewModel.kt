@@ -25,6 +25,10 @@ import java.io.InputStream
 import java.text.SimpleDateFormat
 import java.util.*
 
+/** Read GPT tab: which Firehose loader to upload.
+ *  X216B / T505N = bundled in the APK (no file picker needed); MANUAL = user-picked file. */
+enum class GptLoaderChoice { X216B, T505N, MANUAL }
+
 data class EdlUiState(
     val usbConnected: Boolean = false,
     val deviceDescription: String = "No 9008 Device Detected",
@@ -44,8 +48,8 @@ data class EdlUiState(
     val t509FirmwareStatus: String = "Checking embedded assets...",
     val t509BromConnected: Boolean = false,
     val loaderUri: Uri? = null,
-    // Read GPT tab: true = X216B.elf bundled in the APK, false = loader picked by the user.
-    val readGptBuiltInLoader: Boolean = true,
+    // Read GPT tab: which built-in loader (or manual file) to upload.
+    val gptLoaderChoice: GptLoaderChoice = GptLoaderChoice.X216B,
     val loaderName: String = "X216B.elf (built-in)",
     val frpFileUri: Uri? = null,
     val frpFileName: String = "FRP Image: Not Selected",
@@ -398,9 +402,25 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(selectedPartKeys = emptySet()) }
     }
 
-    fun setReadGptBuiltInLoader(builtIn: Boolean) {
-        _uiState.update { it.copy(readGptBuiltInLoader = builtIn) }
-        appendLog(if (builtIn) "Read GPT loader: built-in (X216B.elf)." else "Read GPT loader: manual (choose a file).")
+    fun setGptLoaderChoice(choice: GptLoaderChoice) {
+        _uiState.update { state ->
+            // T505N's memory is eMMC (not UFS like X216B); switch the storage selector for them
+            // automatically, same as the T505N tab's one-tap buttons, unless Firehose is already
+            // up (changing storage mid-session needs a replug, so leave it alone then).
+            val storage = if (choice == GptLoaderChoice.T505N && !state.firehoseReady) {
+                StorageType.EMMC
+            } else {
+                state.selectedStorage
+            }
+            state.copy(gptLoaderChoice = choice, selectedStorage = storage)
+        }
+        appendLog(
+            when (choice) {
+                GptLoaderChoice.X216B -> "Read GPT loader: built-in X216B.elf."
+                GptLoaderChoice.T505N -> "Read GPT loader: built-in T505N.elf (storage set to eMMC)."
+                GptLoaderChoice.MANUAL -> "Read GPT loader: manual (choose a file)."
+            }
+        )
     }
 
     fun clearLoader() {
@@ -411,7 +431,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     fun setLoaderUri(uri: Uri) {
         val doc = DocumentFile.fromSingleUri(context, uri)
         val name = doc?.name ?: uri.lastPathSegment.orEmpty()
-        _uiState.update { it.copy(loaderUri = uri, loaderName = name, readGptBuiltInLoader = false) }
+        _uiState.update { it.copy(loaderUri = uri, loaderName = name, gptLoaderChoice = GptLoaderChoice.MANUAL) }
         appendLog("Custom loader selected: $name")
     }
 
@@ -727,26 +747,33 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
         val st = _uiState.value
         if (!st.firehoseReady) {
-            if (st.readGptBuiltInLoader) {
-                if (!EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
+            when (st.gptLoaderChoice) {
+                GptLoaderChoice.X216B -> if (!EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
                     appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
                     return
                 }
-            } else if (st.loaderUri == null) {
-                appendLog("ERROR: Manual loader mode is selected but no loader file was chosen. Tap 'Choose loader' first.")
-                return
+                GptLoaderChoice.T505N -> if (!T505NFirmware.exists(context, T505NFirmware.LOADER)) {
+                    appendLog("ERROR: Built-in T505N loader is missing from the app. Rebuild with firmware/t505n/T505N.elf.")
+                    return
+                }
+                GptLoaderChoice.MANUAL -> if (st.loaderUri == null) {
+                    appendLog("ERROR: Manual loader mode is selected but no loader file was chosen. Tap 'Choose loader' first.")
+                    return
+                }
             }
         }
 
         runTask("Booting Firehose & Reading GPT") {
             if (!_uiState.value.firehoseReady) {
                 val cur = _uiState.value
-                if (cur.readGptBuiltInLoader) {
-                    bootFirehoseFromEmbeddedLoader()
-                } else {
-                    val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
-                    appendLog("Uploading manual loader (${cur.loaderName})...")
-                    bootFirehoseInternal(uri)
+                when (cur.gptLoaderChoice) {
+                    GptLoaderChoice.X216B -> bootFirehoseFromEmbeddedLoader()
+                    GptLoaderChoice.T505N -> bootFirehoseFromEmbeddedT505NLoader()
+                    GptLoaderChoice.MANUAL -> {
+                        val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
+                        appendLog("Uploading manual loader (${cur.loaderName})...")
+                        bootFirehoseInternal(uri)
+                    }
                 }
             }
             if (_uiState.value.firehoseReady && autoReadGpt) {
