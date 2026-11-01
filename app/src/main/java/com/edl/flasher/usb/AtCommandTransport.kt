@@ -68,6 +68,17 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
         // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
         const val SERIAL_STEP_DELAY_MS = 1200L
+        // CSC (Sales Code) writes are a handful of lightweight AT+PRECONFG/activation
+        // commands with no flash-heavy work behind them, so they tolerate a shorter
+        // inter-command gap than the serial sequence. 500 ms has been reliable in testing;
+        // lower it further only if your modem consistently keeps up.
+        const val CSC_STEP_DELAY_MS = 500L
+        // Wait before a CSC retry attempt (separate from the serial retry delay above).
+        const val CSC_RETRY_DELAY_MS = 500L
+        // Wait before a serial-write retry attempt. Kept shorter than SERIAL_STEP_DELAY_MS
+        // (which paces the AT commands within one attempt, and stays >= 1000 ms per the
+        // note above) since this is just the gap between whole attempts.
+        const val SERIAL_RETRY_DELAY_MS = 500L
         private const val READ_BUF = 256
     }
 
@@ -505,8 +516,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
         for (attempt in 0 until maxAttempts) {
             if (attempt > 0) {
-                log("Retry $attempt of $maxAttempts -- waiting 1 s before next attempt...")
-                kotlinx.coroutines.delay(1_000)
+                log("Retry $attempt of $maxAttempts -- waiting ${SERIAL_RETRY_DELAY_MS / 1000.0}s before next attempt...")
+                kotlinx.coroutines.delay(SERIAL_RETRY_DELAY_MS)
             }
 
             // ---- Full 7-step service init sequence (from MA UNLOCKER) ----
@@ -733,8 +744,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
         repeat(maxAttempts) { attempt ->
             if (attempt > 0) {
-                log("CSC retry $attempt of $maxAttempts -- waiting 1 s...")
-                kotlinx.coroutines.delay(1_000)
+                log("CSC retry $attempt of $maxAttempts -- waiting ${CSC_RETRY_DELAY_MS / 1000.0}s...")
+                kotlinx.coroutines.delay(CSC_RETRY_DELAY_MS)
             }
 
             val cmds = listOf(
@@ -750,7 +761,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val sequenceOk = runTimedSequenceWithProgress(
                 device = device,
                 commands = cmds,
-                delayMs = SERIAL_STEP_DELAY_MS,
+                delayMs = CSC_STEP_DELAY_MS,
                 log = log,
                 progressStart = 0.1f,
                 progressEnd = if (attempt < maxAttempts - 1) 0.7f else 0.9f,
