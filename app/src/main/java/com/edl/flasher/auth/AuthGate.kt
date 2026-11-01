@@ -96,7 +96,17 @@ fun AuthGate(
 
     fun verify() {
         // Refuse to run against a re-signed/repackaged build or a mismatched applicationId.
-        if (!TamperGuard.verifySigningCertificate(context) || !TamperGuard.applicationIdMatches(context)) {
+        val sigOk = TamperGuard.verifySigningCertificate(context)
+        val appIdOk = TamperGuard.applicationIdMatches(context)
+        if (!sigOk || !appIdOk) {
+            // DIAGNOSTIC ONLY — does not change any pass/fail outcome, just tells you
+            // WHICH of the two checks actually failed on this device. Pull it with
+            // `adb logcat -s YasTamperGuard`. Remove this block once diagnosed.
+            android.util.Log.w(
+                "YasTamperGuard",
+                "blocked: signatureOk=$sigOk applicationIdOk=$appIdOk " +
+                    "installedPkg=${context.packageName} expectedPkg=${com.edl.flasher.BuildConfig.APPLICATION_ID}"
+            )
             tamperBlocked = true
             checking = false
             return
@@ -104,7 +114,16 @@ fun AuthGate(
         // Root access and runtime hooking/injection tools (Frida/Xposed/etc.) are both
         // treated as tampering and hard-blocked, same as a bad signature. Debugger
         // detection is intentionally not checked here (product decision).
-        if (TamperGuard.hasRootIndicators() || TamperGuard.hasHookingFrameworkIndicators() || TamperGuard.hasEmulatorIndicators()) {
+        val rootHit = TamperGuard.hasRootIndicators()
+        val hookHit = TamperGuard.hasHookingFrameworkIndicators()
+        val emuHit = TamperGuard.hasEmulatorIndicators()
+        if (rootHit || hookHit || emuHit) {
+            // Same deal: diagnostic-only logging, no behavior change.
+            android.util.Log.w(
+                "YasTamperGuard",
+                "blocked: root=$rootHit hooking=$hookHit emulator=$emuHit " +
+                    "model=${android.os.Build.MODEL} fingerprint=${android.os.Build.FINGERPRINT}"
+            )
             tamperBlocked = true
             checking = false
             return

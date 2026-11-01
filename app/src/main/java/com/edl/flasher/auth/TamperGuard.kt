@@ -59,8 +59,10 @@ object TamperGuard {
         }
     }
 
+    /** Exposed (not private) so FirmwareCipher can bind the firmware decryption key to the
+     *  real, currently-running signing certificate -- see FirmwareCipher.kt header comment. */
     @SuppressLint("PackageManagerGetSignatures")
-    private fun currentCertSha256(context: Context): String? {
+    fun currentCertSha256(context: Context): String? {
         val pm = context.packageManager
         val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             val info = pm.getPackageInfo(context.packageName, PackageManager.GET_SIGNING_CERTIFICATES)
@@ -172,7 +174,16 @@ object TamperGuard {
         return qemuArtifacts.any { File(it).exists() }
     }
 
+    /** The real applicationId, written here as a literal on purpose -- NOT read from
+     *  BuildConfig.APPLICATION_ID. A rebuilt/repackaged APK with a different applicationId
+     *  carries its OWN BuildConfig generated for that new id, so comparing against
+     *  BuildConfig would make this check pass trivially for exactly the case it exists to
+     *  catch. Comparing against a hardcoded literal instead means a renamed repackage has
+     *  to find and edit this exact line too, not just change the manifest/gradle id.
+     *  Still client-side and still patchable by someone who finds this -- see class doc. */
+    private const val EXPECTED_APPLICATION_ID = "com.yas.flashedl"
+
     /** Detects an APK installed under a different applicationId than the one it was built for
      *  (a common trick: rename the package to dodge a device/signature-based ban list). */
-    fun applicationIdMatches(context: Context): Boolean = context.packageName == BuildConfig.APPLICATION_ID
+    fun applicationIdMatches(context: Context): Boolean = context.packageName == EXPECTED_APPLICATION_ID
 }
