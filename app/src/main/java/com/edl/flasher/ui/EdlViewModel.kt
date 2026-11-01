@@ -13,6 +13,7 @@ import com.edl.flasher.usb.MtpDeviceInfoReader
 import com.edl.flasher.usb.UsbAccessoryPopup
 import com.edl.flasher.usb.AtCommandTransport
 import com.edl.flasher.usb.EdlUsbTransport
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -28,6 +29,18 @@ import java.util.*
 /** Read GPT tab: which Firehose loader to upload.
  *  X216B / T505N = bundled in the APK (no file picker needed); MANUAL = user-picked file. */
 enum class GptLoaderChoice { X216B, T505N, MANUAL }
+
+/** A value the running task needs from the user mid-operation (e.g. the new serial/CSC to
+ *  write, once the device's current info has already been read in the background). The UI
+ *  shows this as a dialog whenever it is non-null, independent of [EdlUiState.isBusy] --
+ *  the task is suspended on it and will not resume until [EdlViewModel.submitPromptInput]
+ *  or [EdlViewModel.cancelPrompt] is called. */
+data class PromptRequest(
+    val id: String,
+    val title: String,
+    val message: String,
+    val placeholder: String
+)
 
 data class EdlUiState(
     val usbConnected: Boolean = false,
@@ -90,7 +103,12 @@ data class EdlUiState(
     // Checksum pass real Odin always runs on a .tar.md5 before flashing it (slot -> result).
     // Absent while the check is still running; present once it finishes.
     val odinMd5: Map<String, OdinTarFlasher.Md5CheckResult> = emptyMap(),
+    // Slots whose package is still being scanned (header listing + MD5) in the background.
+    val odinScanning: Set<String> = emptySet(),
     val odinAutoReboot: Boolean = true,
+    // Non-null while a running task is waiting on a value only the user can supply
+    // (e.g. Change Serial's new SN, asked for mid-task after the current one was read).
+    val pendingPrompt: PromptRequest? = null,
     // Some T505N userdata packages contain extra system images.  Keep the
     // safe default enabled so only userdata is sent from that package.
     val skipSystemFilesInUserdataTar: Boolean = true,
@@ -110,6 +128,30 @@ data class EdlUiState(
     val transferSpeedMbps: Double = 0.0,
     val logs: List<String> = listOf("YAS SOFTWARE v4.0")
 )
+
+/**
+ * Wraps a stream so every read throws once [isStale] turns true. A plain blocking
+ * `InputStream.read()` loop (tar header scan, full-file MD5 digest) has no coroutine
+ * suspension point, so `Job.cancel()` alone does NOT stop it -- the read keeps running to
+ * completion regardless. This is what actually stops it: if the user re-picks a file for the
+ * same slot while a previous multi-GB scan of the old file is still in flight, the next chunk
+ * read of the stale scan throws immediately instead of continuing to hammer storage I/O in the
+ * background alongside the new one. Without this, repeatedly picking/re-picking large Odin
+ * packages stacks up concurrent full-file reads that can starve the app badly enough for it to
+ * be killed -- which is what looked like the app randomly exiting.
+ */
+private class CancellableInputStream(
+    private val delegate: InputStream,
+    private val isStale: () -> Boolean
+) : InputStream() {
+    private fun checkStale() {
+        if (isStale()) throw IOException("Scan superseded by a newer file pick for this slot.")
+    }
+    override fun read(): Int { checkStale(); return delegate.read() }
+    override fun read(b: ByteArray): Int { checkStale(); return delegate.read(b) }
+    override fun read(b: ByteArray, off: Int, len: Int): Int { checkStale(); return delegate.read(b, off, len) }
+    override fun close() = delegate.close()
+}
 
 class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -1105,96 +1147,117 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearUserdataTar() = clearOdinSlot("USERDATA")
 
+    // Bumped every time a new file is picked for a slot; a scan captures its own number at
+    // launch and checks it against this map to tell whether it has been superseded.
+    private val scanGeneration = HashMap<String, Int>()
+
     /** Opens the chosen package in the background: lists every component, matches each one
      *  against this device's PIT (when already connected), and -- for a .tar.md5 -- runs the
-     *  same checksum pass real Odin runs before it will touch the device. */
+     *  same checksum pass real Odin runs before it will touch the device.
+     *
+     *  Safe to call repeatedly in quick succession (re-picking, picking the wrong file by
+     *  mistake, ...): each call supersedes any still-running scan for the same slot, and a
+     *  superseded scan's next read throws immediately instead of continuing a now-pointless
+     *  multi-GB read in the background -- see [CancellableInputStream]. */
     private fun scanPackage(slot: String, uri: Uri, fileName: String) {
+        val myGen = (scanGeneration[slot] ?: 0) + 1
+        scanGeneration[slot] = myGen
+        fun stale() = scanGeneration[slot] != myGen
+
         _uiState.update { st ->
             st.copy(
                 odinEntries = st.odinEntries - slot,
                 odinDeselected = st.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet(),
-                odinMd5 = st.odinMd5 - slot
+                odinMd5 = st.odinMd5 - slot,
+                odinScanning = st.odinScanning + slot
             )
         }
         val isMd5Package = fileName.endsWith(".md5", ignoreCase = true)
         viewModelScope.launch(Dispatchers.IO) {
-            val pit = odin.pitTable // may be null if the device isn't connected yet; entries just show "unmatched" then
-            val entries: List<OdinTarFlasher.PackageEntry> = runCatching {
-                if (isRawImage(uri)) {
-                    val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
-                    val base = fileName.substringAfterLast('/')
-                    val part = pit?.findByFileName(base)
-                    listOf(
-                        OdinTarFlasher.PackageEntry(
-                            name = base,
-                            label = base.substringBeforeLast('.', base),
-                            size = size,
-                            pitPartitionId = part?.id,
-                            pitPartitionName = part?.name?.ifBlank { part.fileName },
-                            pitPartitionSizeBytes = part?.partitionSizeBytes ?: 0L
+            try {
+                val pit = odin.pitTable // may be null if the device isn't connected yet; entries just show "unmatched" then
+                val entries: List<OdinTarFlasher.PackageEntry> = runCatching {
+                    if (isRawImage(uri)) {
+                        val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
+                        val base = fileName.substringAfterLast('/')
+                        val part = pit?.findByFileName(base)
+                        listOf(
+                            OdinTarFlasher.PackageEntry(
+                                name = base,
+                                label = base.substringBeforeLast('.', base),
+                                size = size,
+                                pitPartitionId = part?.id,
+                                pitPartitionName = part?.name?.ifBlank { part.fileName },
+                                pitPartitionSizeBytes = part?.partitionSizeBytes ?: 0L
+                            )
                         )
-                    )
-                } else {
-                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.listEntries(it, pit) }.orEmpty()
-                }
-            }.getOrElse { e ->
-                appendLog("Could not read the contents of $fileName: ${e.message}")
-                emptyList()
-            }
-
-            val md5Result: OdinTarFlasher.Md5CheckResult? = if (isMd5Package) {
-                appendLog("<ODIN> Check MD5.. do not unplug the cable while this runs ($fileName)")
-                runCatching {
-                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.verifyPackageMd5(it) }
+                    } else {
+                        context.contentResolver.openInputStream(uri)
+                            ?.let { CancellableInputStream(it, ::stale) }
+                            ?.use { OdinTarFlasher.listEntries(it, pit) }
+                            .orEmpty()
+                    }
                 }.getOrElse { e ->
-                    appendLog("<ODIN> Could not verify MD5 for $fileName: ${e.message}")
-                    null
+                    if (!stale()) appendLog("Could not read the contents of $fileName: ${e.message}")
+                    emptyList()
                 }
-            } else null
+                if (stale()) return@launch
 
-            // Only keep the answer if the user did not pick a different file meanwhile.
-            val still = when (slot) {
-                "BL" -> _uiState.value.blTarUri
-                "AP" -> _uiState.value.apTarUri
-                "CP" -> _uiState.value.cpTarUri
-                "CSC" -> _uiState.value.cscTarUri
-                else -> _uiState.value.userdataTarUri
-            }
-            if (still != uri) return@launch
-            _uiState.update { st ->
-                st.copy(
-                    odinEntries = st.odinEntries + (slot to entries),
-                    odinMd5 = if (md5Result != null) st.odinMd5 + (slot to md5Result) else st.odinMd5
-                )
-            }
+                val md5Result: OdinTarFlasher.Md5CheckResult? = if (isMd5Package) {
+                    appendLog("<ODIN> Check MD5.. do not unplug the cable while this runs ($fileName)")
+                    runCatching {
+                        context.contentResolver.openInputStream(uri)
+                            ?.let { CancellableInputStream(it, ::stale) }
+                            ?.use { OdinTarFlasher.verifyPackageMd5(it) }
+                    }.getOrElse { e ->
+                        if (!stale()) appendLog("<ODIN> Could not verify MD5 for $fileName: ${e.message}")
+                        null
+                    }
+                } else null
+                if (stale()) return@launch
 
-            if (md5Result != null) {
-                when {
-                    !md5Result.hasTrailer ->
-                        appendLog("<ODIN> $fileName has no checksum trailer to verify (not a standard .tar.md5).")
-                    md5Result.passed ->
-                        appendLog("<ODIN> Checking MD5 finished Sucessfully.. (${md5Result.computed})")
-                    else -> appendLog(
-                        "<ODIN> Odin checksum fails!! expected=${md5Result.expected} " +
-                            "computed=${md5Result.computed}. This package is corrupt or was renamed " +
-                            "after download -- re-download it before flashing."
+                _uiState.update { st ->
+                    st.copy(
+                        odinEntries = st.odinEntries + (slot to entries),
+                        odinMd5 = if (md5Result != null) st.odinMd5 + (slot to md5Result) else st.odinMd5
                     )
                 }
-            }
 
-            if (entries.isEmpty()) {
-                appendLog("$slot package: no components could be listed (it will be flashed as a whole).")
-            } else {
-                val matched = entries.count { it.pitPartitionId != null }
-                val mismatched = entries.count { it.sizeMismatch }
-                val matchInfo = if (pit != null) " [$matched/${entries.size} match this device's PIT" +
-                    (if (mismatched > 0) ", $mismatched size-mismatch]" else "]") else " [connect the device to verify PIT matches]"
-                appendLog("$slot package contains ${entries.size} component(s)$matchInfo: " + entries.joinToString(", ") { it.label })
+                if (md5Result != null) {
+                    when {
+                        !md5Result.hasTrailer ->
+                            appendLog("<ODIN> $fileName has no checksum trailer to verify (not a standard .tar.md5).")
+                        md5Result.passed ->
+                            appendLog("<ODIN> Checking MD5 finished Sucessfully.. (${md5Result.computed})")
+                        else -> appendLog(
+                            "<ODIN> Odin checksum fails!! expected=${md5Result.expected} " +
+                                "computed=${md5Result.computed}. This package is corrupt or was renamed " +
+                                "after download -- re-download it before flashing."
+                        )
+                    }
+                }
+
+                if (entries.isEmpty()) {
+                    appendLog("$slot package: no components could be listed (it will be flashed as a whole).")
+                } else {
+                    val matched = entries.count { it.pitPartitionId != null }
+                    val mismatched = entries.count { it.sizeMismatch }
+                    val matchInfo = if (pit != null) " [$matched/${entries.size} match this device's PIT" +
+                        (if (mismatched > 0) ", $mismatched size-mismatch]" else "]") else " [connect the device to verify PIT matches]"
+                    appendLog("$slot package contains ${entries.size} component(s)$matchInfo: " + entries.joinToString(", ") { it.label })
+                }
+            } finally {
+                // Only the scan that is still current clears the "scanning" flag -- a
+                // superseded one must not clear the flag the newer scan just set.
+                if (!stale()) _uiState.update { it.copy(odinScanning = it.odinScanning - slot) }
             }
         }
     }
 
     private fun clearOdinSlot(slot: String) {
+        // Invalidate any scan still running for this slot so it stops hitting storage in the
+        // background for a file that no longer applies (see scanPackage / CancellableInputStream).
+        scanGeneration[slot] = (scanGeneration[slot] ?: 0) + 1
         _uiState.update { st ->
             val cleared = when (slot) {
                 "BL" -> st.copy(blTarUri = null, blTarName = "BL (Bootloader) .tar/.md5: Not Selected")
@@ -1206,7 +1269,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             cleared.copy(
                 odinEntries = cleared.odinEntries - slot,
                 odinDeselected = cleared.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet(),
-                odinMd5 = cleared.odinMd5 - slot
+                odinMd5 = cleared.odinMd5 - slot,
+                odinScanning = cleared.odinScanning - slot
             )
         }
     }
@@ -2042,20 +2106,34 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  serial is only used when the descriptor is blank. */
     fun readMtpInfo() {
         runTask("Reading MTP Device Info") {
-            // Information reads are silent on purpose: the result goes to the Device Info panel only.
-            try {
-                val devices = MtpInfoReader.findModemDevices(context)
-                val mtpNames = MtpInfoReader.findMtpDevices(context).map { it.deviceName }.toSet()
-                if (devices.isEmpty()) {
-                    _uiState.update {
-                        it.copy(
-                            mtpInfoText = "No device found. Connect the phone by USB (MTP or a mode that includes MODEM).",
-                            mtpStorageText = "",
-                            infoImei = "", infoSerial = ""
-                        )
-                    }
-                    return@runTask
+            performFullDeviceInfoRead()
+        }
+    }
+
+    /**
+     * Reads SN / IMEI / model / firmware / storage over MTP + the AT (modem) port -- exactly
+     * what the "Read Info" button does -- and publishes it to the Device Info panel. Returns the
+     * resolved serial ("" if none could be read).
+     *
+     * Shared by [readMtpInfo] and the Change Serial / Change CSC flows: both of those run this
+     * same background read first, so the device's current identity is already on screen (and
+     * passed into the prompt) by the time the user is asked for the new value.
+     */
+    private suspend fun performFullDeviceInfoRead(): String {
+        // Information reads are silent on purpose: the result goes to the Device Info panel only.
+        try {
+            val devices = MtpInfoReader.findModemDevices(context)
+            val mtpNames = MtpInfoReader.findMtpDevices(context).map { it.deviceName }.toSet()
+            if (devices.isEmpty()) {
+                _uiState.update {
+                    it.copy(
+                        mtpInfoText = "No device found. Connect the phone by USB (MTP or a mode that includes MODEM).",
+                        mtpStorageText = "",
+                        infoImei = "", infoSerial = ""
+                    )
                 }
+                return ""
+            }
                 val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
                 var serial = ""
                 var storageAll = ""
@@ -2224,17 +2302,18 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                     if (!granted) sb.append("\nUSB permission was not granted, so the serial / firmware could not be read.")
                     sections.add(sb.toString())
                 }
-                _uiState.update {
-                    it.copy(
-                        mtpInfoText = sections.joinToString("\n\n"),
-                        mtpStorageText = storageAll,
-                        infoImei = imeis.joinToString("\n"),
-                        infoSerial = serial
-                    )
-                }
-            } catch (e: Exception) {
-                _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
+            _uiState.update {
+                it.copy(
+                    mtpInfoText = sections.joinToString("\n\n"),
+                    mtpStorageText = storageAll,
+                    infoImei = imeis.joinToString("\n"),
+                    infoSerial = serial
+                )
             }
+            return serial
+        } catch (e: Exception) {
+            _uiState.update { it.copy(mtpInfoText = "Could not read device info: ${e.message}") }
+            return ""
         }
     }
 
@@ -2327,29 +2406,27 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /** Writes a new Samsung-style serial number (11 characters, A-Z / 0-9) to the device over
-     *  its AT port (MTP mode, no ADB / root needed), then reboots it so the change takes effect.
-     *  Reads the current serial first (same as the rest of the read/write flows in this class)
-     *  so the log shows what the device had before the write; it does not wait for the phone to
-     *  come back on the USB bus -- the task reports success as soon as the write is acknowledged
-     *  and the reboot command is sent.
+    /** Changes the device's Samsung-style serial number (11 characters, A-Z / 0-9) over its AT
+     *  port (MTP mode, no ADB / root needed), then reboots it so the change takes effect.
+     *
+     *  One-button flow: nothing has to be typed before pressing the button. The task connects
+     *  on its own, reads everything it can about the device in the background (serial, IMEI,
+     *  model, firmware, storage -- the same read "Read Info" does), THEN pauses and asks the
+     *  user for the new serial, showing them the current one as context. It does not wait for
+     *  the phone to come back on the USB bus after rebooting -- the task reports success as
+     *  soon as the write is acknowledged and the reboot command is sent.
      *
      * Progress stages:
-     *   0%–15 %   Read current serial
+     *   0%–15 %   Connect + read full device info in the background
+     *   15%       Ask the user for the new serial (task is suspended here, not failed)
      *   15%–60 %  Write sequence (service-init + AT+SERIALNO=2,<SN>), up to 2 attempts
      *   65%–95 %  Reboot command sent
      */
-    fun changeSamsungSerial(newSerial: String) {
-        val sn = newSerial.trim().uppercase()
-        if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
-            appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
-            return
-        }
+    fun runChangeSerial() {
         runTask("Change Serial Number") {
             appendLog("=== CHANGE SERIAL NUMBER ===")
-            appendLog("Target serial: $sn")
 
-            setTaskProgress(0.05f)
+            setTaskProgress(0.02f)
             val mtpDevices = MtpInfoReader.findModemDevices(context)
             if (mtpDevices.isEmpty()) {
                 appendLog("ERROR: No device with a modem port found.")
@@ -2357,25 +2434,38 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read the current serial before touching anything ──
-            appendLog("Reading current serial number...")
-            var currentSerial = ""
-            for (dev in mtpDevices) {
-                currentSerial = runCatching {
-                    AtCommandTransport(context).use { at -> at.readModemSerial(dev) }
-                }.getOrElse { e ->
-                    appendLog("Could not read current serial: ${e.message}")
-                    ""
-                }
-                if (currentSerial.isNotBlank()) break
-            }
+            // ── Stage 1: Read everything about the device in the background first ──
+            appendLog("Reading current device info (serial / modem / IMEI / firmware)...")
+            val currentSerial = performFullDeviceInfoRead()
             appendLog(
                 if (currentSerial.isNotBlank()) "Current serial: $currentSerial"
                 else "Current serial: unreadable (continuing anyway)"
             )
             setTaskProgress(0.15f)
 
-            // ── Stage 2: Write new serial (service-init + serial write with retries) ──
+            // ── Stage 2: Ask the user for the new serial now that we know the old one ──
+            val typed = requestUserText(
+                id = "serial",
+                title = "Enter New Serial",
+                message = if (currentSerial.isNotBlank())
+                    "Current serial is \"$currentSerial\". Enter the new 11-character serial to write (A-Z, 0-9)."
+                else
+                    "Enter the new 11-character serial to write (A-Z, 0-9).",
+                placeholder = "e.g. R58N123ABCD"
+            )
+            if (typed == null) {
+                appendLog("Cancelled: no serial entered.")
+                return@runTask
+            }
+            val sn = typed.trim().uppercase()
+            if (!Regex("^[A-Z0-9]{11}$").matches(sn)) {
+                appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
+                return@runTask
+            }
+            appendLog("Target serial: $sn")
+            setTaskProgress(0.2f)
+
+            // ── Stage 3: Write new serial (service-init + serial write with retries) ──
             appendLog("Writing new serial number...")
             var written = false
             for (dev in mtpDevices) {
@@ -2401,7 +2491,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLog("Modem acknowledged the serial write.")
 
-            // ── Stage 3: Reboot so the new serial takes effect ─────────────────────
+            // ── Stage 4: Reboot so the new serial takes effect ─────────────────────
             setTaskProgress(0.65f)
             appendLog("Rebooting device...")
             for (dev in mtpDevices) {
@@ -2414,7 +2504,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 if (ok) break
             }
 
-            // ── Stage 4: Done — report success right away, no wait / re-read ──────
+            // ── Stage 5: Done — report success right away, no wait / re-read ──────
             setTaskProgress(1f)
             _uiState.update {
                 it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = sn)
@@ -2425,28 +2515,26 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     /** Writes a new 3-letter Sales Code (CSC / region code) to the device over its AT port
-     *  (MTP mode, no ADB / root needed), then reboots it so the change takes effect. Reads the
-     *  current CSC first (same as the rest of the read/write flows in this class) so the log
-     *  shows what the device had before the write; it does not wait for the phone to come back
-     *  on the USB bus -- the task reports success as soon as the write is acknowledged and the
-     *  reboot command is sent.
+     *  (MTP mode, no ADB / root needed), then reboots it so the change takes effect.
+     *
+     *  One-button flow, same shape as Change Serial: nothing has to be typed before pressing
+     *  the button. The task connects on its own, reads everything it can about the device in
+     *  the background (full info read, plus the current CSC specifically), THEN pauses and
+     *  asks the user for the new CSC. It does not wait for the phone to come back on the USB
+     *  bus after rebooting -- the task reports success as soon as the write is acknowledged
+     *  and the reboot command is sent.
      *
      * Progress stages:
-     *   0%–15 %   Read current CSC
+     *   0%–15 %   Connect + read full device info (incl. current CSC) in the background
+     *   15%       Ask the user for the new CSC (task is suspended here, not failed)
      *   15%–60 %  Write sequence (service-init + AT+PRECONFG), up to 2 attempts
      *   65%–95 %  Reboot command sent
      */
-    fun changeSamsungCsc(newCsc: String) {
-        val csc = newCsc.trim().uppercase()
-        if (!Regex("^[A-Z]{3}$").matches(csc)) {
-            appendLog("ERROR: CSC must be exactly 3 letters (A-Z).")
-            return
-        }
+    fun runChangeCsc() {
         runTask("Change Sales Code (CSC)") {
             appendLog("=== CHANGE SALES CODE (CSC) ===")
-            appendLog("Target CSC: $csc")
 
-            setTaskProgress(0.05f)
+            setTaskProgress(0.02f)
             val mtpDevices = MtpInfoReader.findModemDevices(context)
             if (mtpDevices.isEmpty()) {
                 appendLog("ERROR: No device with a modem port found.")
@@ -2454,7 +2542,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read the current CSC before touching anything ──
+            // ── Stage 1: Read everything about the device in the background first ──
+            appendLog("Reading current device info (serial / modem / IMEI / firmware)...")
+            performFullDeviceInfoRead()
             appendLog("Reading current CSC...")
             var currentCsc = ""
             for (dev in mtpDevices) {
@@ -2472,7 +2562,29 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             )
             setTaskProgress(0.15f)
 
-            // ── Stage 2: Write new CSC (service-init + PRECONFG write with retries) ──
+            // ── Stage 2: Ask the user for the new CSC now that we know the old one ──
+            val typed = requestUserText(
+                id = "csc",
+                title = "Enter New CSC",
+                message = if (currentCsc.isNotBlank())
+                    "Current CSC is \"$currentCsc\". Enter the new 3-letter Sales Code to write (A-Z)."
+                else
+                    "Enter the new 3-letter Sales Code to write (A-Z).",
+                placeholder = "e.g. XSG"
+            )
+            if (typed == null) {
+                appendLog("Cancelled: no CSC entered.")
+                return@runTask
+            }
+            val csc = typed.trim().uppercase()
+            if (!Regex("^[A-Z]{3}$").matches(csc)) {
+                appendLog("ERROR: CSC must be exactly 3 letters (A-Z).")
+                return@runTask
+            }
+            appendLog("Target CSC: $csc")
+            setTaskProgress(0.2f)
+
+            // ── Stage 3: Write new CSC (service-init + PRECONFG write with retries) ──
             appendLog("Writing new CSC...")
             var written = false
             for (dev in mtpDevices) {
@@ -2498,7 +2610,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLog("Modem acknowledged the CSC write.")
 
-            // ── Stage 3: Reboot so the new CSC takes effect ─────────────────────────
+            // ── Stage 4: Reboot so the new CSC takes effect ─────────────────────────
             setTaskProgress(0.65f)
             appendLog("Rebooting device...")
             for (dev in mtpDevices) {
@@ -2511,7 +2623,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 if (ok) break
             }
 
-            // ── Stage 4: Done — report success right away, no wait / re-read ──────
+            // ── Stage 5: Done — report success right away, no wait / re-read ──────
             setTaskProgress(1f)
             appendLog("Operation completed successfully.")
             appendLog("CSC is now \"$csc\".")
@@ -2692,6 +2804,33 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(progress = fraction, transferSpeedMbps = mbps)
         }
+    }
+
+    private var pendingPromptDeferred: CompletableDeferred<String?>? = null
+
+    /** Suspends the running task and shows [PromptRequest] as a dialog, independent of the
+     *  busy/progress UI. Returns the text the user entered, or null if they cancelled.
+     *  Call only from inside a [runTask] block. */
+    private suspend fun requestUserText(id: String, title: String, message: String, placeholder: String): String? {
+        val deferred = CompletableDeferred<String?>()
+        pendingPromptDeferred = deferred
+        _uiState.update { it.copy(pendingPrompt = PromptRequest(id, title, message, placeholder)) }
+        return try {
+            deferred.await()
+        } finally {
+            pendingPromptDeferred = null
+            _uiState.update { it.copy(pendingPrompt = null) }
+        }
+    }
+
+    /** Called by the UI when the user submits the pending prompt's dialog. */
+    fun submitPromptInput(text: String) {
+        pendingPromptDeferred?.complete(text)
+    }
+
+    /** Called by the UI when the user dismisses/cancels the pending prompt's dialog. */
+    fun cancelPrompt() {
+        pendingPromptDeferred?.complete(null)
     }
 
     private fun runTask(taskTitle: String, block: suspend () -> Unit) {

@@ -706,8 +706,12 @@ fun EdlMainScreen(
     onAdbScript: ((String, String) -> Unit)? = null,
     // MTP storage read + AT format ("restore original space"). Optional so older call sites compile.
     onMtpFormatAt: (() -> Unit)? = null,
-    onChangeSerial: ((String) -> Unit)? = null,
-    onChangeCsc: ((String) -> Unit)? = null,
+    // One-button flows: no text field to fill in first. The task reads the device in the
+    // background on its own, then asks for the new value mid-task via onSubmitPrompt / onCancelPrompt.
+    onChangeSerial: (() -> Unit)? = null,
+    onChangeCsc: (() -> Unit)? = null,
+    onSubmitPrompt: ((String) -> Unit)? = null,
+    onCancelPrompt: (() -> Unit)? = null,
     onShowInfoPopup: ((String) -> Unit)? = null,
     // Optional "clear selection" hooks. The buttons only appear once a caller supplies them, so
     // existing call sites keep compiling and behaving exactly as before.
@@ -848,6 +852,8 @@ fun EdlMainScreen(
                 onAdbShell = onAdbShell,
                 onChangeSerial = onChangeSerial,
                 onChangeCsc = onChangeCsc,
+                onSubmitPrompt = onSubmitPrompt,
+                onCancelPrompt = onCancelPrompt,
                 onShowInfoPopup = onShowInfoPopup,
                 onMtpFormatAt = onMtpFormatAt
             )
@@ -957,6 +963,59 @@ fun EdlMainScreen(
             }
         }
     }
+
+    // Global, tab-independent: a running task (Change Serial / Change CSC, ...) is suspended
+    // waiting for a value only the user can supply. Shown over whichever tab is active.
+    state.pendingPrompt?.let { prompt ->
+        MidTaskPromptDialog(prompt, onSubmit = { onSubmitPrompt?.invoke(it) }, onCancel = { onCancelPrompt?.invoke() })
+    }
+}
+
+/** Dialog for [EdlUiState.pendingPrompt]: a running background task (Change Serial / Change
+ *  CSC) has already read the device on its own and is now paused waiting for the one value
+ *  only the user can supply. Per-id input shaping/validation keeps this generic enough to
+ *  reuse for future mid-task prompts without new UI. */
+@Composable
+private fun MidTaskPromptDialog(
+    prompt: PromptRequest,
+    onSubmit: (String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var text by remember(prompt.id) { mutableStateOf("") }
+    fun shape(v: String): String = when (prompt.id) {
+        "serial" -> v.uppercase().filter { it.isLetter() || it.isDigit() }.take(11)
+        "csc" -> v.uppercase().filter { it.isLetter() }.take(3)
+        else -> v
+    }
+    val valid = when (prompt.id) {
+        "serial" -> Regex("^[A-Z0-9]{11}$").matches(text)
+        "csc" -> Regex("^[A-Z]{3}$").matches(text)
+        else -> text.isNotBlank()
+    }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        containerColor = Yas.Surface,
+        shape = S8,
+        title = { YText(prompt.title, size = 15.sp, weight = FontWeight.Bold) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                YText(prompt.message, size = 12.sp, color = Yas.TextSoft)
+                YASTextField(
+                    value = text,
+                    onValueChange = { text = shape(it) },
+                    placeholder = prompt.placeholder,
+                    modifier = Modifier.fillMaxWidth(),
+                    mono = true
+                )
+            }
+        },
+        confirmButton = {
+            YASButton("Write", { onSubmit(text) }, style = BtnStyle.Danger, enabled = valid)
+        },
+        dismissButton = {
+            YASButton("Cancel", onCancel, style = BtnStyle.Secondary)
+        }
+    )
 }
 
 // =====================================================================================
@@ -2283,7 +2342,8 @@ private fun OdinSlotRow(
     enabled: Boolean,
     onBrowse: () -> Unit,
     onClear: (() -> Unit)?,
-    md5: OdinTarFlasher.Md5CheckResult? = null
+    md5: OdinTarFlasher.Md5CheckResult? = null,
+    scanning: Boolean = false
 ) {
     val selected = uri != null
     val size = rememberUriSize(uri)
@@ -2332,9 +2392,20 @@ private fun OdinSlotRow(
                 YASButton("\u2715", onClear, style = BtnStyle.Ghost, compact = true, enabled = enabled)
             }
         }
+        // Visible progress for the background scan (header listing + MD5), so a large AP/CP
+        // package doesn't look frozen while it's being read.
+        if (selected && scanning) {
+            YText(
+                text = "Scanning\u2026 listing components" + (if (name.endsWith(".md5", ignoreCase = true)) " and verifying MD5" else ""),
+                size = 10.sp,
+                mono = true,
+                color = Yas.WarningText,
+                maxLines = 1
+            )
+        }
         // Technical checksum status: real Odin always runs this pass on a .tar.md5 before
         // it will flash it, and hard-aborts the whole operation if it fails.
-        if (selected && md5 != null && md5.hasTrailer) {
+        if (selected && !scanning && md5 != null && md5.hasTrailer) {
             YText(
                 text = if (md5.passed) "MD5: PASS (${md5.computed?.take(10)}\u2026)"
                 else "MD5: FAIL -- expected ${md5.expected?.take(10)}\u2026 got ${md5.computed?.take(10)}\u2026",
@@ -2534,16 +2605,16 @@ private fun OdinTab(
             subtitle = "BL \u2192 AP \u2192 CP \u2192 CSC \u2192 USERDATA"
         ) {
             Column {
-                OdinSlotRow("BL", "Bootloader", state.blTarName, state.blTarUri, !state.isBusy, onPickBlTar, onClearBlTar, state.odinMd5["BL"])
+                OdinSlotRow("BL", "Bootloader", state.blTarName, state.blTarUri, !state.isBusy, onPickBlTar, onClearBlTar, state.odinMd5["BL"], "BL" in state.odinScanning)
                 OdinComponentList("BL", state.odinEntries["BL"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("BL") }, { onToggleOdinEntry("BL", it) })
                 YDivider()
-                OdinSlotRow("AP", "System / Kernel", state.apTarName, state.apTarUri, !state.isBusy, onPickApTar, onClearApTar, state.odinMd5["AP"])
+                OdinSlotRow("AP", "System / Kernel", state.apTarName, state.apTarUri, !state.isBusy, onPickApTar, onClearApTar, state.odinMd5["AP"], "AP" in state.odinScanning)
                 OdinComponentList("AP", state.odinEntries["AP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("AP") }, { onToggleOdinEntry("AP", it) })
                 YDivider()
-                OdinSlotRow("CP", "Modem", state.cpTarName, state.cpTarUri, !state.isBusy, onPickCpTar, onClearCpTar, state.odinMd5["CP"])
+                OdinSlotRow("CP", "Modem", state.cpTarName, state.cpTarUri, !state.isBusy, onPickCpTar, onClearCpTar, state.odinMd5["CP"], "CP" in state.odinScanning)
                 OdinComponentList("CP", state.odinEntries["CP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CP") }, { onToggleOdinEntry("CP", it) })
                 YDivider()
-                OdinSlotRow("CSC", "CSC", state.cscTarName, state.cscTarUri, !state.isBusy, onPickCscTar, onClearCscTar, state.odinMd5["CSC"])
+                OdinSlotRow("CSC", "CSC", state.cscTarName, state.cscTarUri, !state.isBusy, onPickCscTar, onClearCscTar, state.odinMd5["CSC"], "CSC" in state.odinScanning)
                 OdinComponentList("CSC", state.odinEntries["CSC"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CSC") }, { onToggleOdinEntry("CSC", it) })
                 YDivider()
                 OdinSlotRow(
@@ -2554,7 +2625,8 @@ private fun OdinTab(
                     !state.isBusy,
                     onPickUserdataTar,
                     onClearUserdataTar,
-                    state.odinMd5["USERDATA"]
+                    state.odinMd5["USERDATA"],
+                    "USERDATA" in state.odinScanning
                 )
                 OdinComponentList("USERDATA", state.odinEntries["USERDATA"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("USERDATA") }, { onToggleOdinEntry("USERDATA", it) })
             }
@@ -2895,22 +2967,20 @@ private fun AdbMtpTab(
     onReadAdbInfo: () -> Unit,
     onAdbReboot: (String, String) -> Unit,
     onAdbShell: (String) -> Unit,
-    onChangeSerial: ((String) -> Unit)? = null,
-    onChangeCsc: ((String) -> Unit)? = null,
+    onChangeSerial: (() -> Unit)? = null,
+    onChangeCsc: (() -> Unit)? = null,
+    onSubmitPrompt: ((String) -> Unit)? = null,
+    onCancelPrompt: (() -> Unit)? = null,
     onShowInfoPopup: ((String) -> Unit)? = null,
     onMtpFormatAt: (() -> Unit)? = null
 ) {
     val context = LocalContext.current
     var showFormatMtpConfirm by remember { mutableStateOf(false) }
     var shellCmd by remember { mutableStateOf("") }
-    var newSerial by remember { mutableStateOf("") }
     var showSerialConfirm by remember { mutableStateOf(false) }
-    var newCsc by remember { mutableStateOf("") }
     var showCscConfirm by remember { mutableStateOf(false) }
     var showRemoveFrpConfirm by remember { mutableStateOf(false) }
 
-    val serialValid = Regex("^[A-Z0-9]{11}$").matches(newSerial)
-    val cscValid = Regex("^[A-Z]{3}$").matches(newCsc)
     if (showRemoveFrpConfirm) {
         YASConfirmDialog(
             title = "Remove FRP?",
@@ -2940,12 +3010,12 @@ private fun AdbMtpTab(
     if (showSerialConfirm) {
         YASConfirmDialog(
             title = "Change Serial?",
-            message = "Change the device serial (SN) to \"$newSerial\" via AT commands (MTP mode). The phone will reboot normally, then the new serial is read back to confirm.",
-            confirmText = "Change",
+            message = "Reads the device's current serial / modem / IMEI in the background over AT (MTP mode), then asks you for the new 11-character serial. The phone reboots normally once it's written.",
+            confirmText = "Start",
             danger = true,
             onConfirm = {
                 showSerialConfirm = false
-                onChangeSerial?.invoke(newSerial)
+                onChangeSerial?.invoke()
             },
             onDismiss = { showSerialConfirm = false }
         )
@@ -2953,12 +3023,12 @@ private fun AdbMtpTab(
     if (showCscConfirm) {
         YASConfirmDialog(
             title = "Change CSC?",
-            message = "Change the device Sales Code (CSC) to \"$newCsc\" via AT commands (MTP mode). The phone will reboot so the new region settings take effect, then the new CSC is read back to confirm.",
-            confirmText = "Change",
+            message = "Reads the device's current info and Sales Code in the background over AT (MTP mode), then asks you for the new 3-letter CSC. The phone reboots once it's written so the new region settings take effect.",
+            confirmText = "Start",
             danger = true,
             onConfirm = {
                 showCscConfirm = false
-                onChangeCsc?.invoke(newCsc)
+                onChangeCsc?.invoke()
             },
             onDismiss = { showCscConfirm = false }
         )
@@ -3016,55 +3086,29 @@ private fun AdbMtpTab(
             if (onChangeSerial != null) {
                 YDivider()
                 SectionLabel("CHANGE SERIAL (SAMSUNG)")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    YASTextField(
-                        value = newSerial,
-                        onValueChange = { v ->
-                            newSerial = v.uppercase().filter { it.isLetter() || it.isDigit() }.take(11)
-                        },
-                        placeholder = "11-character SN, e.g. R58N123ABCD",
-                        modifier = Modifier.weight(1f),
-                        mono = true
-                    )
-                    YASButton(
-                        "Change",
-                        { showSerialConfirm = true },
-                        style = BtnStyle.Danger,
-                        enabled = !state.isBusy && serialValid
-                    )
-                }
-                Hint("Exactly 11 characters, A-Z and 0-9.")
+                YASButton(
+                    "Change Serial",
+                    { showSerialConfirm = true },
+                    Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy,
+                    large = true
+                )
+                Hint("Reads the device in the background, then asks for the new 11-character serial (A-Z, 0-9) mid-operation.")
             }
 
             if (onChangeCsc != null) {
                 YDivider()
                 SectionLabel("CHANGE CSC (SALES CODE)")
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    YASTextField(
-                        value = newCsc,
-                        onValueChange = { v ->
-                            newCsc = v.uppercase().filter { it.isLetter() }.take(3)
-                        },
-                        placeholder = "3-letter CSC, e.g. XSG",
-                        modifier = Modifier.weight(1f),
-                        mono = true
-                    )
-                    YASButton(
-                        "Change",
-                        { showCscConfirm = true },
-                        style = BtnStyle.Danger,
-                        enabled = !state.isBusy && cscValid
-                    )
-                }
-                Hint("Exactly 3 letters, A-Z. Device reboots to apply the new region settings.")
+                YASButton(
+                    "Change CSC",
+                    { showCscConfirm = true },
+                    Modifier.fillMaxWidth(),
+                    style = BtnStyle.Danger,
+                    enabled = !state.isBusy,
+                    large = true
+                )
+                Hint("Reads the device in the background, then asks for the new 3-letter Sales Code mid-operation.")
             }
         }
 
