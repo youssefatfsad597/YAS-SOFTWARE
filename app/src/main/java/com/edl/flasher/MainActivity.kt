@@ -168,7 +168,7 @@ class MainActivity : ComponentActivity() {
                     onProbeChipInfo = viewModel::readSaharaDeviceInfo,
                     onPickLoader = { loaderPicker.launch(arrayOf("*/*")) },
                     onClearLoader = viewModel::clearLoader,
-                    onSetReadGptBuiltInLoader = viewModel::setReadGptBuiltInLoader,
+                    onSetGptLoaderChoice = viewModel::setGptLoaderChoice,
                     onPickFrpFile = { frpFilePicker.launch(arrayOf("*/*")) },
                     onPickSecEfsFile = { secEfsFilePicker.launch(arrayOf("*/*")) },
                     onPickPersistentFile = { persistentFilePicker.launch(arrayOf("*/*")) },
