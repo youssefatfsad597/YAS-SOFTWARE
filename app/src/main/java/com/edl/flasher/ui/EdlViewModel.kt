@@ -87,6 +87,9 @@ data class EdlUiState(
     // un-ticked ("SLOT|label"). Everything is ticked by default.
     val odinEntries: Map<String, List<OdinTarFlasher.PackageEntry>> = emptyMap(),
     val odinDeselected: Set<String> = emptySet(),
+    // Checksum pass real Odin always runs on a .tar.md5 before flashing it (slot -> result).
+    // Absent while the check is still running; present once it finishes.
+    val odinMd5: Map<String, OdinTarFlasher.Md5CheckResult> = emptyMap(),
     val odinAutoReboot: Boolean = true,
     // Some T505N userdata packages contain extra system images.  Keep the
     // safe default enabled so only userdata is sent from that package.
@@ -1102,27 +1105,53 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun clearUserdataTar() = clearOdinSlot("USERDATA")
 
-    /** Opens the chosen package in the background and lists every component inside it. */
+    /** Opens the chosen package in the background: lists every component, matches each one
+     *  against this device's PIT (when already connected), and -- for a .tar.md5 -- runs the
+     *  same checksum pass real Odin runs before it will touch the device. */
     private fun scanPackage(slot: String, uri: Uri, fileName: String) {
         _uiState.update { st ->
             st.copy(
                 odinEntries = st.odinEntries - slot,
-                odinDeselected = st.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet()
+                odinDeselected = st.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet(),
+                odinMd5 = st.odinMd5 - slot
             )
         }
+        val isMd5Package = fileName.endsWith(".md5", ignoreCase = true)
         viewModelScope.launch(Dispatchers.IO) {
+            val pit = odin.pitTable // may be null if the device isn't connected yet; entries just show "unmatched" then
             val entries: List<OdinTarFlasher.PackageEntry> = runCatching {
                 if (isRawImage(uri)) {
                     val size = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length } ?: 0L
                     val base = fileName.substringAfterLast('/')
-                    listOf(OdinTarFlasher.PackageEntry(base, base.substringBeforeLast('.', base), size))
+                    val part = pit?.findByFileName(base)
+                    listOf(
+                        OdinTarFlasher.PackageEntry(
+                            name = base,
+                            label = base.substringBeforeLast('.', base),
+                            size = size,
+                            pitPartitionId = part?.id,
+                            pitPartitionName = part?.name?.ifBlank { part.fileName },
+                            pitPartitionSizeBytes = part?.partitionSizeBytes ?: 0L
+                        )
+                    )
                 } else {
-                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.listEntries(it) }.orEmpty()
+                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.listEntries(it, pit) }.orEmpty()
                 }
             }.getOrElse { e ->
                 appendLog("Could not read the contents of $fileName: ${e.message}")
                 emptyList()
             }
+
+            val md5Result: OdinTarFlasher.Md5CheckResult? = if (isMd5Package) {
+                appendLog("<ODIN> Check MD5.. do not unplug the cable while this runs ($fileName)")
+                runCatching {
+                    context.contentResolver.openInputStream(uri)?.use { OdinTarFlasher.verifyPackageMd5(it) }
+                }.getOrElse { e ->
+                    appendLog("<ODIN> Could not verify MD5 for $fileName: ${e.message}")
+                    null
+                }
+            } else null
+
             // Only keep the answer if the user did not pick a different file meanwhile.
             val still = when (slot) {
                 "BL" -> _uiState.value.blTarUri
@@ -1132,11 +1161,35 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 else -> _uiState.value.userdataTarUri
             }
             if (still != uri) return@launch
-            _uiState.update { it.copy(odinEntries = it.odinEntries + (slot to entries)) }
+            _uiState.update { st ->
+                st.copy(
+                    odinEntries = st.odinEntries + (slot to entries),
+                    odinMd5 = if (md5Result != null) st.odinMd5 + (slot to md5Result) else st.odinMd5
+                )
+            }
+
+            if (md5Result != null) {
+                when {
+                    !md5Result.hasTrailer ->
+                        appendLog("<ODIN> $fileName has no checksum trailer to verify (not a standard .tar.md5).")
+                    md5Result.passed ->
+                        appendLog("<ODIN> Checking MD5 finished Sucessfully.. (${md5Result.computed})")
+                    else -> appendLog(
+                        "<ODIN> Odin checksum fails!! expected=${md5Result.expected} " +
+                            "computed=${md5Result.computed}. This package is corrupt or was renamed " +
+                            "after download -- re-download it before flashing."
+                    )
+                }
+            }
+
             if (entries.isEmpty()) {
                 appendLog("$slot package: no components could be listed (it will be flashed as a whole).")
             } else {
-                appendLog("$slot package contains ${entries.size} component(s): " + entries.joinToString(", ") { it.label })
+                val matched = entries.count { it.pitPartitionId != null }
+                val mismatched = entries.count { it.sizeMismatch }
+                val matchInfo = if (pit != null) " [$matched/${entries.size} match this device's PIT" +
+                    (if (mismatched > 0) ", $mismatched size-mismatch]" else "]") else " [connect the device to verify PIT matches]"
+                appendLog("$slot package contains ${entries.size} component(s)$matchInfo: " + entries.joinToString(", ") { it.label })
             }
         }
     }
@@ -1152,7 +1205,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             cleared.copy(
                 odinEntries = cleared.odinEntries - slot,
-                odinDeselected = cleared.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet()
+                odinDeselected = cleared.odinDeselected.filterNot { it.startsWith("$slot|") }.toSet(),
+                odinMd5 = cleared.odinMd5 - slot
             )
         }
     }
@@ -1447,10 +1501,22 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             keep
         }
         if (slots.isEmpty()) throw IllegalStateException("Nothing is selected to flash. Tick at least one component.")
+
+        // Same hard-abort real Odin applies: a package whose checksum already failed is never
+        // sent to the device, even partially.
+        val failedMd5 = slots.map { it.first }.filter { _uiState.value.odinMd5[it]?.passed == false }
+        if (failedMd5.isNotEmpty()) {
+            throw IllegalStateException(
+                "Odin checksum fails for: ${failedMd5.joinToString(", ")}. Re-download the package(s) before flashing."
+            )
+        }
+
+        appendLog("<ODIN> SetupConnection..")
         openOdinConnectionIfNeeded()
         val pit = odin.requirePit()
+        appendLog("<ODIN> Get PIT for mapping.. ${pit.partitions.size} partitions (cpu_bl_id='${pit.cpuBlId}')")
 
-        appendLog("Computing total transfer size against this device's PIT...")
+        appendLog("<ODIN> File analysis.. computing total transfer size against this device's PIT")
         var total = 0L
         for ((label, uri) in slots) {
             context.contentResolver.openInputStream(uri)?.use { sizingStream ->
@@ -1469,13 +1535,13 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 "Nothing inside the selected package(s) matches a partition in this device's PIT table."
             )
         }
-        appendLog("Total bytes to flash: $total")
+        appendLog("<ODIN> Firmware update start.. total ${OdinTarFlasher.formatBytes(total)} across ${slots.size} package(s)")
         odin.sendTotalSize(total)
 
         var partitionStartNs = System.nanoTime()
         var lastPartition = ""
         for ((label, uri) in slots) {
-            appendLog("Opening $label package...")
+            appendLog("<ODIN> Opening $label package..")
             if (isRawImage(uri)) {
                 flashRawImage(uri, pit)
                 continue
@@ -1517,10 +1583,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("No .tar files selected. Pick at least one of BL/AP/CP/CSC/USERDATA.")
             }
 
-            appendLog("=== STARTING ODIN FLASH SEQUENCE (${slots.size} package(s)) ===")
+            appendLog("<ODIN> Odin engine starting.. ${slots.size} package(s) selected")
             flashTarsWithOdin(slots)
 
-            appendLog("Operation completed successfully.")
+            appendLog("<ODIN> RQT_CLOSE !!  RES OK !!  All threads completed. (succeed ${slots.size} / failed 0)")
             odin.shutdown(reboot = _uiState.value.odinAutoReboot)
             transport.close()
             _uiState.update {

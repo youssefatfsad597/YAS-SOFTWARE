@@ -2282,54 +2282,67 @@ private fun OdinSlotRow(
     uri: Uri?,
     enabled: Boolean,
     onBrowse: () -> Unit,
-    onClear: (() -> Unit)?
+    onClear: (() -> Unit)?,
+    md5: OdinTarFlasher.Md5CheckResult? = null
 ) {
     val selected = uri != null
     val size = rememberUriSize(uri)
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(10.dp)
-    ) {
-        Box(
-            modifier = Modifier
-                .width(82.dp)
-                .background(Yas.SurfaceHi, S6)
-                .border(1.dp, if (selected) Yas.Primary.copy(alpha = 0.65f) else Yas.Border, S6)
-                .padding(vertical = 7.dp),
-            contentAlignment = Alignment.Center
+    Column(modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            YText(
-                tag,
-                size = 11.sp,
-                mono = true,
-                weight = FontWeight.Bold,
-                color = if (selected) Yas.Text else Yas.Muted,
-                maxLines = 1
-            )
+            Box(
+                modifier = Modifier
+                    .width(82.dp)
+                    .background(Yas.SurfaceHi, S6)
+                    .border(1.dp, if (selected) Yas.Primary.copy(alpha = 0.65f) else Yas.Border, S6)
+                    .padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                YText(
+                    tag,
+                    size = 11.sp,
+                    mono = true,
+                    weight = FontWeight.Bold,
+                    color = if (selected) Yas.Text else Yas.Muted,
+                    maxLines = 1
+                )
+            }
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                YText(
+                    text = if (selected) name.substringAfter(": ", name) else placeholder,
+                    size = 12.sp,
+                    mono = selected,
+                    color = if (selected) Yas.Text else Yas.Muted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                YText(
+                    text = if (selected) (size ?: "\u2014") else "No file selected",
+                    size = 10.sp,
+                    mono = true,
+                    color = Yas.Muted,
+                    maxLines = 1
+                )
+            }
+            YASButton("Browse", onBrowse, style = BtnStyle.Secondary, compact = true, enabled = enabled)
+            if (selected && onClear != null) {
+                YASButton("\u2715", onClear, style = BtnStyle.Ghost, compact = true, enabled = enabled)
+            }
         }
-        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+        // Technical checksum status: real Odin always runs this pass on a .tar.md5 before
+        // it will flash it, and hard-aborts the whole operation if it fails.
+        if (selected && md5 != null && md5.hasTrailer) {
             YText(
-                text = if (selected) name.substringAfter(": ", name) else placeholder,
-                size = 12.sp,
-                mono = selected,
-                color = if (selected) Yas.Text else Yas.Muted,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            YText(
-                text = if (selected) (size ?: "\u2014") else "No file selected",
+                text = if (md5.passed) "MD5: PASS (${md5.computed?.take(10)}\u2026)"
+                else "MD5: FAIL -- expected ${md5.expected?.take(10)}\u2026 got ${md5.computed?.take(10)}\u2026",
                 size = 10.sp,
                 mono = true,
-                color = Yas.Muted,
+                color = if (md5.passed) Yas.Success else Yas.Danger,
                 maxLines = 1
             )
-        }
-        YASButton("Browse", onBrowse, style = BtnStyle.Secondary, compact = true, enabled = enabled)
-        if (selected && onClear != null) {
-            YASButton("\u2715", onClear, style = BtnStyle.Ghost, compact = true, enabled = enabled)
         }
     }
 }
@@ -2384,15 +2397,34 @@ private fun OdinComponentList(
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     YASCheck(on, { onToggleEntry(e.label) }, enabled = enabled)
-                    YText(
-                        e.label,
-                        size = 11.sp,
-                        mono = true,
-                        color = if (on) Yas.Text else Yas.Muted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f)
-                    )
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                        YText(
+                            e.label,
+                            size = 11.sp,
+                            mono = true,
+                            color = if (on) Yas.Text else Yas.Muted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        // Technical PIT-match line: exactly which device partition this file
+                        // resolves to (by id), or why it won't be written at all.
+                        YText(
+                            text = when {
+                                e.pitPartitionId == null -> "no PIT match -- will be skipped"
+                                e.sizeMismatch -> "PIT id=${e.pitPartitionId} '${e.pitPartitionName}' \u00B7 size mismatch vs ${formatSize(e.pitPartitionSizeBytes)}"
+                                else -> "PIT id=${e.pitPartitionId} '${e.pitPartitionName}' \u00B7 ${formatSize(e.pitPartitionSizeBytes)} capacity"
+                            },
+                            size = 9.sp,
+                            mono = true,
+                            color = when {
+                                e.pitPartitionId == null -> Yas.Muted
+                                e.sizeMismatch -> Yas.WarningText
+                                else -> Yas.Muted
+                            },
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     YText(formatSize(e.size), size = 10.sp, mono = true, color = Yas.Muted, maxLines = 1)
                 }
             }
@@ -2432,6 +2464,9 @@ private fun OdinTab(
         val entries = state.odinEntries[slot].orEmpty()
         uri != null && (entries.isEmpty() || entries.any { "$slot|${it.label}" !in state.odinDeselected })
     }
+    // Same hard-abort real Odin applies: never offer to flash while a loaded package's own
+    // checksum has failed.
+    val anyMd5Failed = slotUris.any { (slot, uri) -> uri != null && state.odinMd5[slot]?.passed == false }
 
     Column(
         modifier = Modifier
@@ -2499,16 +2534,16 @@ private fun OdinTab(
             subtitle = "BL \u2192 AP \u2192 CP \u2192 CSC \u2192 USERDATA"
         ) {
             Column {
-                OdinSlotRow("BL", "Bootloader", state.blTarName, state.blTarUri, !state.isBusy, onPickBlTar, onClearBlTar)
+                OdinSlotRow("BL", "Bootloader", state.blTarName, state.blTarUri, !state.isBusy, onPickBlTar, onClearBlTar, state.odinMd5["BL"])
                 OdinComponentList("BL", state.odinEntries["BL"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("BL") }, { onToggleOdinEntry("BL", it) })
                 YDivider()
-                OdinSlotRow("AP", "System / Kernel", state.apTarName, state.apTarUri, !state.isBusy, onPickApTar, onClearApTar)
+                OdinSlotRow("AP", "System / Kernel", state.apTarName, state.apTarUri, !state.isBusy, onPickApTar, onClearApTar, state.odinMd5["AP"])
                 OdinComponentList("AP", state.odinEntries["AP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("AP") }, { onToggleOdinEntry("AP", it) })
                 YDivider()
-                OdinSlotRow("CP", "Modem", state.cpTarName, state.cpTarUri, !state.isBusy, onPickCpTar, onClearCpTar)
+                OdinSlotRow("CP", "Modem", state.cpTarName, state.cpTarUri, !state.isBusy, onPickCpTar, onClearCpTar, state.odinMd5["CP"])
                 OdinComponentList("CP", state.odinEntries["CP"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CP") }, { onToggleOdinEntry("CP", it) })
                 YDivider()
-                OdinSlotRow("CSC", "CSC", state.cscTarName, state.cscTarUri, !state.isBusy, onPickCscTar, onClearCscTar)
+                OdinSlotRow("CSC", "CSC", state.cscTarName, state.cscTarUri, !state.isBusy, onPickCscTar, onClearCscTar, state.odinMd5["CSC"])
                 OdinComponentList("CSC", state.odinEntries["CSC"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("CSC") }, { onToggleOdinEntry("CSC", it) })
                 YDivider()
                 OdinSlotRow(
@@ -2518,7 +2553,8 @@ private fun OdinTab(
                     state.userdataTarUri,
                     !state.isBusy,
                     onPickUserdataTar,
-                    onClearUserdataTar
+                    onClearUserdataTar,
+                    state.odinMd5["USERDATA"]
                 )
                 OdinComponentList("USERDATA", state.odinEntries["USERDATA"].orEmpty(), state.odinDeselected, !state.isBusy, { onToggleOdinSlot("USERDATA") }, { onToggleOdinEntry("USERDATA", it) })
             }
@@ -2540,10 +2576,15 @@ private fun OdinTab(
                 onClick = onRunOdinFlash,
                 modifier = Modifier.fillMaxWidth(),
                 style = BtnStyle.Primary,
-                enabled = !state.isBusy && anySlot,
+                enabled = !state.isBusy && anySlot && !anyMd5Failed,
                 large = true
             )
-            Hint("Download Mode: load a package, then tick only the components you want. Odin Flash writes just the ticked ones, in order.")
+            Hint(
+                if (anyMd5Failed)
+                    "MD5 FAIL on a loaded package -- re-download it before flashing. Real Odin refuses to flash a package whose checksum doesn't match."
+                else
+                    "Download Mode: load a package, then tick only the components you want. Odin Flash writes just the ticked ones, in order."
+            )
         }
     }
 }
