@@ -66,19 +66,35 @@ class AtCommandTransport(private val context: Context) : Closeable {
             "AT+PARALLEL=2,0,00000;AT+DEBUGLVC=0,5"
         )
         val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
-        // Delay between the steps of the serial-number sequence (must be >= 1000 ms).
-        const val SERIAL_STEP_DELAY_MS = 1200L
+        // Delay between the steps of the serial-number sequence. Each exchange() already
+        // blocks until the device replies (or its own idle timeout) -- this is extra padding
+        // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms; halved after the same
+        // testing pass that shortened CSC's.
+        const val SERIAL_STEP_DELAY_MS = 600L
+        // Settle time after the serial write before reading it back, so the modem has a moment
+        // to commit the NV value -- separate from SERIAL_STEP_DELAY_MS so it can be tuned on
+        // its own. readModemSerial() retries with its own delay if this isn't quite enough.
+        const val SERIAL_POST_WRITE_SETTLE_MS = 500L
         // CSC (Sales Code) writes are a handful of lightweight AT+PRECONFG/activation
         // commands with no flash-heavy work behind them, so they tolerate a shorter
-        // inter-command gap than the serial sequence. 500 ms has been reliable in testing;
-        // lower it further only if your modem consistently keeps up.
-        const val CSC_STEP_DELAY_MS = 500L
+        // inter-command gap than the serial sequence. Each exchange() already blocks until
+        // the device replies (or its own idle timeout), so this is pure extra padding on
+        // top of that -- 250 ms has been reliable in testing; lower it further only if your
+        // modem consistently keeps up.
+        const val CSC_STEP_DELAY_MS = 250L
         // Wait before a CSC retry attempt (separate from the serial retry delay above).
-        const val CSC_RETRY_DELAY_MS = 500L
-        // Wait before a serial-write retry attempt. Kept shorter than SERIAL_STEP_DELAY_MS
-        // (which paces the AT commands within one attempt, and stays >= 1000 ms per the
-        // note above) since this is just the gap between whole attempts.
-        const val SERIAL_RETRY_DELAY_MS = 500L
+        const val CSC_RETRY_DELAY_MS = 300L
+        // Wait before a serial-write retry attempt -- just the gap between whole attempts.
+        const val SERIAL_RETRY_DELAY_MS = 300L
+        // How long to wait for the device to drop off USB after each individual command in
+        // REBOOT_COMMANDS. A command that will actually cause a full reboot shows it quickly;
+        // this only needs to be long enough to catch that, not to patiently wait out a command
+        // that was never going to work (several of REBOOT_COMMANDS only reset the modem stack,
+        // not the whole device, on a lot of units -- see rebootVerifiedWithPowerReset).
+        const val REBOOT_DETACH_WAIT_MS = 3000L
+        // Same idea for the AT+POWRESET=0,0 fallback: a bit more margin since it's the last
+        // resort, but still far short of the old 8s.
+        const val POWRESET_DETACH_WAIT_MS = 4000L
         private const val READ_BUF = 256
     }
 
@@ -235,6 +251,11 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 try {
                     val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
+                    assertControlLines(conn, intf)
+                    // Quick existence probe first: a wrong interface is skipped in ~0.4s instead
+                    // of paying the full per-command reply timeout for every command in the list.
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
+                    if (probe.contains("ERROR", true) && probe.length > 40) continue
                     for (cmd in commands) {
                         val reply = exchange(conn, epIn, epOut, cmd)
                         if (reply.isNotBlank() && !isRejected(reply)) result[cmd] = reply
@@ -300,7 +321,15 @@ class AtCommandTransport(private val context: Context) : Closeable {
         else -> "A step was rejected by the device."
     }
 
-    private fun exchange(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint, cmd: String): String {
+    /** @param quick  true for a plain existence probe (is this interface an AT port at all?),
+     *   where a wrong interface should be given up on fast instead of waiting out the full
+     *   generous timeout a real command reply deserves. Used for the "AT" probe that runs
+     *   before every real command sequence, across however many candidate interfaces the
+     *   device exposes -- with the normal (non-quick) timeouts, each wrong interface skipped
+     *   during that probe cost up to ~1.8s; quick cuts that to ~0.4s, and that saving applies
+     *   once per candidate interface, in every AT-based operation (CSC/serial read+write,
+     *   reboot, force-BROM, force-download). Real command exchanges always use quick = false. */
+    private fun exchange(conn: UsbDeviceConnection, epIn: UsbEndpoint, epOut: UsbEndpoint, cmd: String, quick: Boolean = false): String {
         // Discard anything left over from a previous (slow) command so replies never shift by one.
         val drain = ByteArray(READ_BUF)
         while (conn.bulkTransfer(epIn, drain, drain.size, 120) > 0) { /* discard stale bytes */ }
@@ -310,9 +339,11 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val buf = ByteArray(1024)
         var idle = 0
         var gotData = false
+        val pollTimeout = if (quick) 200 else 600
+        val maxIdleNoData = if (quick) 2 else 3
         // Wait longer for the first byte (Samsung can be slow), shorter once data is flowing.
         while (sb.length < 8192) {
-            val n = conn.bulkTransfer(epIn, buf, buf.size, 600)
+            val n = conn.bulkTransfer(epIn, buf, buf.size, pollTimeout)
             if (n > 0) {
                 sb.append(String(buf, 0, n, Charsets.US_ASCII))
                 gotData = true
@@ -321,7 +352,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                 if (isAtTerminator(lastLine)) break
             } else {
                 idle++
-                if (idle >= (if (gotData) 2 else 3)) break
+                if (idle >= (if (gotData) 2 else maxIdleNoData)) break
             }
         }
         val lines = sb.toString().replace("\r", "\n").lines()
@@ -376,7 +407,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     assertControlLines(conn, intf)
                     // Probe: make sure this really is an AT port before sending anything else.
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     for ((ci, cmd) in REBOOT_COMMANDS.withIndex()) {
                         onProgress?.invoke(ci.toFloat() / REBOOT_COMMANDS.size)
                         val bytes = cmd.toByteArray(Charsets.US_ASCII)
@@ -415,7 +446,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     assertControlLines(conn, intf)
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
                     var allOk = true
                     commands.forEachIndexed { i, cmd ->
@@ -459,7 +490,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     return line
                 }
             }
-            kotlinx.coroutines.delay(800)
+            kotlinx.coroutines.delay(500)
         }
         return ""
     }
@@ -472,7 +503,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val tagged = Regex("\\+PRECONFG:\\s*1,\\s*([A-Za-z]{3})").find(raw)?.groupValues?.get(1)
             val csc = tagged ?: Regex("[A-Z]{3}", RegexOption.IGNORE_CASE).find(raw)?.value
             if (!csc.isNullOrBlank()) return csc.uppercase()
-            kotlinx.coroutines.delay(800)
+            kotlinx.coroutines.delay(500)
         }
         return ""
     }
@@ -579,7 +610,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         }
 
         // Post-write verification: read back the serial from the modem.
-        kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS)
+        kotlinx.coroutines.delay(SERIAL_POST_WRITE_SETTLE_MS)
         val after = readModemSerial(device, attempts = 3)
         log("Post-write serial read-back: '${after.ifBlank { "(none)" }}'")
 
@@ -619,7 +650,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     assertControlLines(conn, intf)
 
                     // Probe: confirm this really is an AT port before sending anything else.
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
 
                     var allOk = true
@@ -675,7 +706,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val epIn = runCatching { bulkIn(intf) }.getOrNull() ?: continue
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     assertControlLines(conn, intf)
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
 
                     FORMAT_UNLOCK_COMMANDS.forEachIndexed { i, cmd ->
@@ -825,7 +856,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val epOut = runCatching { bulkOut(intf) }.getOrNull() ?: continue
                     assertControlLines(conn, intf)
 
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
 
                     log("Accessing device modem port...")
@@ -875,11 +906,18 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     assertControlLines(conn, intf)
 
                     // Probe
-                    val probe = exchange(conn, epIn, epOut, "AT")
+                    val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
 
                     var anySuccess = false
-                    // First try standard reboot commands
+                    // First try standard reboot commands. A command that is actually going to
+                    // drop the device off USB does so within a second or two -- waiting the old
+                    // 10s per command here was the main reason a reboot (and so the whole CSC/
+                    // serial change it ends) could take the better part of a minute whenever the
+                    // first command or two only reset the modem stack instead of the full device
+                    // (REBOOT_COMMANDS tries several commands precisely because that's common).
+                    // 3s per command is enough margin for a real detach while cutting the
+                    // worst case (every command but the last one failing) from ~50s to ~12s.
                     for ((ci, cmd) in REBOOT_COMMANDS.withIndex()) {
                         onProgress?.invoke(ci.toFloat() / REBOOT_COMMANDS.size)
                         val bytes = cmd.toByteArray(Charsets.US_ASCII)
@@ -887,7 +925,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                                 if (sent < 0) continue
                         val buf = ByteArray(READ_BUF)
                         val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
-                        if (waitForDetach(device, 10000)) {
+                        if (waitForDetach(device, REBOOT_DETACH_WAIT_MS)) {
                             log("✓ USB link dropped after $cmd — device is rebooting.")
                             anySuccess = true
                             break
@@ -900,8 +938,9 @@ class AtCommandTransport(private val context: Context) : Closeable {
                         val sent = conn.bulkTransfer(epOut, powresetBytes, powresetBytes.size, 2000)
                         if (sent >= 0) {
                             log("✓ Sent AT+POWRESET=0,0 — waiting for detach...")
-                            kotlinx.coroutines.delay(SERIAL_STEP_DELAY_MS) // Give modem time to process
-                            if (waitForDetach(device, 8000)) {
+                            // waitForDetach already polls every 250ms from the moment it starts, so
+                            // a flat delay before it added nothing but dead time -- removed.
+                            if (waitForDetach(device, POWRESET_DETACH_WAIT_MS)) {
                                 log("✓ USB link dropped after POWRESET — device is rebooting.")
                                 anySuccess = true
                             } else {
