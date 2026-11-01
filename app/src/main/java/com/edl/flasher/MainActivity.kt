@@ -233,8 +233,10 @@ class MainActivity : ComponentActivity() {
                     onAdbShell = viewModel::runAdbShell,
                     onAdbScript = viewModel::runAdbScript,
                     onMtpFormatAt = viewModel::atFormatDevice,
-                    onChangeSerial = viewModel::changeSamsungSerial,
-                    onChangeCsc = viewModel::changeSamsungCsc,
+                    onChangeSerial = viewModel::runChangeSerial,
+                    onChangeCsc = viewModel::runChangeCsc,
+                    onSubmitPrompt = viewModel::submitPromptInput,
+                    onCancelPrompt = viewModel::cancelPrompt,
                     onShowInfoPopup = viewModel::showPhoneInfoPopup
                 )
                 }
