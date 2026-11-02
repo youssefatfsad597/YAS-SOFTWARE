@@ -234,6 +234,17 @@ class LicenseService(context: Context) {
         val refresh = prefs.getString("refresh_token", null) ?: throw IllegalStateException("انتهت الجلسة. سجّل الدخول مرة أخرى.")
         val result = request("/auth/v1/token?grant_type=refresh_token", "POST", JSONObject().put("refresh_token", refresh), authenticated = false)
         saveSession(result, email())
+        // Supabase rotates the refresh token on every use -- the one we just sent is now
+        // dead. If "تذكرني" is on, the remembered copy captured at sign-in is the SAME
+        // token and just died too, so it must be advanced to the new one here or the next
+        // app launch's auto sign-in will silently fail (stale/already-used token) and fall
+        // back to asking for the password again, even though the user enabled remember-me.
+        if (rememberEnabled()) {
+            val newRefresh = result.optString("refresh_token")
+            if (newRefresh.isNotBlank()) {
+                prefs.edit().putString("remembered_refresh_token", newRefresh).apply()
+            }
+        }
     }
 
     private fun request(path: String, method: String, body: JSONObject?, authenticated: Boolean, bearerOverride: String? = null): JSONObject {
