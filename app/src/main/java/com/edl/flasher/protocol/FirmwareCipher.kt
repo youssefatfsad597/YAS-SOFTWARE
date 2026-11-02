@@ -3,11 +3,6 @@ package com.edl.flasher.protocol
 import android.content.Context
 import com.edl.flasher.auth.TamperGuard
 import java.io.InputStream
-import java.security.MessageDigest
-import javax.crypto.Cipher
-import javax.crypto.CipherInputStream
-import javax.crypto.spec.IvParameterSpec
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Decrypts the embedded firmware assets (X216B.elf, *.bin, T509 fdl images) that are
@@ -47,18 +42,12 @@ import javax.crypto.spec.SecretKeySpec
  */
 internal object FirmwareCipher {
 
-    // --- Obfuscated AES-256 key material: combined with the signing cert hash below,
-    // never used directly. Keep in sync with encrypt_firmware_assets.sh / the CI workflow.
-    // Never log, print, or expose this reconstructed key.
-    private val KEY_MATERIAL = byteArrayOf(
-        -113, -99, -88, -50, -16, 14, -16, -43, -79, 62, 81, -12, -4, 10, -109, -37,
-        37, -1, -98, 83, -67, 34, -52, -72, -68, -119, 64, -57, 63, -125, -58, -15
-    )
-    private val KEY_MASK = byteArrayOf(
-        38, 41, 78, -118, 31, -86, -14, -103, 115, 66, 127, -128, -87, 0, -98, -76,
-        94, 116, -22, -46, 56, -28, -30, -49, 124, -94, 21, -57, -64, 32, 68, -23
-    )
-    private const val PAD = 0x7E
+    // The obfuscated KEY_MATERIAL/KEY_MASK and the SHA-256 derivation steps that used to
+    // live here now live ONLY in libyas_core.so (see NativeCore.deriveBoundKeyNative /
+    // yas_native.c). AES-256-CTR itself also runs natively (NativeCore.aesCtrXcryptNative)
+    // instead of through javax.crypto, so no decrypted plaintext path nor key material
+    // touches the JVM heap via a standard, easily-hooked java.security/javax.crypto call
+    // that a Frida script can intercept by class/method name alone.
 
     // The committed app/debug.keystore's own SHA-256 fingerprint (not secret -- the
     // keystore itself is committed in plaintext). Used only as the debug-build salt, so
@@ -69,43 +58,23 @@ internal object FirmwareCipher {
 
     private const val IV_LEN = 16
 
-    private fun reconstructKeyMaterial(): ByteArray {
-        val mask = ByteArray(KEY_MASK.size) { i -> (KEY_MASK[i].toInt() xor PAD).toByte() }
-        return ByteArray(KEY_MATERIAL.size) { i -> (KEY_MATERIAL[i].toInt() xor mask[i].toInt()).toByte() }
-    }
-
-    /** Cert-bound half of the key = SHA-256(obfuscated material || lowercase-hex cert SHA-256 bytes). */
-    private fun deriveKey(certSha256Hex: String): ByteArray {
-        val material = reconstructKeyMaterial()
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(material)
-        java.util.Arrays.fill(material, 0)
-        digest.update(certSha256Hex.lowercase().toByteArray(Charsets.US_ASCII))
-        return digest.digest()
-    }
-
-    /** Final AES key = SHA-256(cert-bound key || serverKey). Requires BOTH ingredients:
-     *  the real signing certificate (as before) AND a fresh key fragment that only the
-     *  server hands out via authorize_operation for a currently-allowed operation (see
-     *  SensitiveOperationGate). Neither half alone decrypts anything. */
-    private fun deriveBoundKey(certSha256Hex: String, serverKey: ByteArray): ByteArray {
-        val certKey = deriveKey(certSha256Hex)
-        val digest = MessageDigest.getInstance("SHA-256")
-        digest.update(certKey)
-        java.util.Arrays.fill(certKey, 0)
-        digest.update(serverKey)
-        return digest.digest()
-    }
+    // Chunk size for native AES-CTR calls while streaming a large asset (e.g.
+    // sec_efs.bin, ~20MB) -- bounds peak extra memory from the JNI byte[] copies
+    // without making an excessive number of native calls. Must be a multiple of
+    // 16 (AES block size) so chunk boundaries always land on a block boundary
+    // and the counter advances by a whole number of blocks between calls.
+    internal const val CHUNK_SIZE = 256 * 1024 // 256 KiB, 16384 AES blocks -- must stay a multiple of 16
 
     /** Plaintext size of an encrypted asset, given the on-disk (encrypted) size. */
     fun plaintextSize(encryptedSize: Long): Long =
         if (encryptedSize < IV_LEN) -1L else encryptedSize - IV_LEN
 
     /**
-     * Wraps a raw (encrypted) asset InputStream with a decrypting CipherInputStream.
-     * Reads and consumes the leading 16-byte IV itself, then streams the rest through
-     * AES/CTR so callers never hold the whole file in memory. `context` is required to
-     * read this APK's real signing certificate (see class doc).
+     * Wraps a raw (encrypted) asset InputStream with a decrypting stream backed by
+     * [NativeCore.aesCtrXcryptNative]. Reads and consumes the leading 16-byte IV itself,
+     * then streams the rest in [CHUNK_SIZE] blocks so callers never hold the whole file
+     * in memory. `context` is required to read this APK's real signing certificate (see
+     * class doc).
      *
      * `serverKey` MUST come from a fresh, server-granted operation (see
      * SensitiveOperationGate.authorize / OperationKeyClient.deriveFirmwareKey). This is
@@ -123,10 +92,73 @@ internal object FirmwareCipher {
             read += n
         }
         val certHash = TamperGuard.currentCertSha256(context) ?: DEBUG_CERT_SHA256
-        val keyBytes = deriveBoundKey(certHash, serverKey)
-        val cipher = Cipher.getInstance("AES/CTR/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(keyBytes, "AES"), IvParameterSpec(iv))
-        java.util.Arrays.fill(keyBytes, 0) // best-effort: don't keep the raw key around longer than needed
-        return CipherInputStream(rawAssetStream, cipher)
+        val keyBytes = com.edl.flasher.auth.NativeCore.deriveBoundKeyNative(certHash, serverKey)
+            ?: throw java.io.IOException("native key derivation unavailable")
+        return NativeCtrDecryptingStream(rawAssetStream, keyBytes, iv)
+    }
+}
+
+/**
+ * InputStream wrapper that pulls ciphertext from [source] in [FirmwareCipher]-sized
+ * chunks and runs each through [com.edl.flasher.auth.NativeCore.aesCtrXcryptNative],
+ * advancing the CTR counter between chunks via [com.edl.flasher.auth.CtrCounter] so the
+ * output is byte-identical to decrypting the whole file in one call.
+ */
+private class NativeCtrDecryptingStream(
+    private val source: InputStream,
+    private val key: ByteArray,
+    private val iv: ByteArray
+) : InputStream() {
+    private var plainBuffer: ByteArray = ByteArray(0)
+    private var plainPos = 0
+    private val readBuf = ByteArray(FirmwareCipher.CHUNK_SIZE)
+    private var closed = false
+
+    private fun fillIfNeeded(): Boolean {
+        if (plainPos < plainBuffer.size) return true
+        if (closed) return false
+
+        // CRITICAL: InputStream.read(buf) is NOT guaranteed to fill buf even when more
+        // data remains -- it may legally return any n in 1..buf.size. If an
+        // intermediate (non-final) chunk were short, the next native call would start a
+        // fresh 16-byte-aligned keystream block instead of continuing mid-block, silently
+        // producing wrong plaintext for the rest of the file with no error anywhere. So:
+        // loop until readBuf is completely full OR the source is actually exhausted.
+        // Only the LAST chunk of a stream may be shorter than readBuf.size -- see
+        // CtrCounter doc and the chunk-alignment note on CHUNK_SIZE above.
+        var totalRead = 0
+        while (totalRead < readBuf.size) {
+            val n = source.read(readBuf, totalRead, readBuf.size - totalRead)
+            if (n < 0) break
+            totalRead += n
+        }
+        if (totalRead == 0) { closed = true; return false }
+        if (totalRead < readBuf.size) closed = true // genuine EOF -- this is the final chunk
+
+        val cipherChunk = if (totalRead == readBuf.size) readBuf else readBuf.copyOf(totalRead)
+        val blocksInChunk = (totalRead + 15) / 16
+        plainBuffer = com.edl.flasher.auth.NativeCore.aesCtrXcryptNative(key, iv, cipherChunk)
+            ?: throw java.io.IOException("native AES-CTR decrypt failed")
+        com.edl.flasher.auth.CtrCounter.advance(iv, blocksInChunk.toLong())
+        plainPos = 0
+        return plainBuffer.isNotEmpty()
+    }
+
+    override fun read(): Int {
+        if (!fillIfNeeded()) return -1
+        return plainBuffer[plainPos++].toInt() and 0xFF
+    }
+
+    override fun read(b: ByteArray, off: Int, len: Int): Int {
+        if (!fillIfNeeded()) return -1
+        val n = minOf(len, plainBuffer.size - plainPos)
+        System.arraycopy(plainBuffer, plainPos, b, off, n)
+        plainPos += n
+        return n
+    }
+
+    override fun close() {
+        java.util.Arrays.fill(key, 0)
+        source.close()
     }
 }

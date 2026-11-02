@@ -6,6 +6,12 @@ plugins {
 android {
     namespace = "com.edl.flasher"
     compileSdk = 34
+    // Pinned so every build (your machine, Codespaces, or the GitHub Actions runners in
+    // .github/workflows/*.yml) uses the exact same NDK -- a version mismatch here is the
+    // #1 cause of "builds locally, fails in CI" for the native module added in
+    // app/src/main/cpp/. The workflows install this exact version via sdkmanager before
+    // calling gradle. Bump both together if you ever change it.
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.yas.flashedl"
@@ -13,7 +19,26 @@ android {
         targetSdk = 34
         versionCode = 11
         versionName = "4.0-YAS-X216B-Odin"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += ""
+                // Keep the .so small and build for every ABI you actually ship to --
+                // trim this list to match your real device/emulator test matrix.
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
+        }
     }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    // Release .so files ship with debug symbols stripped automatically by AGP;
+    // debug keeps them so crashes stay readable locally.
 
     val hasReleaseSigning = project.hasProperty("KEYSTORE_FILE")
     signingConfigs {

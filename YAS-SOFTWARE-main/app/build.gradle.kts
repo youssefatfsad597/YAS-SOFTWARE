@@ -1,0 +1,141 @@
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+}
+
+android {
+    namespace = "com.edl.flasher"
+    compileSdk = 34
+    // Pinned so every build (your machine, Codespaces, or the GitHub Actions runners in
+    // .github/workflows/*.yml) uses the exact same NDK -- a version mismatch here is the
+    // #1 cause of "builds locally, fails in CI" for the native module added in
+    // app/src/main/cpp/. The workflows install this exact version via sdkmanager before
+    // calling gradle. Bump both together if you ever change it.
+    ndkVersion = "26.1.10909125"
+
+    defaultConfig {
+        applicationId = "com.yas.flashedl"
+        minSdk = 26
+        targetSdk = 34
+        versionCode = 11
+        versionName = "4.0-YAS-X216B-Odin"
+
+        externalNativeBuild {
+            cmake {
+                cppFlags += ""
+                // Keep the .so small and build for every ABI you actually ship to --
+                // trim this list to match your real device/emulator test matrix.
+                abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    // Release .so files ship with debug symbols stripped automatically by AGP;
+    // debug keeps them so crashes stay readable locally.
+
+    val hasReleaseSigning = project.hasProperty("KEYSTORE_FILE")
+    signingConfigs {
+        // Fixed, committed debug keystore (app/debug.keystore) so every debug APK -
+        // whether built locally or by a fresh GitHub Actions runner - is signed with
+        // the SAME certificate every time. Without this, Gradle falls back to
+        // ~/.android/debug.keystore, which CI regenerates randomly on every run,
+        // causing "App not installed as package conflicts with an existing package"
+        // when installing a newer debug build over an older one.
+        getByName("debug") {
+            storeFile = file("debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(project.property("KEYSTORE_FILE") as String)
+                storePassword = project.property("KEYSTORE_PASSWORD") as String
+                keyAlias = project.property("KEY_ALIAS") as String
+                keyPassword = project.property("KEY_PASSWORD") as String
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
+            buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            // Default points at the hosted reset-password.html in the public "Yas" repo
+            // (GitHub Pages), so the link works from Gmail/any mail app without needing
+            // -PRESET_REDIRECT_URL on every build. Override with -PRESET_REDIRECT_URL=... if needed.
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "https://youssefatfsad597.github.io/Yas/reset-password.html") + "\"")
+            // Left blank on purpose: the tamper check is skipped for debug builds.
+            buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
+        }
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            buildConfigField("String", "SUPABASE_URL", "\"" + (project.findProperty("SUPABASE_URL") ?: "https://YOUR_PROJECT.supabase.co") + "\"")
+            buildConfigField("String", "SUPABASE_ANON_KEY", "\"" + (project.findProperty("SUPABASE_ANON_KEY") ?: "YOUR_SUPABASE_ANON_KEY") + "\"")
+            buildConfigField("String", "RESET_REDIRECT_URL", "\"" + (project.findProperty("RESET_REDIRECT_URL")?.toString()?.takeIf { it.isNotBlank() } ?: "https://youssefatfsad597.github.io/Yas/reset-password.html") + "\"")
+            // Fill RELEASE_CERT_SHA256 in gradle.properties with your release keystore's
+            // SHA-256 fingerprint once you have one, so TamperGuard can reject re-signed APKs.
+            buildConfigField("String", "RELEASE_CERT_SHA256", "\"" + (project.findProperty("RELEASE_CERT_SHA256") ?: "") + "\"")
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+
+    // Keep firmware assets uncompressed in the APK: this lets AssetFileDescriptor
+    // report an exact length (needed by EmbeddedFirmware.sizeOf) and lets large
+    // files such as sec_efs.bin be streamed directly without loading them fully
+    // into memory first.
+    androidResources {
+        // "enc" = the AES-256-CTR encrypted firmware assets (see FirmwareCipher). Encrypted
+        // bytes are already high-entropy so compression wouldn't shrink them anyway; keeping
+        // them uncompressed preserves the exact-length guarantee AssetFileDescriptor needs.
+        noCompress += listOf("elf", "bin", "enc")
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+
+    composeOptions {
+        kotlinCompilerExtensionVersion = "1.5.14"
+    }
+}
+
+dependencies {
+    val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
+    implementation(composeBom)
+
+    implementation("androidx.core:core-ktx:1.13.1")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.4")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.4")
+    implementation("androidx.activity:activity-compose:1.9.1")
+    implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
+    // Needed by KillSwitchWorker (auth/KillSwitchWorker.kt) to poll the server in the
+    // background for an admin "force logout" even while the app UI is not in front.
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
+    implementation("androidx.compose.ui:ui")
+    implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.compose.material3:material3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+}

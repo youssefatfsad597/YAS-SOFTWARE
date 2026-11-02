@@ -4,8 +4,6 @@ import android.content.Context
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import java.security.MessageDigest
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 /**
  * Independent of OperationAuthClient and TamperGuard on purpose. Even someone
@@ -20,17 +18,9 @@ import javax.crypto.spec.SecretKeySpec
  */
 object OperationKeyClient {
 
-    // Partial key embedded in the APK. On its own this is NOT the firmware
-    // key -- it's one input to HKDF, the other being server-issued key
-    // material that only exists for ~60 seconds after a granted operation.
-    // Regenerate this (and re-derive your firmware encryption accordingly)
-    // rather than reusing any example value.
-    private val embeddedPartialKey: ByteArray = byteArrayOf(
-        0x4f, 0x1a.toByte(), 0x9c.toByte(), 0x33, 0x7e, 0x02, 0xd5.toByte(), 0x61,
-        0x8b.toByte(), 0x44, 0xf0.toByte(), 0x19, 0x27, 0xae.toByte(), 0x5d, 0x90.toByte(),
-        0x3c, 0xb7.toByte(), 0x6a, 0x15, 0xdc.toByte(), 0x48, 0x22, 0xf3.toByte(),
-        0x09, 0x76, 0xcf.toByte(), 0x51, 0x8e.toByte(), 0x3f, 0xa1.toByte(), 0x60
-    )
+    // The partial key and the HMAC/HKDF derivation itself now live ONLY in
+    // libyas_core.so (see NativeCore.deriveFirmwareKeyNative / yas_native.c).
+    // Nothing secret remains in Kotlin bytecode here.
 
     private fun usedNoncesPrefs(context: Context) = EncryptedSharedPreferences.create(
         context, "yas_used_nonces",
@@ -51,33 +41,21 @@ object OperationKeyClient {
         return false
     }
 
-    /** HKDF-ish derivation (HMAC-SHA256 extract-and-expand, single block --
-     *  enough for a 32-byte AES-256 key). Returns null if the grant is
-     *  missing/invalid key material, so callers fail closed instead of
-     *  silently using a predictable key. */
+    /** HKDF-ish derivation, now performed entirely in native code (see
+     *  NativeCore.deriveFirmwareKeyNative / yas_native.c) -- the embedded
+     *  partial key and the HMAC calls never surface in Kotlin bytecode.
+     *  Returns null if the grant is missing/invalid/malformed, so callers
+     *  fail closed instead of silently using a predictable key. */
     fun deriveFirmwareKey(grant: OperationAuthClient.Grant, context: Context, nowEpochSeconds: Long): ByteArray? {
         if (!grant.isFresh(nowEpochSeconds)) return null
         if (grant.keyMaterialHex.isBlank() || grant.nonce.isBlank()) return null
         if (isNonceReused(context, grant.nonce)) return null
 
-        val serverMaterial = hexToBytes(grant.keyMaterialHex) ?: return null
-
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(embeddedPartialKey, "HmacSHA256"))
-        val prk = mac.doFinal(serverMaterial) // extract
-
-        val mac2 = Mac.getInstance("HmacSHA256")
-        mac2.init(SecretKeySpec(prk, "HmacSHA256"))
-        return mac2.doFinal("yas-firmware-key-v1".toByteArray(Charsets.UTF_8)).copyOf(32) // expand
-    }
-
-    private fun hexToBytes(hex: String): ByteArray? {
-        if (hex.length % 2 != 0) return null
         return try {
-            ByteArray(hex.length / 2) { i ->
-                ((Character.digit(hex[i * 2], 16) shl 4) + Character.digit(hex[i * 2 + 1], 16)).toByte()
-            }
-        } catch (_: Exception) { null }
+            NativeCore.deriveFirmwareKeyNative(grant.keyMaterialHex)
+        } catch (_: UnsatisfiedLinkError) {
+            null // libyas_core.so missing/mismatched ABI -- fail closed, never fall back to a Kotlin copy
+        }
     }
 
     /** Constant-time compare, for anywhere a derived value is checked against

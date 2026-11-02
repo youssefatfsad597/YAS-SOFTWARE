@@ -78,6 +78,16 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Install NDK + CMake (required by app/src/main/cpp/, added for JNI key hardening)
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 2 -name sdkmanager | head -n1)
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;26.1.10909125" "cmake;3.22.1"
+
       - name: Build Debug APK Clean
         run: |
           set -o pipefail

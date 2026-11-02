@@ -1,0 +1,71 @@
+name: Build Signed Release APK
+
+# Needs these repo secrets set once under
+# Settings -> Secrets and variables -> Actions -> New repository secret:
+#   KEYSTORE_BASE64     the base64 printed by generate-keystore.yml's summary
+#   KEYSTORE_PASSWORD    the store password you chose there
+#   KEY_ALIAS            the alias you chose there (e.g. yas_key)
+#   KEY_PASSWORD          the key password you chose there
+#   SUPABASE_URL          your project's Supabase URL
+#   SUPABASE_ANON_KEY     your project's Supabase publishable/anon key
+#   RELEASE_CERT_SHA256   the SHA-256 fingerprint from generate-keystore.yml's summary
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Encrypt + Stage Embedded Firmware Assets
+        # Same AES-256-CTR encryption as the debug workflow (tools/encrypt_firmware_assets.sh)
+        # so the release APK also never ships plaintext firmware in its assets.
+        run: bash tools/encrypt_firmware_assets.sh
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Install NDK + CMake (required by app/src/main/cpp/, added for JNI key hardening)
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 2 -name sdkmanager | head -n1)
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Decode keystore
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > app/yas-release.keystore
+
+      - name: Build signed release APK
+        run: |
+          gradle assembleRelease --no-daemon --stacktrace \
+            -PSUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+            -PSUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            -PRELEASE_CERT_SHA256="${{ secrets.RELEASE_CERT_SHA256 }}" \
+            -PKEYSTORE_FILE="yas-release.keystore" \
+            -PKEYSTORE_PASSWORD="${{ secrets.KEYSTORE_PASSWORD }}" \
+            -PKEY_ALIAS="yas_key" \
+            -PKEY_PASSWORD="${{ secrets.KEY_PASSWORD }}"
+
+      - name: Remove keystore copy from workspace
+        if: always()
+        run: rm -f app/yas-release.keystore
+
+      - name: Upload Signed APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAS-SOFTWARE-release-signed
+          path: app/build/outputs/apk/release/app-release.apk

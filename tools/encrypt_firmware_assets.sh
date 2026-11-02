@@ -22,10 +22,33 @@
 #
 # Usage: CERT_SHA256=<hex, from your release keystore> tools/encrypt_firmware_assets.sh
 #        (omit CERT_SHA256 for a debug build -- it falls back automatically)
+#
+# WARNING -- pre-existing scheme mismatch, found while moving the key logic
+# into native code, NOT introduced by that move: this script derives KEY_HEX
+# from KEY_MATERIAL + cert SHA-256 only. But the app's actual decrypt path
+# (FirmwareCipher.decryptingStream -> NativeCore.deriveBoundKeyNative) requires
+# AES key = SHA-256( SHA-256(KEY_MATERIAL || cert_sha256) || serverKey ), where
+# serverKey is a fresh fragment issued per-operation by SensitiveOperationGate
+# / OperationAuthClient -- it does not exist at build time and can't be
+# baked into a static encryption step like this one. Assets encrypted with
+# ONLY this script's KEY_HEX will NOT decrypt via decryptingStream as the app
+# ships today. Before relying on this: either (a) change decryptingStream to
+# use the cert-only key for the embedded/bundled assets and reserve the
+# server-bound key for the separately-downloaded files from section 2 of
+# SETUP.md, or (b) make this script call the same authorize_operation RPC to
+# obtain a real serverKey fragment at build/CI time and mix it in here too.
+# This repo snapshot does not resolve that; pick one before shipping a build
+# that depends on the embedded assets decrypting successfully.
 
 set -euo pipefail
 
-KEY_MATERIAL_HEX="d7ca983a91da7c32bc02500a2b74731105f50afffbb85009be552b7e81ddfc66"
+# Kept in sync with the FW_KEY_MATERIAL reconstructed by
+# reconstruct_fw_key_material() in app/src/main/cpp/yas_native.c (regenerate
+# both together if you rotate this). NOTE -- see the WARNING block below
+# before running this script: it was already out of sync with the runtime
+# key scheme (deriveBoundKeyNative mixes in a server-issued key fragment
+# this script does not) before this migration, and still is after it.
+KEY_MATERIAL_HEX="ef9489a32cdefeaff87268ee52ef19ed6283eaecdd533670946a39fb53023780"
 # Must equal FirmwareCipher.kt's DEBUG_CERT_SHA256 constant.
 DEBUG_CERT_SHA256="7cdc85e66fe80c5f7685ef2649940cc719908befcac713d79dcd1dbecd8e1b4"
 

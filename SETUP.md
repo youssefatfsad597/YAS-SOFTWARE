@@ -95,3 +95,51 @@ The dashboard uses only authenticated RPC functions for admin actions. The SQL f
 - **الصورة:** الإيميل لا يستطيع عرض صورة من داخل المشروع؛ لازم رابط HTTPS عام. ارفع `yas_logo.png` لنفس ريبو **Yas** العام (بجانب `reset-password.html`) — القالبان `recovery.html` و`confirmation.html` فيهم الرابط جاهز بالفعل:
   `https://raw.githubusercontent.com/youssefatfsad597/Yas/main/yas_logo.png`
   بعض البرامج تحجب الصور حتى يضغط المستخدم «عرض الصور».
+
+## 9. ملفات الفيرموير على السيرفر (بدل تضمينها داخل الـ APK)
+
+هذا نظام بديل/إضافي لـ `app/src/main/assets/x216b/` (EmbeddedFirmware.kt): بدل ما الملف يتشفّر مرة واحدة وقت البناء ويتسافر جوه التطبيق، بيتاخد مشفّر من سيرفر خاص، والمفتاح بتاعه مايتسلّمش للتطبيق إلا لو الحساب فعّال في لحظة الطلب نفسها — حتى لو حد عدّل نسخة الـ APK محليًا.
+
+1. **شغّل الملف `supabase/03_firmware_storage.sql`** في SQL Editor بعد `schema.sql` و`02_operation_auth.sql`.
+2. **اعمل Storage bucket** اسمه بالظبط `yas-firmware` (Private، مش Public)، وضيف الـ policy المكتوبة في آخر السكريبت (قسم 5-ب).
+3. **ارفع ملف فيرموير** من جهازك (مش من التطبيق ولا من لوحة الإدارة):
+   ```bash
+   pip install requests cryptography --break-system-packages
+   export SUPABASE_URL=https://xxxx.supabase.co
+   export SUPABASE_SERVICE_ROLE_KEY=ey...   # من Project Settings → API → service_role (سرّي، متشاركوش حد)
+   python3 tools/upload_firmware.py \
+     --file /path/to/sec_efs.bin \
+     --slug x216b/sec_efs.bin \
+     --display-name "X216B sec_efs.bin" \
+     --device-model X216B \
+     --cert-sha256 <SHA-256 شهادة التوقيع بتاعة الـ release، حروف صغيرة>
+   ```
+   لو سبت `--cert-sha256` فاضية بيستخدم شهادة الـ debug.keystore الافتراضية (مفيد للتجربة بس، مش للنشر).
+4. **في الكود:** `RemoteFirmware.catalog(licenseService)` لعرض قائمة الملفات، و`RemoteFirmware.openStream(context, licenseService, slug)` للتنزيل وفك التشفير كـ `InputStream` عادي. كل استدعاء بيعمل تحقق كامل من حالة الاشتراك على السيرفر (`authorize_firmware_download`)، وبيتأكد في النهاية إن الـ SHA-256 بتاع الملف اللي اتفك مطابق للمسجل وقت الرفع — لو مش مطابق بيرمي استثناء بدل ما يسيب ملف فاسد يتستخدم في الفلاش.
+5. **لو غيّرت المفاتيح** في `app/src/main/cpp/yas_native.c` (`EMBEDDED_PARTIAL_KEY_ENC` / `FW_KEY_MATERIAL` / `FW_KEY_MASK`)، **لازم** تحدّث نفس القيم (بصورتها الأصلية غير المشفّرة) في `tools/upload_firmware.py` (`EMBEDDED_PARTIAL_KEY` / `FW_KEY_MATERIAL`) — وإلا أي ملف جديد يترفع هيتشفر بمفتاح متوقع من التطبيق، لكن مش هو نفسه اللي البرنامج هيحسبه، فيفشل فك التشفير.
+
+## 10. كل حاجة من الموبايل فقط، عن طريق GitHub Actions (من غير كمبيوتر)
+
+المشروع ده أصلاً متبني على إنك تشتغل من تاب الـ **Actions** في GitHub من المتصفح أو تطبيق GitHub على الموبايل — من غير ما تفتح Android Studio أو تشغّل أي أمر على جهازك. فيه 5 ملفات Workflow جاهزة تحت `.github/workflows/`:
+
+| الملف | الوظيفة | إزاي تشغّله |
+|---|---|---|
+| `generate-keystore.yml` | يعمل شهادة توقيع release جديدة (مرة واحدة بس) ويطلعلك `RELEASE_CERT_SHA256` و`KEYSTORE_BASE64` | Actions ← اختاره ← Run workflow ← حط كلمتين سر |
+| `main.yml` | يبني نسخة **debug** (للتجربة) ويحط الـ APK كمرفق تقدر تنزله | يشتغل تلقائي مع كل push، أو Run workflow يدوي |
+| `release.yml` | يبني نسخة **release** موقّعة جاهزة للنشر | Run workflow يدوي (محتاج الأسرار اللي تحت) |
+| `upload-firmware.yml` | **جديد** — يرفع ملف فيرموير للسيرفر ويشفّره (بديل `tools/upload_firmware.py` اللي محتاج كمبيوتر) | Run workflow ← املا الفورم |
+| `split.yml` | أداة مساعدة مرة واحدة (مش محتاجها غالبًا) | — |
+
+**الأسرار المطلوبة** (Settings ← Secrets and variables ← Actions ← New repository secret)، لازم تتحطّ قبل أي حاجة:
+
+- `SUPABASE_URL`, `SUPABASE_ANON_KEY` — لـ `main.yml`/`release.yml`.
+- `RELEASE_CERT_SHA256`, `KEYSTORE_BASE64`, `KEYSTORE_PASSWORD`, `KEY_PASSWORD` — لـ `release.yml` (تطلع من `generate-keystore.yml`).
+- `SUPABASE_SERVICE_ROLE_KEY` — **سرّ جديد مطلوب** لـ `upload-firmware.yml` بس (من Project Settings ← API ← `service_role`). لازم يتحط كـ secret، **ممنوع** يدخل أي كود أو build.gradle.
+
+**لرفع ملف فيرموير من الموبايل (بدل الأمر اللي محتاج كمبيوتر):**
+1. Actions ← **Upload Firmware File to Server** ← Run workflow.
+2. في `firmware_url` حط رابط تنزيل مباشر للملف (مثلاً رابط تنزيل مباشر من Google Drive، أو أي استضافة ملفات بتديك رابط HTTPS مباشر) — **أو** لو الملف صغير (أقل من ~25MB) ممكن ترفعه هو نفسه للريبو الأول (زرار "Add file" في GitHub من الموبايل) وتحط مكانه في `repo_file_path`.
+3. املا `slug` و`display_name` (و`device_model` و`cert_sha256` لو عندك).
+4. Run workflow، وانتظر لحد ما يخلص (علامة ✓ خضرا). الملف الأصلي (plaintext) **مابيتسجلش في الريبو خالص** — بينتقل في مساحة مؤقتة على سيرفر GitHub وبيتمسح لما الـ job يخلص.
+
+**ملاحظة مهمة:** ملفات الفيرموير المضمّنة جوه الـ APK (الفولدر `firmware/x216b/` وما شابه) **مختلفة تمامًا** عن النظام الجديد ده — دي لسه بتتشفر وقت البناء بـ `tools/encrypt_firmware_assets.sh` جوه `main.yml`/`release.yml` نفسهم، ومفيش داعي تغيّر فيها حاجة. النظام الجديد (`upload-firmware.yml`) للملفات اللي عايز تضيفها أو تحدّثها **من غير ما تعمل build جديد للتطبيق** كل مرة.

@@ -1,0 +1,124 @@
+name: Build YAS SOFTWARE APK
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Check source layout (no files are deleted or moved)
+        run: |
+          # Read-only check. Nothing is deleted, moved or edited here.
+          # These three files belong ONLY in .../flasher/ui/. A copy in .../flasher/protocol/
+          # causes "Redeclaration" / "Conflicting overloads" compile errors.
+          B=app/src/main/java/com/edl/flasher
+          FAIL=0
+          for f in EdlMainScreen.kt EdlViewModel.kt LogSanitizer.kt; do
+            if [ -f "$B/protocol/$f" ]; then
+              echo "::error::Stray $B/protocol/$f - delete it from the repository (it belongs in ui/)."
+              FAIL=1
+            fi
+            if [ ! -f "$B/ui/$f" ]; then
+              echo "::error::Missing $B/ui/$f - upload it into the ui folder."
+              FAIL=1
+            fi
+          done
+          if ! grep -q "PackageEntry" "$B/protocol/OdinTarFlasher.kt"; then
+            echo "::warning::protocol/OdinTarFlasher.kt looks like the OLD version (no PackageEntry). Build continues; if it fails, upload the new file to $B/protocol/"
+            echo "OdinTarFlasher.kt copies found in the repo:"
+            find . -name "OdinTarFlasher.kt" -not -path "./.git/*"
+          fi
+          [ "$FAIL" -eq 0 ] || exit 1
+
+
+      - name: Check required firmware files are present in the repository
+        run: |
+          set -e
+          MISSING=0
+          for f in X216B.elf frp.bin sec_efs.bin persistent.bin misc.bin; do
+            [ -f "firmware/x216b/$f" ] || { echo "::error::Missing firmware/x216b/$f"; MISSING=1; }
+          done
+          for VARIANT in t509 t509n; do
+            for f in fdl1-sign.bin fdl2-sign.bin; do
+              [ -f "firmware/$VARIANT/$f" ] || echo "::warning::Missing firmware/$VARIANT/$f -- the $VARIANT tab will report firmware as not ready until it is committed."
+            done
+          done
+          for f in T505N.elf frp.bin persistent.bin misc.bin; do
+            [ -f "firmware/t505n/$f" ] || echo "::warning::Missing firmware/t505n/$f -- the T505N tab's Format + FRP / Erase FRP buttons will report firmware as not ready until it is committed."
+          done
+          if [ "$MISSING" -eq 1 ]; then
+            echo "::error::One or more required X216B firmware files are missing. The APK will still build, but the embedded one-tap Wipe & Write flow will be disabled until these are committed."
+          fi
+
+      - name: Encrypt + Stage Embedded Firmware Assets
+        # Firmware files are never copied into the APK's assets in plaintext: this
+        # AES-256-CTR encrypts each file (random IV per file, prepended) so that
+        # unzipping the built APK does NOT hand out ready-to-use firmware images.
+        # Decryption happens on-device at runtime (see FirmwareCipher.kt).
+        run: |
+          set -e
+          bash tools/encrypt_firmware_assets.sh
+          echo "Embedded firmware assets staged (encrypted):"
+          find app/src/main/assets -name "*.enc" -exec ls -la {} \;
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      - name: Install NDK + CMake (required by app/src/main/cpp/, added for JNI key hardening)
+        run: |
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -maxdepth 2 -name sdkmanager | head -n1)
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" "ndk;26.1.10909125" "cmake;3.22.1"
+
+      - name: Build Debug APK Clean
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon --no-build-cache --stacktrace 2>&1 | tee build.log
+
+      - name: Show build errors
+        if: failure()
+        run: |
+          python3 - << 'PYEOF'
+          import os, re
+          log = open("build.log", encoding="utf-8", errors="replace").read()
+          root = os.getcwd() + "/"
+          rows = []
+          for m in re.finditer(r"^e: (?:file://)?(\S+?):(\d+):(\d+)\s+(.*)$", log, re.M):
+              path, line, col, msg = m.groups()
+              path = path.replace(root, "")
+              rows.append((path, line, col, msg))
+              if len(rows) <= 10:
+                  print("::error file=%s,line=%s,col=%s::%s" % (path, line, col, msg.replace("%", "%25")))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as s:
+              if rows:
+                  s.write("## Kotlin compile errors (%d)\n\n" % len(rows))
+                  for path, line, col, msg in rows:
+                      s.write("- `%s` line %s: %s\n" % (path, line, msg))
+              else:
+                  m = re.search(r"\* What went wrong:\n(.*?)\n\n", log, re.S)
+                  s.write("## Build failed\n\n```\n%s\n```\n" % (m.group(1) if m else log[-1500:]))
+          PYEOF
+
+      - name: Upload Compiled APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: YAS-SOFTWARE-APK
+          path: app/build/outputs/apk/debug/app-debug.apk

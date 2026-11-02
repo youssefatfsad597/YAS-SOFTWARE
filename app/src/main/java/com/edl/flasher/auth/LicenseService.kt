@@ -219,6 +219,41 @@ class LicenseService(context: Context) {
     suspend fun raw(path: String, method: String, body: JSONObject?, authenticated: Boolean): JSONObject =
         withContext(Dispatchers.IO) { request(path, method, body, authenticated) }
 
+    /** Streams a binary GET (Supabase Storage object download) with the current session's
+     *  bearer token -- unlike [raw]/[request], the response is not JSON and is not fully
+     *  buffered in memory, so this is safe for large firmware files. Caller MUST close
+     *  the returned stream; doing so also releases the underlying HTTP connection. Throws
+     *  on any non-2xx response (including the RLS-denied case -- see 03_firmware_storage.sql
+     *  section 5b) rather than returning a stream of an HTML/JSON error body. */
+    fun downloadAuthenticated(path: String): java.io.InputStream {
+        if (baseUrl.contains("YOUR_PROJECT") || anonKey == "YOUR_SUPABASE_ANON_KEY") {
+            throw IllegalStateException("لم يتم إعداد Supabase بعد. اتبع ملف SETUP.md وأضف SUPABASE_URL وSUPABASE_ANON_KEY.")
+        }
+        val token = prefs.getString("access_token", null).orEmpty()
+        val conn = (URL(baseUrl + path).openConnection() as HttpURLConnection).apply {
+            requestMethod = "GET"
+            connectTimeout = 15000
+            readTimeout = 30000
+            setRequestProperty("apikey", anonKey)
+            setRequestProperty("Authorization", "Bearer $token")
+        }
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            val errText = conn.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+            conn.disconnect()
+            throw IllegalStateException(translateAuthError(errText.ifBlank { "HTTP $code" }))
+        }
+        val inner = conn.inputStream
+        return object : java.io.InputStream() {
+            override fun read(): Int = inner.read()
+            override fun read(b: ByteArray, off: Int, len: Int): Int = inner.read(b, off, len)
+            override fun close() {
+                inner.close()
+                conn.disconnect()
+            }
+        }
+    }
+
     private fun saveSession(result: JSONObject, email: String) {
         val access = result.optString("access_token")
         if (access.isBlank()) {

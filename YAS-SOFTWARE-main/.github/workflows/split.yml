@@ -1,0 +1,97 @@
+name: Split project files (run once)
+
+# One-time helper: reads the big main.yml, writes every embedded file into the
+# repository as a real file, and commits them. Run it from the Actions tab.
+
+on:
+  workflow_dispatch:
+    inputs:
+      source:
+        description: "Workflow file that still contains the embedded sources"
+        default: ".github/workflows/main.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  split:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Extract embedded files
+        run: |
+          cat << 'PYEOF' > /tmp/split.py
+          import base64, os, re, shutil, sys
+
+          src = sys.argv[1]
+          lines = open(src, encoding="utf-8").read().split("\n")
+          start_re = re.compile(r"^(\s*)cat\s*<<\s*'(\w+)'(.*?)>\s*(\S+)\s*$")
+
+          written = []
+          i = 0
+          while i < len(lines):
+              m = start_re.match(lines[i])
+              if not m:
+                  i += 1
+                  continue
+              indent, tag, middle, path = len(m.group(1)), m.group(2), m.group(3), m.group(4)
+              body = []
+              i += 1
+              while i < len(lines) and lines[i].strip() != tag:
+                  l = lines[i]
+                  body.append(l[indent:] if l[:indent].strip() == "" else l)
+                  i += 1
+              i += 1
+              os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+              if "base64 -d" in middle:
+                  data = base64.b64decode("".join(x.strip() for x in body))
+                  open(path, "wb").write(data)
+              else:
+                  open(path, "w", encoding="utf-8", newline="\n").write("\n".join(body) + "\n")
+              written.append(path)
+              print("wrote", path)
+
+          if not written:
+              sys.exit("No embedded files found in " + src + " - it may already be split.")
+
+          # --- one-time fix: EdlMainScreen.kt uses T509Variant but never imported it ---
+          scr = "app/src/main/java/com/edl/flasher/ui/EdlMainScreen.kt"
+          imp = "import com.edl.flasher.protocol.T509Variant"
+          if os.path.isfile(scr):
+              txt = open(scr, encoding="utf-8").read()
+              anchor = "import com.edl.flasher.protocol.StorageType\n"
+              if "T509Variant" in txt and imp not in txt and "import com.edl.flasher.protocol.*" not in txt and anchor in txt:
+                  txt = txt.replace(anchor, anchor + imp + "\n", 1)
+                  open(scr, "w", encoding="utf-8", newline="\n").write(txt)
+                  print("patched: added missing T509Variant import to EdlMainScreen.kt")
+
+          logo = "app/src/main/res/drawable-nodpi/yas_logo.png"
+          if logo not in written:
+              os.makedirs(os.path.dirname(logo), exist_ok=True)
+              if os.path.isfile("assets/yas_logo.png"):
+                  shutil.copy("assets/yas_logo.png", logo)
+                  print("copied assets/yas_logo.png ->", logo)
+              else:
+                  print("::warning::No logo found - wrote a blank placeholder", logo)
+                  open(logo, "wb").write(base64.b64decode(
+                      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="))
+              written.append(logo)
+
+          open("/tmp/extracted.txt", "w").write("\n".join(written) + "\n")
+          print("TOTAL", len(written), "files")
+          PYEOF
+          python3 /tmp/split.py "${{ inputs.source }}"
+
+      - name: Commit extracted files
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          xargs -a /tmp/extracted.txt git add --
+          if git diff --cached --quiet; then
+            echo "Nothing new to commit."
+            exit 0
+          fi
+          git commit -m "Move embedded sources out of main.yml into real files"
+          git push
