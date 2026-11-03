@@ -17,8 +17,84 @@
 #include <jni.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <sys/ptrace.h>
+#include <dirent.h>
 #include "sha256.h"
 #include "aes256ctr.h"
+
+/* ---- Native debugger / Frida detection -----------------------------------
+ * Everything in TamperGuard.kt (Debug.isDebuggerConnected(), the Xposed
+ * classloader probe, the /proc file-path scan) runs on the JVM side and can
+ * be defeated by hooking those exact Java methods with Frida itself -- the
+ * classic "hook the anti-Frida check" trick. These two checks run here, in
+ * native code, specifically so that defeating them requires either patching
+ * this .so's disassembly or intercepting a raw ptrace()/readdir() syscall
+ * (which breaks a lot more than just this check). Still not unbeatable --
+ * see the file header -- but it's a different, harder attack than hooking a
+ * Kotlin method by name.
+ */
+static int detect_tracer(void) {
+    int tracer_pid_hit = 0;
+    FILE *f = fopen("/proc/self/status", "r");
+    if (f) {
+        char line[256];
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "TracerPid:", 10) == 0) {
+                if (atoi(line + 10) != 0) tracer_pid_hit = 1;
+                break;
+            }
+        }
+        fclose(f);
+    }
+
+    /* A process can only have one tracer. If something is already tracing us
+     * (gdb, Frida's ptrace-based attach, etc.) this self-attach fails -- a
+     * kernel-enforced fact we're reading directly, not a /proc text file
+     * whose contents a hook could spoof. */
+    int ptrace_hit = 0;
+    if (ptrace(PTRACE_TRACEME, 0, 0, 0) == -1) {
+        ptrace_hit = 1;
+    } else {
+        ptrace(PTRACE_DETACH, 0, 0, 0); /* release immediately, stay runnable */
+    }
+
+    return (tracer_pid_hit || ptrace_hit) ? 1 : 0;
+}
+
+/* Frida injects a GLib main loop + JS runtime that spawn threads with
+ * characteristic names ("gmain", "gdbus", "gum-js-loop", "pool-frida")
+ * regardless of what the injected .so/server binary itself is named --
+ * unlike a file-path or library-name scan, renaming frida-server doesn't
+ * hide this. */
+static int detect_frida_threads(void) {
+    DIR *d = opendir("/proc/self/task");
+    if (!d) return 0;
+    struct dirent *entry;
+    int hit = 0;
+    while ((entry = readdir(d)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/self/task/%s/comm", entry->d_name);
+        FILE *f = fopen(path, "r");
+        if (!f) continue;
+        char comm[64] = {0};
+        if (fgets(comm, sizeof(comm), f)) {
+            if (strstr(comm, "gum-js-loop") || strstr(comm, "gmain") ||
+                strstr(comm, "gdbus") || strstr(comm, "pool-frida")) {
+                hit = 1;
+            }
+        }
+        fclose(f);
+        if (hit) break;
+    }
+    closedir(d);
+    return hit;
+}
+
+static int native_trace_detected(void) {
+    return (detect_tracer() || detect_frida_threads()) ? 1 : 0;
+}
 
 /* ---- Obfuscated embedded partial key (was OperationKeyClient.embeddedPartialKey) ----
  * Stored XOR'd with a per-byte mask so it doesn't sit as a readable 32-byte
@@ -146,10 +222,39 @@ Java_com_edl_flasher_auth_NativeCore_deriveBoundKeyNative(JNIEnv *env, jobject t
     uint8_t finalKey[32];
     sha256_final(&c2, finalKey);
 
+    /* Same rationale as cert-binding above, one layer deeper: if a debugger
+     * or Frida is attached to THIS process right now, silently corrupt the
+     * returned key instead of refusing/throwing. A loud failure (exception,
+     * null return) is one `if` an attacker can find and invert; a wrong key
+     * just makes the firmware decrypt to garbage, with nothing to patch
+     * because nothing here says "tampering detected" anywhere an attacker
+     * can find and flip it. Combined with TamperGuard's Java-side report to
+     * the server (for banning the device), this means even a fully disabled
+     * server check still leaves the app non-functional for a hooked process. */
+    if (native_trace_detected()) {
+        for (int i = 0; i < 32; ++i) finalKey[i] ^= (uint8_t)(0xC3 + i);
+    }
+
     jbyteArray result = (*env)->NewByteArray(env, 32);
     (*env)->SetByteArrayRegion(env, result, 0, 32, (const jbyte*)finalKey);
     memset(finalKey, 0, sizeof(finalKey));
     return result;
+}
+
+/*
+ * Reporting-only: lets TamperGuard.kt include native-level trace/hook
+ * detection in the indicator string sent to the server (authorize_operation
+ * / authorize_firmware_download / report_tamper), same as the existing
+ * root/debugger/hooking/emulator signals. This is IN ADDITION TO, not
+ * instead of, the silent key corruption in deriveBoundKeyNative above --
+ * that one still protects the app even if this report is suppressed.
+ *
+ * Java signature: static native boolean nativeTraceDetectedNative()
+ */
+JNIEXPORT jboolean JNICALL
+Java_com_edl_flasher_auth_NativeCore_nativeTraceDetectedNative(JNIEnv *env, jobject thiz) {
+    (void)env; (void)thiz;
+    return native_trace_detected() ? JNI_TRUE : JNI_FALSE;
 }
 
 /*
