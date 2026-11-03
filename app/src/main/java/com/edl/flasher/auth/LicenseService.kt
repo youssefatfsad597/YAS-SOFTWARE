@@ -74,9 +74,30 @@ class LicenseService(context: Context) {
         Settings.Secure.getString(appContext.contentResolver, Settings.Secure.ANDROID_ID).orEmpty()
     } catch (_: Exception) { "" }
 
+    /** Widevine DRM "device unique id": unlike deviceId() (app storage, wiped by a plain
+     *  uninstall) and androidId() (wiped by a factory reset), this comes from the DRM
+     *  subsystem's hardware-backed provisioning and on most real OEM devices survives
+     *  BOTH -- see 04_device_fingerprint.sql for why the ban check now also matches on
+     *  it. Never sent raw: hashed with SHA-256 first, so no actual DRM provisioning
+     *  data leaves the device, only an opaque fingerprint of it. Returns "" on devices/
+     *  emulators with no Widevine provisioning -- the server then simply has one fewer
+     *  identifier to match on for that device, nothing breaks. */
+    internal fun widevineId(): String = try {
+        val widevineUuid = UUID(-0x121074568629b532L, -0x5c37d8232ab5c0bL) // standard Widevine scheme UUID
+        val drm = android.media.MediaDrm(widevineUuid)
+        try {
+            val raw = drm.getPropertyByteArray("deviceUniqueId")
+            if (raw == null || raw.isEmpty()) "" else
+                java.security.MessageDigest.getInstance("SHA-256").digest(raw).joinToString("") { "%02x".format(it) }
+        } finally {
+            drm.release()
+        }
+    } catch (_: Exception) { "" }
+
     private fun identityBody(): JSONObject = JSONObject()
         .put("p_device_id", deviceId())
         .put("p_android_id", androidId())
+        .put("p_widevine_id", widevineId())
 
     /** Remembered locally once the server says this phone is banned, so the block also holds offline. */
     fun isLocallyBanned(): Boolean = prefs.getBoolean("device_banned", false)

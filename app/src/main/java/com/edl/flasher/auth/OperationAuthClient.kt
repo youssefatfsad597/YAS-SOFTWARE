@@ -32,15 +32,17 @@ class OperationAuthClient(private val licenseService: LicenseService) {
     }
 
     /** operation: a short machine name, e.g. "flash_frp", "flash_full", "read_efs".
-     *  deviceId/androidId: same identifiers already used by LicenseService. tamperReason:
-     *  TamperGuard.currentIndicators() -- when non-null the server bans this device
-     *  immediately instead of issuing a grant (see authorize_operation's p_tamper_reason). */
-    suspend fun requestGrant(operation: String, deviceId: String, androidId: String, tamperReason: String? = null): Grant =
+     *  deviceId/androidId/widevineId: same identifiers already used by LicenseService.
+     *  tamperReason: TamperGuard.currentIndicators() -- when non-null the server bans
+     *  this device immediately instead of issuing a grant (see authorize_operation's
+     *  p_tamper_reason). */
+    suspend fun requestGrant(operation: String, deviceId: String, androidId: String, tamperReason: String? = null, widevineId: String? = null): Grant =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
                 .put("p_device_id", deviceId)
                 .put("p_operation", operation)
                 .put("p_android_id", androidId)
+            if (!widevineId.isNullOrBlank()) body.put("p_widevine_id", widevineId)
             if (!tamperReason.isNullOrBlank()) body.put("p_tamper_reason", tamperReason)
             val result = licenseService.raw(
                 "/rest/v1/rpc/authorize_operation", "POST", body, authenticated = true

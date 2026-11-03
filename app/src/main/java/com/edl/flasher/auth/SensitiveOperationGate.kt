@@ -32,9 +32,10 @@ object SensitiveOperationGate {
 
         val deviceId = DeviceIdentity.deviceId(context, licenseService)
         val androidId = DeviceIdentity.androidId(context, licenseService)
+        val widevineId = DeviceIdentity.widevineId(context, licenseService)
 
         val grant = try {
-            OperationAuthClient(licenseService).requestGrant(operation, deviceId, androidId, tamperReason)
+            OperationAuthClient(licenseService).requestGrant(operation, deviceId, androidId, tamperReason, widevineId)
         } catch (e: Exception) {
             return Outcome.Denied(e.message ?: "تعذر الاتصال بالخادم للتحقق من العملية.")
         }
@@ -73,4 +74,6 @@ object SensitiveOperationGate {
 object DeviceIdentity {
     fun deviceId(context: Context, licenseService: LicenseService): String = licenseService.deviceId()
     fun androidId(context: Context, licenseService: LicenseService): String = licenseService.androidId()
+    /** See LicenseService.widevineId() -- survives uninstall AND factory reset on most devices. */
+    fun widevineId(context: Context, licenseService: LicenseService): String = licenseService.widevineId()
 }
