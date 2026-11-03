@@ -157,6 +157,16 @@ private class CancellableInputStream(
 
 class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
+    // Slugs registered in Supabase's yas_firmware_files catalog (see
+    // supabase/03_firmware_storage.sql and the "Upload Firmware File to Server" GitHub
+    // Action / tools/upload_firmware.py). Must match the --slug value used at upload
+    // time EXACTLY, including the device-folder prefix.
+    private val X216B_LOADER_SLUG = "x216b/X216B.elf"
+    private val X216B_FRP_SLUG = "x216b/frp.bin"
+    private val X216B_PERSISTENT_SLUG = "x216b/persistent.bin"
+    private val X216B_MISC_SLUG = "x216b/misc.bin"
+    private val X216B_SEC_EFS_SLUG = "x216b/sec_efs.bin"
+
     private val context get() = getApplication<Application>().applicationContext
     private val transport = EdlUsbTransport(context)
     private val sahara = SaharaProtocol(transport, ::appendLog)
@@ -808,14 +818,51 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         bootFirehoseWithBytes(loaderBytes)
     }
 
+    /** Same as [bootFirehoseFromEmbeddedLoader] but fetches the (encrypted) loader from the
+     *  private 'yas-firmware' Storage bucket instead of the APK's bundled assets. Every call
+     *  re-checks the account's live license/device/ban/kill-switch state on the server
+     *  (authorize_firmware_download in 03_firmware_storage.sql), so a suspended or expired
+     *  account gets no loader even from an already-installed, patched APK. */
+    private suspend fun bootFirehoseFromRemoteLoader(slug: String) {
+        appendLog("Downloading loader from server...")
+        val loaderBytes = remoteFirmwareBytes(slug)
+        bootFirehoseWithBytes(loaderBytes)
+    }
+
+    /** Wraps a RemoteFirmware call so a denial surfaces as a readable reason, the same way
+     *  [requireOperationAuthorized] already turns a denial into an IllegalStateException
+     *  instead of a bare status code. */
+    private suspend fun remoteFirmwareBytes(slug: String): ByteArray = try {
+        RemoteFirmware.readAllBytes(context, licenseService, slug)
+    } catch (e: RemoteFirmware.DownloadDenied) {
+        throw IllegalStateException("رفض الخادم تحميل الملف ($slug): ${e.status}")
+    }
+
+    private suspend fun remoteFirmwareStream(slug: String): InputStream = try {
+        RemoteFirmware.openStream(context, licenseService, slug)
+    } catch (e: RemoteFirmware.DownloadDenied) {
+        throw IllegalStateException("رفض الخادم تحميل الملف ($slug): ${e.status}")
+    }
+
+    /** Looks up each slug's size via the server catalog in one call. Doubles as an
+     *  "every file is registered" precondition check -- throws naming the exact missing
+     *  slug instead of failing partway through a multi-partition write. */
+    private suspend fun remoteFirmwareSizes(slugs: List<String>): Map<String, Long> {
+        val bySlug = RemoteFirmware.catalog(licenseService).associateBy { it.slug }
+        return slugs.associateWith { slug ->
+            bySlug[slug]?.sizeBytes?.takeIf { it >= 0 }
+                ?: throw IllegalStateException(
+                    "الملف '$slug' غير مسجل على السيرفر بعد. ارفعه عبر GitHub Actions " +
+                        "(Upload Firmware File to Server) ثم أعد المحاولة."
+                )
+        }
+    }
+
     fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
         val st = _uiState.value
         if (!st.firehoseReady) {
             when (st.gptLoaderChoice) {
-                GptLoaderChoice.X216B -> if (!EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
-                    appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
-                    return
-                }
+                GptLoaderChoice.X216B -> { /* checked remotely at download time */ }
                 GptLoaderChoice.T505N -> if (!T505NFirmware.exists(context, T505NFirmware.LOADER)) {
                     appendLog("ERROR: Built-in T505N loader is missing from the app. Rebuild with firmware/t505n/T505N.elf.")
                     return
@@ -834,7 +881,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             if (!_uiState.value.firehoseReady) {
                 val cur = _uiState.value
                 when (cur.gptLoaderChoice) {
-                    GptLoaderChoice.X216B -> bootFirehoseFromEmbeddedLoader(opKey)
+                    GptLoaderChoice.X216B -> bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
                     GptLoaderChoice.T505N -> bootFirehoseFromEmbeddedT505NLoader(opKey)
                     GptLoaderChoice.MANUAL -> {
                         val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
@@ -856,7 +903,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         val sizeBytes: Long,
         // What the log shows for this step instead of the raw partition/file name.
         val logLabel: String,
-        val open: () -> InputStream
+        val open: suspend () -> InputStream
     )
 
     /** openInputStream() is declared nullable (the provider can return null, e.g. the file was
@@ -869,14 +916,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runX216BWipeAndWriteSequence() {
         runTask("X216B Auto Wipe & Write") {
-            val opKey = requireOperationAuthorized("flash_frp_x216b")
+            requireOperationAuthorized("flash_frp_x216b")
             val useEmbedded = true
 
-            if (useEmbedded && !EmbeddedFirmware.allPresent(context)) {
-                throw IllegalStateException(
-                    "Firmware is not ready."
-                )
-            }
+            // Fetches sizes for all 4 files from the server catalog up front -- this also
+            // acts as the "firmware is ready" precondition check (throws naming the exact
+            // missing slug) instead of EmbeddedFirmware.allPresent()'s local file check.
+            val remoteSizes: Map<String, Long>? = if (useEmbedded) {
+                remoteFirmwareSizes(listOf(X216B_FRP_SLUG, X216B_PERSISTENT_SLUG, X216B_MISC_SLUG, X216B_SEC_EFS_SLUG))
+            } else null
 
             if (!transport.isConnected) {
                 val device = transport.findEdlDevice()
@@ -894,7 +942,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             if (!_uiState.value.firehoseReady) {
                 if (useEmbedded) {
-                    bootFirehoseFromEmbeddedLoader(opKey)
+                    bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
                 } else {
                     val loaderUri = _uiState.value.loaderUri
                         ?: throw IllegalStateException("Please select a custom loader first, or enable embedded firmware!")
@@ -914,23 +962,24 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
-                appendLog("Writing firmware images...")
+                val sizes = remoteSizes!!
+                appendLog("Writing firmware images (downloading from server)...")
                 listOf(
                     WriteJob("frp", setOf("frp"), "frp",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "Erasing FRP 1") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP, opKey)
+                        sizes.getValue(X216B_FRP_SLUG), "Erasing FRP 1") {
+                        remoteFirmwareStream(X216B_FRP_SLUG)
                     },
                     WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "Erasing FRP 2") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT, opKey)
+                        sizes.getValue(X216B_PERSISTENT_SLUG), "Erasing FRP 2") {
+                        remoteFirmwareStream(X216B_PERSISTENT_SLUG)
                     },
                     WriteJob("misc", setOf("misc"), "misc",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "Erasing DATA") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC, opKey)
+                        sizes.getValue(X216B_MISC_SLUG), "Erasing DATA") {
+                        remoteFirmwareStream(X216B_MISC_SLUG)
                     },
                     WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "Erasing MDM") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS, opKey)
+                        sizes.getValue(X216B_SEC_EFS_SLUG), "Erasing MDM") {
+                        remoteFirmwareStream(X216B_SEC_EFS_SLUG)
                     }
                 )
             } else {
