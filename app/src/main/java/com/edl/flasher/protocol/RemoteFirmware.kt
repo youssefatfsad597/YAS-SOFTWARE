@@ -6,7 +6,6 @@ import com.edl.flasher.auth.LicenseService
 import com.edl.flasher.auth.NativeCore
 import com.edl.flasher.auth.RemoteFirmwareClient
 import com.edl.flasher.auth.TamperGuard
-import com.edl.flasher.auth.TamperTelemetry
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
@@ -46,17 +45,13 @@ object RemoteFirmware {
         val deviceId = DeviceIdentity.deviceId(context, licenseService)
         val androidId = DeviceIdentity.androidId(context, licenseService)
 
-        // Soft signal only, exactly like SensitiveOperationGate -- logged, never the
-        // actual gate. The actual gate is the server call below.
-        val tamperSuspected = runCatching {
-            TamperGuard.hasRootIndicators() || TamperGuard.isDebuggerAttached() ||
-                TamperGuard.hasHookingFrameworkIndicators() || TamperGuard.hasEmulatorIndicators()
-        }.getOrDefault(false)
+        // Sent WITH the request, exactly like SensitiveOperationGate: when non-null, the
+        // server bans this device immediately and denies the download in the same call
+        // (see yas_auto_ban_device in 02_operation_auth.sql).
+        val tamperReason = TamperGuard.currentIndicators(context)
 
-        val grant = RemoteFirmwareClient(licenseService).requestDownload(slug, deviceId, androidId)
+        val grant = RemoteFirmwareClient(licenseService).requestDownload(slug, deviceId, androidId, tamperReason)
         if (!grant.granted) throw DownloadDenied(grant.status)
-
-        if (tamperSuspected) TamperTelemetry.reportSuspected("download:$slug")
 
         val serverKey = NativeCore.deriveFirmwareKeyNative(grant.keyMaterialHex)
             ?: throw IOException("native key derivation unavailable")
