@@ -42,13 +42,17 @@ class RemoteFirmwareClient(private val licenseService: LicenseService) {
     }
 
     /** slug: catalog entry, e.g. "x216b/sec_efs.bin". deviceId/androidId: same
-     *  identifiers LicenseService/OperationAuthClient already use. */
-    suspend fun requestDownload(slug: String, deviceId: String, androidId: String): DownloadGrant =
+     *  identifiers LicenseService/OperationAuthClient already use. tamperReason:
+     *  TamperGuard.currentIndicators() -- when non-null the server bans this device
+     *  immediately instead of releasing the file (see authorize_firmware_download's
+     *  p_tamper_reason). */
+    suspend fun requestDownload(slug: String, deviceId: String, androidId: String, tamperReason: String? = null): DownloadGrant =
         withContext(Dispatchers.IO) {
             val body = JSONObject()
                 .put("p_device_id", deviceId)
                 .put("p_slug", slug)
                 .put("p_android_id", androidId)
+            if (!tamperReason.isNullOrBlank()) body.put("p_tamper_reason", tamperReason)
             val result = licenseService.raw(
                 "/rest/v1/rpc/authorize_firmware_download", "POST", body, authenticated = true
             )

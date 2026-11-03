@@ -109,6 +109,9 @@ fun AuthGate(
             )
             tamperBlocked = true
             checking = false
+            // Best-effort, fire-and-forget: bans this device server-side right away if it
+            // already has an account (report_tamper no-ops silently if not signed in yet).
+            scope.launch { runCatching { service.reportTamper(if (!sigOk) "bad_signature" else "app_id_mismatch") } }
             return
         }
         // Root access and runtime hooking/injection tools (Frida/Xposed/etc.) are both
@@ -126,6 +129,8 @@ fun AuthGate(
             )
             tamperBlocked = true
             checking = false
+            val reason = TamperGuard.currentIndicators(context) ?: "root_or_hooking_or_emulator"
+            scope.launch { runCatching { service.reportTamper(reason) } }
             return
         }
         checking = true

@@ -449,7 +449,21 @@ fun AdminScreen(service: AdminService, onBack: () -> Unit) {
                         Surface(shape = RoundedCornerShape(12.dp), color = AdminColors.SurfaceHi, border = BorderStroke(1.dp, AdminColors.Border), modifier = Modifier.fillMaxWidth()) {
                             Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                                    Text(b.label.ifBlank { "جهاز" }, style = MaterialTheme.typography.bodyMedium, color = AdminColors.Text, fontWeight = FontWeight.Bold)
+                                    val isAuto = b.reason?.contains("تلقائي") == true
+                                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        Text(b.label.ifBlank { "جهاز" }, style = MaterialTheme.typography.bodyMedium, color = AdminColors.Text, fontWeight = FontWeight.Bold)
+                                        if (isAuto) {
+                                            Surface(shape = RoundedCornerShape(6.dp), color = AdminColors.Danger.copy(alpha = 0.15f)) {
+                                                Text(
+                                                    "⚠ حظر تلقائي",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = AdminColors.DangerText,
+                                                    fontWeight = FontWeight.Bold,
+                                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                    }
                                     Text("Android ID: ${b.androidId ?: "—"}", style = MaterialTheme.typography.labelSmall, color = AdminColors.Muted)
                                     b.lastIp?.let { Text("IP: $it", style = MaterialTheme.typography.labelSmall, color = AdminColors.Muted) }
                                     b.reason?.let { Text("السبب: $it", style = MaterialTheme.typography.labelSmall, color = AdminColors.TextSoft) }

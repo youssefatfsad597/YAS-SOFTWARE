@@ -94,6 +94,26 @@ class LicenseService(context: Context) {
         } catch (_: Exception) { false }
     }
 
+    /** Tells the server this exact device just showed signs of tampering (bad signing
+     *  certificate, wrong applicationId, root, a debugger, or a hooking framework like
+     *  Frida/Xposed -- see TamperGuard.kt). The server bans this device's identifiers
+     *  immediately (report_tamper in 02_operation_auth.sql) so it shows up banned in
+     *  both the admin dashboard and this app's own admin screen right away. Requires an
+     *  existing session (auth.uid()) -- silently does nothing if nobody is signed in yet
+     *  on this install, since there is no account to attribute the ban to. Best-effort:
+     *  network failure here must never crash the tamper-blocked screen that called it. */
+    suspend fun reportTamper(reason: String): Boolean = withContext(Dispatchers.IO) {
+        if (!hasSession()) return@withContext false
+        try {
+            val body = identityBody().put("p_reason", reason)
+            val result = request("/rest/v1/rpc/report_tamper", "POST", body, authenticated = true)
+            if (result.optBoolean("ok", false)) markBanned()
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     /** Human-readable device name shown in the admin dashboard, e.g. "samsung SM-T509 (Android 13)". */
     private fun deviceName(): String {
         val maker = Build.MANUFACTURER.orEmpty().trim()

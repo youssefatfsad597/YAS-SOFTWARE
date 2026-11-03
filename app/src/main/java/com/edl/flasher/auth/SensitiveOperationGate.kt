@@ -25,43 +25,33 @@ object SensitiveOperationGate {
     }
 
     suspend fun authorize(context: Context, licenseService: LicenseService, operation: String): Outcome {
-        // Soft signal only -- logged, not solely relied upon. A clean result
-        // here is NOT sufficient on its own; see the class doc on TamperGuard.
-        val tamperSuspected = runCatching {
-            TamperGuard.hasRootIndicators() || TamperGuard.isDebuggerAttached() ||
-                TamperGuard.hasHookingFrameworkIndicators() || TamperGuard.hasEmulatorIndicators()
-        }.getOrDefault(false)
+        // Sent to the server WITH the request (not just logged locally): when non-null,
+        // authorize_operation bans this device immediately and denies the grant in the
+        // same call -- see yas_auto_ban_device in 02_operation_auth.sql.
+        val tamperReason = TamperGuard.currentIndicators(context)
 
         val deviceId = DeviceIdentity.deviceId(context, licenseService)
         val androidId = DeviceIdentity.androidId(context, licenseService)
 
         val grant = try {
-            OperationAuthClient(licenseService).requestGrant(operation, deviceId, androidId)
+            OperationAuthClient(licenseService).requestGrant(operation, deviceId, androidId, tamperReason)
         } catch (e: Exception) {
             return Outcome.Denied(e.message ?: "تعذر الاتصال بالخادم للتحقق من العملية.")
         }
 
-        if (!grant.granted) return Outcome.Denied(grant.status)
+        if (!grant.granted) {
+            return Outcome.Denied(
+                if (grant.status == "tamper_auto_banned")
+                    "تم رصد محاولة تلاعب بالتطبيق، وتم حظر هذا الجهاز تلقائيًا."
+                else grant.status
+            )
+        }
 
         val key = OperationKeyClient.deriveFirmwareKey(grant, context, System.currentTimeMillis() / 1000)
             ?: return Outcome.Denied("expired_or_replayed_grant")
 
-        if (tamperSuspected) {
-            // Still return the key -- the point of this whole design is that
-            // the key itself, not this flag, is the real gate. But surface
-            // the signal so the UI/telemetry can flag it for review.
-            com.edl.flasher.auth.TamperTelemetry.reportSuspected(operation)
-        }
-
         return Outcome.Key(key)
     }
-}
-
-/** Minimal placeholder -- wire this to whatever logging/analytics the app
- *  already has (e.g. an authenticated RPC call logging client-side suspicion
- *  flags into yas_operation_log's `reason` column for admin review). */
-object TamperTelemetry {
-    fun reportSuspected(operation: String) { /* TODO: send to server, best-effort, non-blocking */ }
 }
 
 /**
