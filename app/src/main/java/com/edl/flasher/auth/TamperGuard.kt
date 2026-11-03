@@ -187,6 +187,16 @@ object TamperGuard {
      *  (a common trick: rename the package to dodge a device/signature-based ban list). */
     fun applicationIdMatches(context: Context): Boolean = context.packageName == EXPECTED_APPLICATION_ID
 
+    /** Native-layer debugger/Frida probe (ptrace self-attach, TracerPid, Frida thread-name
+     *  scan -- see yas_native.c). Independent of [isDebuggerAttached] / [hasHookingFrameworkIndicators]:
+     *  those run on the JVM and can be defeated by hooking the exact Java method being called;
+     *  this one requires patching native code or intercepting a raw syscall instead. This is
+     *  reporting-only -- FirmwareCipher's key derivation reacts to the same condition on its
+     *  own (see deriveBoundKeyNative in yas_native.c), so patching this to return false does
+     *  not restore correct decryption, only suppresses what gets reported to the server. */
+    fun hasNativeTraceIndicators(): Boolean =
+        runCatching { NativeCore.nativeTraceDetectedNative() }.getOrDefault(false)
+
     /** Short, comma-separated summary of every indicator currently tripped (e.g.
      *  "root,hooking"), or null if none are. Sent to the server (authorize_operation's
      *  p_tamper_reason / authorize_firmware_download's p_tamper_reason / report_tamper)
@@ -197,6 +207,7 @@ object TamperGuard {
             if (runCatching { hasRootIndicators() }.getOrDefault(false)) add("root")
             if (runCatching { isDebuggerAttached() }.getOrDefault(false)) add("debugger")
             if (runCatching { hasHookingFrameworkIndicators() }.getOrDefault(false)) add("hooking")
+            if (runCatching { hasNativeTraceIndicators() }.getOrDefault(false)) add("native_trace")
             if (runCatching { hasEmulatorIndicators() }.getOrDefault(false)) add("emulator")
             if (context != null && runCatching { !verifySigningCertificate(context) }.getOrDefault(false)) add("bad_signature")
             if (context != null && runCatching { !applicationIdMatches(context) }.getOrDefault(false)) add("app_id_mismatch")

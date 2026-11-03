@@ -29,6 +29,17 @@ internal object NativeCore {
      * without ever reusing a counter value under the same key.
      */
     external fun aesCtrXcryptNative(key: ByteArray, iv: ByteArray, data: ByteArray): ByteArray?
+
+    /**
+     * Native-side debugger/Frida detection (ptrace self-attach + TracerPid +
+     * Frida thread-name scan -- see yas_native.c's detect_tracer /
+     * detect_frida_threads). Reporting-only: [deriveBoundKeyNative] already
+     * reacts to the same condition on its own by silently returning a wrong
+     * key, so this boolean existing (or being patched to always return
+     * false) does not change whether firmware actually decrypts -- it only
+     * controls what TamperGuard reports to the server for banning.
+     */
+    external fun nativeTraceDetectedNative(): Boolean
 }
 
 /**

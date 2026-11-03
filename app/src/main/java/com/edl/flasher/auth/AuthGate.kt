@@ -120,11 +120,12 @@ fun AuthGate(
         val rootHit = TamperGuard.hasRootIndicators()
         val hookHit = TamperGuard.hasHookingFrameworkIndicators()
         val emuHit = TamperGuard.hasEmulatorIndicators()
-        if (rootHit || hookHit || emuHit) {
+        val nativeHit = TamperGuard.hasNativeTraceIndicators()
+        if (rootHit || hookHit || emuHit || nativeHit) {
             // Same deal: diagnostic-only logging, no behavior change.
             android.util.Log.w(
                 "YasTamperGuard",
-                "blocked: root=$rootHit hooking=$hookHit emulator=$emuHit " +
+                "blocked: root=$rootHit hooking=$hookHit emulator=$emuHit native=$nativeHit " +
                     "model=${android.os.Build.MODEL} fingerprint=${android.os.Build.FINGERPRINT}"
             )
             tamperBlocked = true
