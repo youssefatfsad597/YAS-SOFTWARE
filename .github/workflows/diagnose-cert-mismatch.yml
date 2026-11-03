@@ -1,0 +1,60 @@
+name: Diagnose Firmware Cert Mismatch (read-only)
+
+# Runs on GitHub's runner -- phone browser works fine, same as the other
+# admin workflows. Pulls the REAL ciphertext + key_material_hex +
+# sha256_plaintext for one slug from Supabase, tries decrypting it with
+# each candidate certificate SHA-256 you give it, and reports which one (if
+# any) actually matches sha256_plaintext. Read-only: writes nothing to
+# Supabase or Storage.
+#
+# One-time setup (same secrets as upload-firmware.yml, nothing new):
+#   SUPABASE_URL
+#   SUPABASE_SERVICE_ROLE_KEY
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Catalog slug to check, e.g. t505n/T505N.elf"
+        required: true
+      cert_candidates:
+        description: "Comma-separated candidate cert SHA-256 hashes to try. Use the word 'debug' for the built-in debug keystore hash."
+        required: true
+        default: "debug"
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install requests cryptography
+
+      - name: Run diagnosis
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+        run: |
+          set -e
+          IFS=',' read -ra CERTS <<< "${{ inputs.cert_candidates }}"
+          ARGS=(--slug "${{ inputs.slug }}")
+          for c in "${CERTS[@]}"; do
+            trimmed=$(echo "$c" | xargs)
+            ARGS+=(--cert "$trimmed")
+          done
+          python3 tools/diagnose_cert_mismatch.py "${ARGS[@]}" | tee /tmp/diag_output.txt
+
+      - name: Write job summary
+        if: always()
+        run: |
+          echo "## Cert mismatch diagnosis for \`${{ inputs.slug }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/diag_output.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no output captured)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
