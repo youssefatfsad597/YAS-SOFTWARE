@@ -8,7 +8,7 @@ This repository now contains an Android login/license gate, a Supabase SQL schem
 
 1. Create a project at https://supabase.com/ and keep the project URL and **publishable/anon key** available.
 2. In **Authentication → Providers → Email**, enable email sign-up and keep email confirmation enabled for production.
-3. In **SQL Editor**, run the entire `supabase/schema.sql` file.
+3. In **SQL Editor**, run the entire `supabase/schema.sql` file, then `supabase/02_operation_auth.sql`, then `supabase/04_device_fingerprint.sql` (in that order; each is safe to re-run). The last one adds a third device-ban identifier (Widevine device id, which survives a factory reset on most phones, unlike the installation id or ANDROID_ID alone) — see the comment at the top of that file for details, and rebuild/reinstall the Android app afterwards so it starts sending the new identifier.
 4. Create your administrator account through Supabase Auth (the app registration screen or Authentication → Users). Confirm its email.
 5. In SQL Editor, grant the admin role to that exact account. Replace the email carefully:
 
