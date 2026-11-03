@@ -20,10 +20,10 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Encrypt + Stage Embedded Firmware Assets
-        # Same AES-256-CTR encryption as the debug workflow (tools/encrypt_firmware_assets.sh)
-        # so the release APK also never ships plaintext firmware in its assets.
-        run: bash tools/encrypt_firmware_assets.sh
+      # Firmware is no longer bundled into the APK: X216B/T505N/T509 all stream from the
+      # private 'yas-firmware' Storage bucket per operation (see RemoteFirmware.kt). The
+      # firmware/ folder in this repo is only source material for the "Upload Firmware
+      # File to Server" workflow -- nothing from it is copied into app/src/main/assets.
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4

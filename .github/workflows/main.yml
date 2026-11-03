@@ -37,35 +37,12 @@ jobs:
           [ "$FAIL" -eq 0 ] || exit 1
 
 
-      - name: Check required firmware files are present in the repository
-        run: |
-          set -e
-          MISSING=0
-          for f in X216B.elf frp.bin sec_efs.bin persistent.bin misc.bin; do
-            [ -f "firmware/x216b/$f" ] || { echo "::error::Missing firmware/x216b/$f"; MISSING=1; }
-          done
-          for VARIANT in t509 t509n; do
-            for f in fdl1-sign.bin fdl2-sign.bin; do
-              [ -f "firmware/$VARIANT/$f" ] || echo "::warning::Missing firmware/$VARIANT/$f -- the $VARIANT tab will report firmware as not ready until it is committed."
-            done
-          done
-          for f in T505N.elf frp.bin persistent.bin misc.bin; do
-            [ -f "firmware/t505n/$f" ] || echo "::warning::Missing firmware/t505n/$f -- the T505N tab's Format + FRP / Erase FRP buttons will report firmware as not ready until it is committed."
-          done
-          if [ "$MISSING" -eq 1 ]; then
-            echo "::error::One or more required X216B firmware files are missing. The APK will still build, but the embedded one-tap Wipe & Write flow will be disabled until these are committed."
-          fi
-
-      - name: Encrypt + Stage Embedded Firmware Assets
-        # Firmware files are never copied into the APK's assets in plaintext: this
-        # AES-256-CTR encrypts each file (random IV per file, prepended) so that
-        # unzipping the built APK does NOT hand out ready-to-use firmware images.
-        # Decryption happens on-device at runtime (see FirmwareCipher.kt).
-        run: |
-          set -e
-          bash tools/encrypt_firmware_assets.sh
-          echo "Embedded firmware assets staged (encrypted):"
-          find app/src/main/assets -name "*.enc" -exec ls -la {} \;
+      # Firmware is no longer bundled into the APK at all (neither plaintext nor
+      # encrypted-as-an-asset): X216B/T505N/T509 all now stream from the private
+      # 'yas-firmware' Storage bucket per operation (see RemoteFirmware.kt). The
+      # files under firmware/ in this repo are source material for the "Upload
+      # Firmware File to Server" workflow (upload-firmware.yml / tools/upload_firmware.py)
+      # only -- they are intentionally NOT copied into app/src/main/assets anymore.
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
