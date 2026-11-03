@@ -48,18 +48,18 @@ static int detect_tracer(void) {
         fclose(f);
     }
 
-    /* A process can only have one tracer. If something is already tracing us
-     * (gdb, Frida's ptrace-based attach, etc.) this self-attach fails -- a
-     * kernel-enforced fact we're reading directly, not a /proc text file
-     * whose contents a hook could spoof. */
-    int ptrace_hit = 0;
-    if (ptrace(PTRACE_TRACEME, 0, 0, 0) == -1) {
-        ptrace_hit = 1;
-    } else {
-        ptrace(PTRACE_DETACH, 0, 0, 0); /* release immediately, stay runnable */
-    }
+    /* NOTE: a self-attach ptrace(PTRACE_TRACEME) probe used to run here as a
+     * second signal (failure == "something is already tracing us"). Dropped:
+     * on several OEM builds (observed on Samsung/Knox, e.g. SM-X216B) SELinux
+     * denies the ptrace syscall to third-party apps outright, so the probe
+     * fails with EPERM even with no debugger/Frida attached at all -- kernel
+     * ptrace() returns the exact same EPERM for "already traced" and for
+     * "policy denied", so there is no reliable way to tell the two apart from
+     * here. TracerPid above already catches a real attached tracer (it's a
+     * kernel-reported fact for this process, unaffected by SELinux denying
+     * US from calling ptrace), so it is kept as the sole signal. */
 
-    return (tracer_pid_hit || ptrace_hit) ? 1 : 0;
+    return tracer_pid_hit ? 1 : 0;
 }
 
 /* Frida injects a GLib main loop + JS runtime that spawn threads with
