@@ -93,7 +93,8 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
       سياسة الجهاز الواحد: كل حساب يعمل على جهاز واحد فقط في نفس الوقت. التبديل إلى جهاز آخر يُسمح به بعد
       <b>4 ساعات</b> من آخر نشاط للجهاز السابق، أو فورًا بعد «إلغاء» الجهاز من هنا.<br>
       <b>إلغاء الجهاز</b>: يُمنع هذا الجهاز من الدخول ويبقى ظاهرًا بحالة «ملغي» (ويمكن استعادته).<br>
-      <b>حذف الجهاز</b>: يُزال من الحساب ويختفي من هذه اللوحة فورًا (يبقى في قاعدة البيانات فقط بحالة «محذوف» دون ظهور)، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد.
+      <b>حذف الجهاز</b>: يُزال من الحساب ويختفي من هذه اللوحة فورًا (يبقى في قاعدة البيانات فقط بحالة «محذوف» دون أي ظهور — لا في هذا الجدول ولا داخل نافذة أجهزة الحساب)، ولو دخل منه المستخدم لاحقًا يُسجَّل كجهاز جديد تمامًا.<br>
+      <b>الحظر النهائي</b>: يطابق أيًا من ثلاثة معرّفات لنفس الجهاز — معرّف التثبيت، Android ID، و<b>Widevine ID</b> (معرّف يأتي من شريحة DRM في الجهاز نفسه، وعلى عكس الاثنين الآخرين يصمد عادةً أمام إعادة التثبيت <b>وأمام ضبط المصنع</b> على أغلب الأجهزة) — فإعادة تثبيت التطبيق أو تغيير الحساب أو تبديل الشبكة/الـIP لا ترفع الحظر وحدها. هذا يرفع صعوبة التهرّب من الحظر كثيرًا لكنه ليس مطلقًا 100% أمام جهاز مفتوح الروت يُعاد ضبط شريحة الـDRM فيه يدويًا.
     </div>
 
     <div class="bulk">
@@ -128,11 +129,17 @@ textarea{font:inherit;width:100%;box-sizing:border-box;border-radius:9px;border:
 
   <div class="card">
     <h2>الأجهزة المحظورة</h2>
-    <p class="muted">الجهاز المحظور لا يستطيع تشغيل البرنامج نهائيًا: التطبيق يفحص القائمة قبل شاشة الدخول، والسيرفر يرفضه عند التحقق. الحظر يطابق أي معرّف: معرّف التثبيت أو Android ID.</p>
+    <p class="muted">الجهاز المحظور لا يستطيع تشغيل البرنامج نهائيًا: التطبيق يفحص القائمة قبل شاشة الدخول، والسيرفر يرفضه عند كل عملية حسّاسة. الحظر يطابق أيًا من: معرّف التثبيت، Android ID، أو <b>Widevine ID</b> (يصمد أمام ضبط المصنع على أغلب الأجهزة، راجع الملاحظة أعلى الصفحة). أدخل معرّفًا واحدًا على الأقل للحظر اليدوي.</p>
     <div class="row">
       <input id="banAid" placeholder="Android ID" style="direction:ltr">
+      <input id="banWid" placeholder="Widevine ID (اختياري)" style="direction:ltr">
       <input id="banReason" placeholder="سبب الحظر (اختياري)">
       <button class="danger" id="banManual">حظر يدوي</button>
+    </div>
+    <div class="search-wrap">
+      <input id="banSearch" placeholder="بحث في المحظورين بالمعرّف أو السبب أو IP...">
+      <span class="count-badge" id="banCount">0 محظور</span>
+      <button class="secondary" id="banCsv">تنزيل CSV</button>
     </div>
     <div class="tablewrap"><table style="min-width:700px"><thead><tr><th>الجهاز</th><th>المعرّفات</th><th>السبب</th><th>التاريخ</th><th></th></tr></thead><tbody id="bans"></tbody></table></div>
   </div>
@@ -248,7 +255,29 @@ function idForEmail(email){
 }
 function devState(d){return d.deleted_at?'deleted':(d.revoked_at?'revoked':'active')}
 const DEV_AR={active:'نشط',revoked:'ملغي',deleted:'محذوف'};
-function deviceHtml(d){
+
+// Builds, across ALL accounts' non-deleted devices, a map of android_id/widevine_id ->
+// the set of distinct emails seen with that identifier. A hit with more than one email
+// is a red flag: the same physical device (or at least the same DRM/ANDROID_ID) is
+// being used under more than one account -- which is exactly how someone would try to
+// outrun a per-account ban by registering a fresh account on an already-banned phone.
+// Purely client-side/read-only: no schema change needed, just cross-referencing data
+// admin_list_users already returns.
+function identifierCollisions(){
+  const byId=new Map();
+  for(const u of allUsers){
+    for(const d of (u.devices||[])){
+      if(devState(d)==='deleted')continue;
+      for(const v of [d.android_id,d.widevine_id]){
+        if(!v)continue;
+        if(!byId.has(v))byId.set(v,new Set());
+        byId.get(v).add(u.email);
+      }
+    }
+  }
+  return byId;
+}
+function deviceHtml(d,collisions){
   const st=devState(d);
   const ip=d.last_ip?`<span class="ip">${esc(d.last_ip)}</span> <button class="copybtn" data-copy="${esc(d.last_ip)}" title="نسخ IP">⧉</button>`:'<span class="muted">غير مسجّل</span>';
   const firstIp=d.first_ip&&d.first_ip!==d.last_ip?` <small>أول IP: <span class="ip">${esc(d.first_ip)}</span></small>`:'';
@@ -261,9 +290,17 @@ function deviceHtml(d){
     ?`<button class="success" data-restore="${id}">استعادة</button><button class="danger" data-delete-dev="${id}">حذف</button>`
     :`<button class="success" data-restore="${id}">استعادة</button>`;
   const banBtn=`<button class="danger" data-ban="${id}" data-name="${esc(d.label||'')}">حظر نهائي</button>`;
+  const copy=(v)=>v?` <button class="copybtn" data-copy="${esc(v)}" title="نسخ">⧉</button>`:'';
+  const collisionNote=(v)=>{
+    const emails=collisions&&v?collisions.get(v):null;
+    if(!emails||emails.size<2)return '';
+    const others=[...emails].filter(e=>e!==d.__ownerEmail);
+    return ` <span class="tag suspended" title="نفس المعرّف ظاهر على حساب آخر أيضًا">⚠ أيضًا على: ${esc(others.slice(0,3).join('، '))}${others.length>3?'...':''}</span>`;
+  };
   return `<div class="device ${st==='active'?'current':st}"><b>${name}</b> <span class="tag dev-${st}">${DEV_AR[st]}</span>
-    <small>IP: ${ip}${firstIp}</small><small>معرّف الجهاز: ${esc(d.device_id)}</small>
-    <small>Android ID: <span class="ip">${esc(d.android_id||'—')}</span></small>
+    <small>IP: ${ip}${firstIp}</small><small>معرّف الجهاز: <span class="ip">${esc(d.device_id)}</span>${copy(d.device_id)}</small>
+    <small>Android ID: <span class="ip">${esc(d.android_id||'—')}</span>${copy(d.android_id)}${collisionNote(d.android_id)}</small>
+    <small>Widevine ID: <span class="ip">${esc(d.widevine_id||'—')}</span>${copy(d.widevine_id)}${collisionNote(d.widevine_id)}</small>
     <small>آخر ظهور: ${esc(fmt(d.last_seen_at))}</small>${when}<div class="dev-actions">${actions}${banBtn}</div></div>`;
 }
 
@@ -282,8 +319,10 @@ function renderDeviceModal(email){
   const devs=(u.devices||[]).filter(d=>devState(d)!=='deleted');
   const nActive=devs.filter(d=>devState(d)==='active').length;
   const nRevoked=devs.filter(d=>devState(d)==='revoked').length;
+  const collisions=identifierCollisions();
+  devs.forEach(d=>d.__ownerEmail=u.email);
   $('deviceModalTitle').textContent=`أجهزة: ${u.email}`;
-  $('deviceModalBody').innerHTML=(devs.map(deviceHtml).join('')||'<p class="muted">لا يوجد أجهزة لهذا الحساب.</p>')+
+  $('deviceModalBody').innerHTML=(devs.map(d=>deviceHtml(d,collisions)).join('')||'<p class="muted">لا يوجد أجهزة لهذا الحساب.</p>')+
     `<p class="muted">نشطة: ${nActive} • ملغاة: ${nRevoked}</p>`;
   bindDeviceActions($('deviceModalBody'),u.email);
 }
@@ -297,7 +336,7 @@ function bindDeviceActions(container,email){
     try{await rpc('admin_delete_device',{p_device_row_id:b.dataset.deleteDev});say('تم حذف الجهاز.');await loadUsers();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
   });
   container.querySelectorAll('[data-ban]').forEach(b=>b.onclick=async()=>{
-    if(!confirm(`حظر هذا الجهاز نهائيًا${b.dataset.name?` (${b.dataset.name})`:''}؟\nلن يستطيع تشغيل البرنامج حتى لو دخل بحساب آخر أو أعاد تثبيت التطبيق (طالما Android ID كما هو).`))return;
+    if(!confirm(`حظر هذا الجهاز نهائيًا${b.dataset.name?` (${b.dataset.name})`:''}؟\nلن يستطيع تشغيل البرنامج حتى لو دخل بحساب آخر، أعاد تثبيت التطبيق، أو ضبط الجهاز على إعدادات المصنع (طالما Widevine ID أو Android ID كما هما).`))return;
     const reason=prompt('سبب الحظر (اختياري):','')||'';
     try{await rpc('admin_ban_device',{p_device_row_id:b.dataset.ban,p_reason:reason});say('تم حظر الجهاز.');await loadUsers();await loadBans();renderDeviceModal(email)}catch(e){say(`فشل: ${e.message||e}`)}
   });
@@ -417,28 +456,40 @@ async function loadBans(){
   try{allBans=await rpc('admin_list_bans')||[];renderBans()}catch(e){say(`تعذر تحميل المحظورين: ${e.message||e}`)}
 }
 function renderBans(){
-  $('bans').innerHTML=allBans.map(b=>`<tr><td><b>${esc(b.label||'جهاز')}</b>${b.last_ip?`<small>IP: <span class="ip">${esc(b.last_ip)}</span></small>`:''}</td>
-    <td><small>Android ID: <span class="ip">${esc(b.android_id||'—')}</span></small><small>معرّف التثبيت: ${esc(b.device_id||'—')}</small></td>
+  const q=($('banSearch').value||'').trim().toLowerCase();
+  const filtered=allBans.filter(b=>!q||[b.label,b.android_id,b.widevine_id,b.device_id,b.last_ip,b.reason].some(v=>(v||'').toLowerCase().includes(q)));
+  $('banCount').textContent=`${filtered.length} من ${allBans.length} محظور`;
+  $('bans').innerHTML=filtered.map(b=>`<tr><td><b>${esc(b.label||'جهاز')}</b>${b.last_ip?`<small>IP: <span class="ip">${esc(b.last_ip)}</span></small>`:''}</td>
+    <td><small>Android ID: <span class="ip">${esc(b.android_id||'—')}</span></small><small>Widevine ID: <span class="ip">${esc(b.widevine_id||'—')}</span></small><small>معرّف التثبيت: ${esc(b.device_id||'—')}</small></td>
     <td>${esc(b.reason||'—')}</td><td>${esc(fmt(b.banned_at))}</td>
-    <td><button class="success" data-unban="${esc(b.id)}">رفع الحظر</button></td></tr>`).join('')||'<tr><td colspan="5" class="muted">لا توجد أجهزة محظورة.</td></tr>';
+    <td><button class="success" data-unban="${esc(b.id)}">رفع الحظر</button></td></tr>`).join('')||`<tr><td colspan="5" class="muted">${allBans.length?'لا نتائج مطابقة للبحث.':'لا توجد أجهزة محظورة.'}</td></tr>`;
   $('bans').querySelectorAll('[data-unban]').forEach(b=>b.onclick=async()=>{
     if(!confirm('رفع الحظر عن هذا الجهاز؟ (الجهاز يبقى «ملغي» حتى تستعيده).'))return;
     try{await rpc('admin_unban',{p_ban_id:b.dataset.unban});say('تم رفع الحظر.');await loadBans();await loadUsers()}catch(e){say(`فشل: ${e.message||e}`)}
   });
 }
+$('banSearch').oninput=renderBans;
+$('banCsv').onclick=()=>{
+  const rows=['label,android_id,widevine_id,device_id,last_ip,reason,banned_at'].concat(
+    allBans.map(b=>[b.label,b.android_id,b.widevine_id,b.device_id,b.last_ip,b.reason,b.banned_at].map(csvCell).join(','))
+  );
+  const blob=new Blob(['\ufeff'+rows.join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='yas-banned-devices.csv';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+};
 $('banManual').onclick=async()=>{
   const aid=$('banAid').value.trim();
-  if(!aid){say('أدخل Android ID.');return}
+  const wid=$('banWid').value.trim();
+  if(!aid&&!wid){say('أدخل Android ID أو Widevine ID على الأقل.');return}
   if(!confirm('حظر هذا الجهاز نهائيًا؟'))return;
-  try{await rpc('admin_ban_manual',{p_android_id:aid,p_reason:$('banReason').value.trim()||null});
-    $('banAid').value=$('banReason').value='';say('تم الحظر.');await loadBans()}catch(e){say(`فشل: ${e.message||e}`)}
+  try{await rpc('admin_ban_manual',{p_android_id:aid||null,p_widevine_id:wid||null,p_reason:$('banReason').value.trim()||null});
+    $('banAid').value=$('banWid').value=$('banReason').value='';say('تم الحظر.');await loadBans()}catch(e){say(`فشل: ${e.message||e}`)}
 };
 
 function renderTable(){
   const q=($('search').value||'').trim().toLowerCase();
   const fs=$('filterStatus').value;
   const filtered=allUsers.filter(u=>{
-    const devText=(u.devices||[]).filter(d=>devState(d)!=='deleted').map(d=>`${d.label||''} ${d.last_ip||''} ${d.first_ip||''} ${d.android_id||''}`).join(' ').toLowerCase();
+    const devText=(u.devices||[]).filter(d=>devState(d)!=='deleted').map(d=>`${d.label||''} ${d.last_ip||''} ${d.first_ip||''} ${d.android_id||''} ${d.widevine_id||''}`).join(' ').toLowerCase();
     const matchesQ=!q || (u.email||'').toLowerCase().includes(q) || (u.status||'').toLowerCase().includes(q) || devText.includes(q);
     const matchesS=!fs || u.status===fs;
     return matchesQ && matchesS;
