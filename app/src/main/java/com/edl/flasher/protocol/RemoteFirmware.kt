@@ -44,13 +44,14 @@ object RemoteFirmware {
     suspend fun openStream(context: Context, licenseService: LicenseService, slug: String): InputStream {
         val deviceId = DeviceIdentity.deviceId(context, licenseService)
         val androidId = DeviceIdentity.androidId(context, licenseService)
+        val widevineId = DeviceIdentity.widevineId(context, licenseService)
 
         // Sent WITH the request, exactly like SensitiveOperationGate: when non-null, the
         // server bans this device immediately and denies the download in the same call
         // (see yas_auto_ban_device in 02_operation_auth.sql).
         val tamperReason = TamperGuard.currentIndicators(context)
 
-        val grant = RemoteFirmwareClient(licenseService).requestDownload(slug, deviceId, androidId, tamperReason)
+        val grant = RemoteFirmwareClient(licenseService).requestDownload(slug, deviceId, androidId, tamperReason, widevineId)
         if (!grant.granted) throw DownloadDenied(grant.status)
 
         val serverKey = NativeCore.deriveFirmwareKeyNative(grant.keyMaterialHex)
