@@ -64,6 +64,48 @@ grant select on table public.yas_operation_log to authenticated; -- RLS policy a
 alter table public.yas_profiles add column if not exists force_logout_at timestamptz;
 
 -- ---------------------------------------------------------------------------
+-- 3b) yas_auto_ban_device: INTERNAL ONLY (no grants below -- callable only from other
+--    SECURITY DEFINER functions owned by you, never directly by the app). Shared by
+--    authorize_operation, authorize_firmware_download and report_tamper so a device
+--    caught tampering (root/Frida/Xposed/emulator/bad signature/debugger -- see
+--    TamperGuard.kt) is banned the SAME way admin_ban_device already bans one by hand:
+--    inserted into yas_banned_devices (idempotent) and its yas_devices row revoked, so
+--    it shows up in both the web dashboard's and the app's "الأجهزة المحظورة" list
+--    immediately, with the reason explaining it was automatic.
+-- ---------------------------------------------------------------------------
+create or replace function public.yas_auto_ban_device(p_user_id uuid, p_device_id text, p_android_id text, p_reason text)
+returns void language plpgsql security definer set search_path = '' as $$
+declare
+  v_dev public.yas_devices%rowtype;
+  v_email text;
+  v_label text;
+  v_aid text := nullif(trim(coalesce(p_android_id, '')), '');
+  v_did text := nullif(trim(coalesce(p_device_id, '')), '');
+begin
+  if v_did is null and v_aid is null then return; end if;
+  if v_did is not null then
+    select * into v_dev from public.yas_devices where user_id = p_user_id and device_id = v_did;
+  end if;
+  select email into v_email from public.yas_profiles where user_id = p_user_id;
+  v_label := left(coalesce(v_dev.label, 'جهاز') || coalesce(' — ' || v_email, ''), 160);
+
+  if not exists (
+    select 1 from public.yas_banned_devices b where
+      (v_did is not null and b.device_id = v_did) or (v_aid is not null and b.android_id = v_aid)
+  ) then
+    insert into public.yas_banned_devices(device_id, android_id, label, last_ip, reason, banned_by)
+    values (v_did, v_aid, v_label, coalesce(v_dev.last_ip, public.yas_client_ip()),
+      left('حظر تلقائي - رصد تلاعب: ' || coalesce(nullif(trim(p_reason), ''), 'غير محدد'), 200), null);
+  end if;
+
+  if v_dev.id is not null then
+    update public.yas_devices set revoked_at = coalesce(revoked_at, now()) where id = v_dev.id;
+  end if;
+end; $$;
+-- Intentionally no grants to anon/authenticated -- only this file's own SECURITY
+-- DEFINER functions (which run as the owner) may call it.
+
+-- ---------------------------------------------------------------------------
 -- 4) authorize_operation: called by the app right before ONE sensitive action.
 --    Re-checks everything authorize_device() checks (login, status, expiry, ban,
 --    kill-switch, that this exact device is the account's currently-registered one)
@@ -73,7 +115,7 @@ alter table public.yas_profiles add column if not exists force_logout_at timesta
 -- ---------------------------------------------------------------------------
 drop function if exists public.authorize_operation(text, text, text);
 
-create or replace function public.authorize_operation(p_device_id text, p_operation text, p_android_id text default null)
+create or replace function public.authorize_operation(p_device_id text, p_operation text, p_android_id text default null, p_tamper_reason text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_uid uuid := auth.uid();
@@ -87,6 +129,7 @@ declare
   v_ttl constant integer := 60;
   v_op text := left(nullif(trim(coalesce(p_operation, '')), ''), 64);
   v_aid text := left(nullif(trim(coalesce(p_android_id, '')), ''), 64);
+  v_tamper text := nullif(trim(coalesce(p_tamper_reason, '')), '');
   v_status text := 'denied';
 begin
   if v_uid is null then
@@ -97,6 +140,17 @@ begin
   end if;
   if v_op is null then
     return jsonb_build_object('granted', false, 'status', 'invalid_operation');
+  end if;
+
+  -- Tamper signal reported BY THE CLIENT (root/Frida/Xposed/emulator/debugger -- see
+  -- TamperGuard.kt). Banned immediately, before any other check, and the operation is
+  -- denied in this same call -- no second round trip, no window to still get a key.
+  if v_tamper is not null then
+    perform public.yas_auto_ban_device(v_uid, p_device_id, v_aid, v_tamper);
+    insert into public.yas_operation_log(user_id, device_id, operation, granted, status)
+      values (v_uid, p_device_id, v_op, false, 'tamper_auto_banned');
+    return jsonb_build_object('granted', false, 'status', 'tamper_auto_banned',
+      'message', 'تم رصد محاولة تلاعب بالتطبيق وحظر هذا الجهاز تلقائيًا.');
   end if;
 
   if public.yas_is_banned(p_device_id, v_aid) then
@@ -164,8 +218,39 @@ begin
   );
 end; $$;
 
-revoke all on function public.authorize_operation(text, text, text) from public, anon;
-grant execute on function public.authorize_operation(text, text, text) to authenticated;
+revoke all on function public.authorize_operation(text, text, text, text) from public, anon;
+grant execute on function public.authorize_operation(text, text, text, text) to authenticated;
+
+-- ---------------------------------------------------------------------------
+-- 4b) report_tamper: lets the app self-report tampering at moments OTHER than a
+--    sensitive operation -- specifically the app-open/login tamper check in
+--    AuthGate.kt, which today only sets a local boolean and never tells the server.
+--    Requires an existing session (so it can only ever ban a device already tied to
+--    a real account -- an anonymous caller cannot ban arbitrary device ids). Same
+--    effect as a tamper_reason passed to authorize_operation: immediate, permanent
+--    ban via yas_auto_ban_device, visible in the admin dashboard/app right away.
+-- ---------------------------------------------------------------------------
+create or replace function public.report_tamper(p_device_id text, p_android_id text default null, p_reason text default null)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare
+  v_uid uuid := auth.uid();
+  v_aid text := left(nullif(trim(coalesce(p_android_id, '')), ''), 64);
+  v_reason text := left(nullif(trim(coalesce(p_reason, '')), ''), 200);
+begin
+  if v_uid is null then
+    return jsonb_build_object('ok', false, 'status', 'not_authenticated');
+  end if;
+  if p_device_id is null or length(p_device_id) < 8 or length(p_device_id) > 128 then
+    return jsonb_build_object('ok', false, 'status', 'invalid_device');
+  end if;
+  perform public.yas_auto_ban_device(v_uid, p_device_id, v_aid, coalesce(v_reason, 'غير محدد'));
+  insert into public.yas_operation_log(user_id, device_id, operation, granted, status)
+    values (v_uid, p_device_id, 'tamper_report', false, 'tamper_auto_banned');
+  return jsonb_build_object('ok', true, 'status', 'tamper_auto_banned');
+end; $$;
+
+revoke all on function public.report_tamper(text, text, text) from public, anon;
+grant execute on function public.report_tamper(text, text, text) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 5) Make authorize_device() (the login-time check in schema.sql) also honor the
