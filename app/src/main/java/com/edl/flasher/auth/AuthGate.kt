@@ -169,7 +169,20 @@ fun AuthGate(
         if (authorized) isAdmin = adminService.isAdmin()
         while (authorized) {
             delay(60_000)
-            val result = service.authorize()
+            var result = service.authorize()
+            if (result.status == "offline") {
+                // Common case: the app was backgrounded and the radio hadn't reconnected
+                // yet when this periodic check fired. One quick retry covers that without
+                // making every resume-from-background feel slow.
+                delay(8_000)
+                result = service.authorize()
+            }
+            if (result.status == "offline") {
+                // Still unreachable: a real connectivity problem, but the server was never
+                // actually asked either time -- that says nothing about whether the license
+                // is still valid, so don't log the user out on it. Just try again next cycle.
+                continue
+            }
             license = result
             if (result.status == "device_banned") banned = true
             if (!result.active) {
