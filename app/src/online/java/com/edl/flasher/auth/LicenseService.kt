@@ -253,6 +253,20 @@ class LicenseService(context: Context) {
         }
     }
 
+    /** Single, unified reachability check used by EdlViewModel.runTask() right before EVERY
+     *  operation (read or write) -- "server connection confirmed first" is enforced here once
+     *  instead of being duplicated per-operation. Reuses authorize() so a dropped connection,
+     *  a signed-out session, or an inactive/expired license all produce the same kind of
+     *  result, with one short reason string instead of several inconsistent messages. */
+    suspend fun checkServerReachable(): Pair<Boolean, String> {
+        val license = authorize()
+        return when {
+            license.status == "offline" -> false to (license.message.ifBlank { "تعذر الاتصال بالخادم. تحقق من الإنترنت." })
+            !license.active -> false to (license.message.ifBlank { "الحساب غير مفعّل أو منتهي." })
+            else -> true to ""
+        }
+    }
+
     /** Low-level escape hatch for AdminService: the same request plumbing used above,
      *  but it never reads or writes the stored session. This matters for account
      *  creation in particular — an admin creating accounts for other people must not
