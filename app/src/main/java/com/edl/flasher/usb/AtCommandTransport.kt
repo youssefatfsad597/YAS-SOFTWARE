@@ -68,14 +68,14 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val FORMAT_COMMANDS = listOf("AT+FACTORST=0,0", "AT+FACTORST=1,1")
         // Delay between the steps of the serial-number sequence. Each exchange() already
         // blocks until the device replies (or its own idle timeout) -- this is extra padding
-        // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms, then 600ms; cut again since
-        // the flow now does a single attempt and a quick serial-only read beforehand, so every
-        // extra ms here is pure added latency on the one shot we take.
-        const val SERIAL_STEP_DELAY_MS = 300L
+        // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms, then 600ms, then 300ms; cut
+        // again since the flow now does a single attempt and a quick serial-only read
+        // beforehand, so every extra ms here is pure added latency on the one shot we take.
+        const val SERIAL_STEP_DELAY_MS = 150L
         // Settle time after the serial write before reading it back, so the modem has a moment
         // to commit the NV value -- separate from SERIAL_STEP_DELAY_MS so it can be tuned on
         // its own. readModemSerial() retries with its own delay if this isn't quite enough.
-        const val SERIAL_POST_WRITE_SETTLE_MS = 300L
+        const val SERIAL_POST_WRITE_SETTLE_MS = 150L
         // CSC (Sales Code) writes are a handful of lightweight AT+PRECONFG/activation
         // commands with no flash-heavy work behind them, so they tolerate a shorter
         // inter-command gap than the serial sequence. Each exchange() already blocks until
@@ -94,10 +94,10 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // this only needs to be long enough to catch that, not to patiently wait out a command
         // that was never going to work (several of REBOOT_COMMANDS only reset the modem stack,
         // not the whole device, on a lot of units -- see rebootVerifiedWithPowerReset).
-        const val REBOOT_DETACH_WAIT_MS = 3000L
-        // Same idea for the AT+POWRESET=0,0 fallback: a bit more margin since it's the last
+        const val REBOOT_DETACH_WAIT_MS = 1500L
+        // Same idea for the alternate reboot fallback: a bit more margin since it's the last
         // resort, but still far short of the old 8s.
-        const val POWRESET_DETACH_WAIT_MS = 4000L
+        const val POWRESET_DETACH_WAIT_MS = 2000L
         private const val READ_BUF = 256
     }
 
@@ -342,8 +342,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
         val buf = ByteArray(1024)
         var idle = 0
         var gotData = false
-        val pollTimeout = if (quick) 200 else 600
-        val maxIdleNoData = if (quick) 2 else 3
+        val pollTimeout = if (quick) 150 else 250
+        val maxIdleNoData = if (quick) 2 else 2
         // Wait longer for the first byte (Samsung can be slow), shorter once data is flowing.
         while (sb.length < 8192) {
             val n = conn.bulkTransfer(epIn, buf, buf.size, pollTimeout)
@@ -493,7 +493,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     return line
                 }
             }
-            if (attempt < attempts - 1) kotlinx.coroutines.delay(300)
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(150)
         }
         return ""
     }
@@ -506,7 +506,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val tagged = Regex("\\+PRECONFG:\\s*1,\\s*([A-Za-z]{3})").find(raw)?.groupValues?.get(1)
             val csc = tagged ?: Regex("[A-Z]{3}", RegexOption.IGNORE_CASE).find(raw)?.value
             if (!csc.isNullOrBlank()) return csc.uppercase()
-            if (attempt < attempts - 1) kotlinx.coroutines.delay(300)
+            if (attempt < attempts - 1) kotlinx.coroutines.delay(150)
         }
         return ""
     }
@@ -589,33 +589,24 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val acknowledged = sequenceOk && replies.size == cmds.size &&
                 last.contains("SERIALNO", true) && last.contains("OK", true)
 
-            // Check whether the modem explicitly rejected the write (Wrong Attribute / Wrong Data).
+            // Check whether the device explicitly rejected the write.
             val rejected = isRejected(last)
             if (rejected && !acknowledged) {
-                when {
-                    last.contains("Wrong Attribute", true) ->
-                        log("REJECTED (attempt ${attempt + 1}): Wrong Attribute -- AT+SERIALNO=2 refused in this USB mode/firmware.")
-                    last.contains("Wrong Data", true) ->
-                        log("REJECTED (attempt ${attempt + 1}): Wrong Data -- the modem did not accept \"$newSerial\" as written.")
-                    last.contains("ERROR", true) || last.contains("#NG#") ->
-                        log("REJECTED (attempt ${attempt + 1}): Modem returned ERROR / #NG#.")
-                    else ->
-                        log("No OK received from modem (attempt ${attempt + 1}, reply: $last)")
-                }
+                log("The device did not accept the new serial.")
             }
 
             if (acknowledged) {
-                log("✓ Modem explicitly acknowledged the serial write!")
+                log("Device confirmed the new serial.")
                 break
             }
 
             // If we've exhausted all attempts without acknowledgment, fall through to best-effort check.
         }
 
-        // Post-write verification: read back the serial from the modem.
+        // Post-write verification: read back the serial from the device.
         kotlinx.coroutines.delay(SERIAL_POST_WRITE_SETTLE_MS)
         val after = readModemSerial(device, attempts = 2)
-        log("Post-write serial read-back: '${after.ifBlank { "(none)" }}'")
+        log("Checking the serial on the device: '${after.ifBlank { "(none)" }}'")
 
         val directMatch = after.trim().equals(newSerial, ignoreCase = true)
         return if (directMatch) {
@@ -665,7 +656,6 @@ class AtCommandTransport(private val context: Context) : Closeable {
 
                         val reply = exchange(conn, epIn, epOut, cmd)
                         replies?.add(reply)
-                        if (reply.isNotBlank()) log(cmd.trim() + " -> " + reply.take(80))
 
                         val bad = isRejected(reply)
                         if (bad) {
@@ -810,28 +800,19 @@ class AtCommandTransport(private val context: Context) : Closeable {
             if (!acknowledged) {
                 val rejected = isRejected(last)
                 if (rejected) {
-                    when {
-                        last.contains("Wrong Attribute", true) ->
-                            log("CSC REJECTED (attempt ${attempt + 1}): Wrong Attribute -- PRECONFG refused.")
-                        last.contains("Wrong Data", true) ->
-                            log("CSC REJECTED (attempt ${attempt + 1}): Wrong Data -- \"$upperCsc\" not accepted.")
-                        last.contains("ERROR", true) || last.contains("#NG#") ->
-                            log("CSC REJECTED (attempt ${attempt + 1}): Modem returned ERROR.")
-                        else ->
-                            log("No OK for CSC (attempt ${attempt + 1}, reply: $last.take(80))")
-                    }
+                    log("The device did not accept the new CSC.")
                 } else {
-                    log("CSC step incomplete (attempt ${attempt + 1}/${maxAttempts}).")
+                    log("Did not get a clear answer from the device.")
                 }
             }
 
             if (acknowledged) {
-                log("✓ Modem acknowledged CSC written to \"$upperCsc\"!")
+                log("Device confirmed the new CSC.")
                 return true
             }
         }
 
-        log("CSC write was not confirmed after $maxAttempts attempts.")
+        log("Could not confirm the CSC was changed.")
         return false
     }
 
@@ -862,10 +843,9 @@ class AtCommandTransport(private val context: Context) : Closeable {
                     val probe = exchange(conn, epIn, epOut, "AT", quick = true)
                     if (probe.contains("ERROR", true) && probe.length > 40) continue
 
-                    log("Accessing device modem port...")
+                    log("Talking to the device...")
                     for ((i, cmd) in BROM_FORCE_SEQUENCE.withIndex()) {
-                        val reply = exchange(conn, epIn, epOut, cmd)
-                        log(if (reply.isNotBlank()) "$cmd -> ${reply.take(80)}" else "$cmd (no reply)")
+                        exchange(conn, epIn, epOut, cmd)
                         onProgress?.invoke((i + 1).toFloat() / BROM_FORCE_SEQUENCE.size)
                         if (i < BROM_FORCE_SEQUENCE.size - 1) kotlinx.coroutines.delay(BROM_FORCE_STEP_DELAY_MS)
                         if (waitForDetach(device, 300)) {
@@ -873,7 +853,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
                             return true
                         }
                     }
-                    log("Force BROM sequence sent.")
+                    log("Request sent.")
                     return true
                 } finally {
                     runCatching { conn.releaseInterface(intf) }
@@ -929,25 +909,22 @@ class AtCommandTransport(private val context: Context) : Closeable {
                         val buf = ByteArray(READ_BUF)
                         val n = conn.bulkTransfer(epIn, buf, buf.size, 1200)
                         if (waitForDetach(device, REBOOT_DETACH_WAIT_MS)) {
-                            log("✓ USB link dropped after $cmd — device is rebooting.")
+                            log("Device is rebooting.")
                             anySuccess = true
                             break
                         }
                     }
-                    // If device stayed connected, try AT+POWRESET=0,0 (from MA UNLOCKER)
+                    // If device stayed connected, try an alternate reboot request.
                     if (!anySuccess) {
-                        log("Standard reboot failed — trying AT+POWRESET=0,0...")
+                        log("Trying an alternate reboot method...")
                         val powresetBytes = "AT+POWRESET=0,0\r\n".toByteArray(Charsets.US_ASCII)
                         val sent = conn.bulkTransfer(epOut, powresetBytes, powresetBytes.size, 2000)
                         if (sent >= 0) {
-                            log("✓ Sent AT+POWRESET=0,0 — waiting for detach...")
-                            // waitForDetach already polls every 250ms from the moment it starts, so
-                            // a flat delay before it added nothing but dead time -- removed.
                             if (waitForDetach(device, POWRESET_DETACH_WAIT_MS)) {
-                                log("✓ USB link dropped after POWRESET — device is rebooting.")
+                                log("Device is rebooting.")
                                 anySuccess = true
                             } else {
-                                log("⚠ POWRESET sent but device did not drop off USB.")
+                                log("Device did not respond to the reboot request.")
                             }
                         }
                     }
