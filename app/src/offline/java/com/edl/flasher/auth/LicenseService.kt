@@ -11,4 +11,9 @@ import android.content.Context
  */
 class LicenseService(context: Context) {
     fun clearSession() {}
+
+    /** OFFLINE EDITION: no server to reach, so this always succeeds -- matches
+     *  the online flavor's signature so EdlViewModel.runTask() compiles unchanged
+     *  against either build. */
+    suspend fun checkServerReachable(): Pair<Boolean, String> = true to ""
 }
