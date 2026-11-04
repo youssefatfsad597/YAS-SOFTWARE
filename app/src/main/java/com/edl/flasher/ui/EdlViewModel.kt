@@ -157,6 +157,22 @@ private class CancellableInputStream(
 
 class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
+    // Slugs registered in Supabase's yas_firmware_files catalog (see
+    // supabase/03_firmware_storage.sql and the "Upload Firmware File to Server" GitHub
+    // Action / tools/upload_firmware.py). Must match the --slug value used at upload
+    // time EXACTLY, including the device-folder prefix.
+    private val X216B_LOADER_SLUG = "x216b/X216B.elf"
+    private val X216B_FRP_SLUG = "x216b/frp.bin"
+    private val X216B_PERSISTENT_SLUG = "x216b/persistent.bin"
+    private val X216B_MISC_SLUG = "x216b/misc.bin"
+    private val X216B_SEC_EFS_SLUG = "x216b/sec_efs.bin"
+    private val T505N_LOADER_SLUG = "t505n/T505N.elf"
+    private val T505N_FRP_SLUG = "t505n/frp.bin"
+    private val T505N_PERSISTENT_SLUG = "t505n/persistent.bin"
+    private val T505N_MISC_SLUG = "t505n/misc.bin"
+    private val T509_FDL1_SLUG = "t509/fdl1-sign.bin"
+    private val T509_FDL2_SLUG = "t509/fdl2-sign.bin"
+
     private val context get() = getApplication<Application>().applicationContext
     private val transport = EdlUsbTransport(context)
     private val sahara = SaharaProtocol(transport, ::appendLog)
@@ -263,29 +279,39 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(logs = emptyList()) }
     }
 
+    /** Firmware no longer ships inside the APK -- every file (X216B/T505N/T509) now streams
+     *  from the private 'yas-firmware' Storage bucket per-operation (see RemoteFirmware.kt).
+     *  This just checks the server catalog has every slug this build expects, so the UI can
+     *  warn early instead of failing mid-flash. Silently reports "not ready" before sign-in
+     *  (firmware_catalog() returns an empty list when not_authenticated) -- that's expected,
+     *  not an error; the real check happens again right before each operation anyway. */
+    private suspend fun remoteCatalogHasAll(slugs: List<String>): Pair<Boolean, String> {
+        val present = try {
+            RemoteFirmware.catalog(licenseService).map { it.slug }.toSet()
+        } catch (_: Exception) {
+            emptySet()
+        }
+        val missing = slugs.filterNot { it in present }
+        return if (missing.isEmpty()) true to "Ready (server)" else false to "MISSING on server: ${missing.joinToString(", ")}"
+    }
+
     fun checkEmbeddedFirmware() {
         viewModelScope.launch(Dispatchers.IO) {
-            val ready = EmbeddedFirmware.allPresent(context)
-            val status = EmbeddedFirmware.describeStatus(context)
+            val (ready, status) = remoteCatalogHasAll(
+                listOf(X216B_LOADER_SLUG, X216B_FRP_SLUG, X216B_PERSISTENT_SLUG, X216B_MISC_SLUG, X216B_SEC_EFS_SLUG)
+            )
             _uiState.update { it.copy(embeddedFirmwareReady = ready, embeddedFirmwareStatus = status) }
-            if (ready) {
-                appendLog("X216B firmware ready.")
-            } else {
-                appendLog("WARNING: X216B firmware is not ready.")
-            }
+            if (ready) appendLog("X216B firmware ready (server).")
         }
     }
 
     fun checkT505NFirmware() {
         viewModelScope.launch(Dispatchers.IO) {
-            val ready = T505NFirmware.allPresent(context)
-            val status = T505NFirmware.describeStatus(context)
+            val (ready, status) = remoteCatalogHasAll(
+                listOf(T505N_LOADER_SLUG, T505N_FRP_SLUG, T505N_PERSISTENT_SLUG, T505N_MISC_SLUG)
+            )
             _uiState.update { it.copy(t505nFirmwareReady = ready, t505nFirmwareStatus = status) }
-            if (ready) {
-                appendLog("T505N firmware ready.")
-            } else {
-                appendLog("WARNING: T505N firmware is not ready.")
-            }
+            if (ready) appendLog("T505N firmware ready (server).")
         }
     }
 
@@ -299,11 +325,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun checkT509Firmware() {
         viewModelScope.launch(Dispatchers.IO) {
-            val ready = T509Firmware.allPresent(context)
-            val status = T509Firmware.describeStatus(context)
+            val (ready, status) = remoteCatalogHasAll(listOf(T509_FDL1_SLUG, T509_FDL2_SLUG))
             _uiState.update { it.copy(t509FirmwareReady = ready, t509FirmwareStatus = status) }
-            if (ready) appendLog("T509 firmware ready.")
-            else appendLog("WARNING: T509 firmware is not ready.")
+            if (ready) appendLog("T509 firmware ready (server).")
         }
     }
 
@@ -405,10 +429,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     /** Full T509 service flow: FDL1 -> FDL2 -> erase userdata/frp/persist -> reset. */
     fun t509FormatFrp() {
         runTask("T509 Format + FRP") {
-            val opKey = requireOperationAuthorized("flash_frp_t509")
-            if (!T509Firmware.allPresent(context)) {
-                throw IllegalStateException("T509 firmware is not ready. ${T509Firmware.describeStatus(context)}")
-            }
+            requireOperationAuthorized("flash_frp_t509")
             if (!_uiState.value.t509BromConnected) {
                 val bromDevice = transport.findSprdBromDevice()
                     ?: throw IllegalStateException("No Unisoc BROM device detected. Use 'Force BROM' first.")
@@ -418,9 +439,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(t509BromConnected = true, usbConnected = true, deviceDescription = "Unisoc BROM") }
             }
 
-            appendLog("=== STEP 1: Uploading FDL1/FDL2 ===")
-            sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, T509Firmware.FDL1, opKey))
-            sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, T509Firmware.FDL2, opKey))
+            appendLog("=== STEP 1: Downloading FDL1/FDL2 from server ===")
+            sprdFdl.uploadFdl1(remoteFirmwareBytes(T509_FDL1_SLUG))
+            sprdFdl.uploadFdl2(remoteFirmwareBytes(T509_FDL2_SLUG))
 
             appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->
@@ -808,18 +829,52 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         bootFirehoseWithBytes(loaderBytes)
     }
 
+    /** Same as [bootFirehoseFromEmbeddedLoader] but fetches the (encrypted) loader from the
+     *  private 'yas-firmware' Storage bucket instead of the APK's bundled assets. Every call
+     *  re-checks the account's live license/device/ban/kill-switch state on the server
+     *  (authorize_firmware_download in 03_firmware_storage.sql), so a suspended or expired
+     *  account gets no loader even from an already-installed, patched APK. */
+    private suspend fun bootFirehoseFromRemoteLoader(slug: String) {
+        appendLog("Downloading loader from server...")
+        val loaderBytes = remoteFirmwareBytes(slug)
+        bootFirehoseWithBytes(loaderBytes)
+    }
+
+    /** Wraps a RemoteFirmware call so a denial surfaces as a readable reason, the same way
+     *  [requireOperationAuthorized] already turns a denial into an IllegalStateException
+     *  instead of a bare status code. */
+    private suspend fun remoteFirmwareBytes(slug: String): ByteArray = try {
+        RemoteFirmware.readAllBytes(context, licenseService, slug)
+    } catch (e: RemoteFirmware.DownloadDenied) {
+        throw IllegalStateException("رفض الخادم تحميل الملف ($slug): ${e.status}")
+    }
+
+    private suspend fun remoteFirmwareStream(slug: String): InputStream = try {
+        RemoteFirmware.openStream(context, licenseService, slug)
+    } catch (e: RemoteFirmware.DownloadDenied) {
+        throw IllegalStateException("رفض الخادم تحميل الملف ($slug): ${e.status}")
+    }
+
+    /** Looks up each slug's size via the server catalog in one call. Doubles as an
+     *  "every file is registered" precondition check -- throws naming the exact missing
+     *  slug instead of failing partway through a multi-partition write. */
+    private suspend fun remoteFirmwareSizes(slugs: List<String>): Map<String, Long> {
+        val bySlug = RemoteFirmware.catalog(licenseService).associateBy { it.slug }
+        return slugs.associateWith { slug ->
+            bySlug[slug]?.sizeBytes?.takeIf { it >= 0 }
+                ?: throw IllegalStateException(
+                    "الملف '$slug' غير مسجل على السيرفر بعد. ارفعه عبر GitHub Actions " +
+                        "(Upload Firmware File to Server) ثم أعد المحاولة."
+                )
+        }
+    }
+
     fun runSaharaAndConfigureFirehose(autoReadGpt: Boolean = true) {
         val st = _uiState.value
         if (!st.firehoseReady) {
             when (st.gptLoaderChoice) {
-                GptLoaderChoice.X216B -> if (!EmbeddedFirmware.exists(context, EmbeddedFirmware.LOADER)) {
-                    appendLog("ERROR: Built-in X216B loader is missing from the app. Rebuild with firmware/x216b/X216B.elf.")
-                    return
-                }
-                GptLoaderChoice.T505N -> if (!T505NFirmware.exists(context, T505NFirmware.LOADER)) {
-                    appendLog("ERROR: Built-in T505N loader is missing from the app. Rebuild with firmware/t505n/T505N.elf.")
-                    return
-                }
+                GptLoaderChoice.X216B -> { /* checked remotely at download time */ }
+                GptLoaderChoice.T505N -> { /* checked remotely at download time */ }
                 GptLoaderChoice.MANUAL -> if (st.loaderUri == null) {
                     appendLog("ERROR: Manual loader mode is selected but no loader file was chosen. Tap 'Choose loader' first.")
                     return
@@ -828,14 +883,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         runTask("Booting Firehose & Reading GPT") {
-            // Every path here either boots a licensed, encrypted embedded loader, or at
-            // minimum reads the device's GPT -- both require a live, authorized session.
-            val opKey = requireOperationAuthorized("boot_firehose_read_gpt")
+            // Every path here either boots a licensed loader downloaded from the server, or
+            // at minimum reads the device's GPT -- both require a live, authorized session.
+            requireOperationAuthorized("boot_firehose_read_gpt")
             if (!_uiState.value.firehoseReady) {
                 val cur = _uiState.value
                 when (cur.gptLoaderChoice) {
-                    GptLoaderChoice.X216B -> bootFirehoseFromEmbeddedLoader(opKey)
-                    GptLoaderChoice.T505N -> bootFirehoseFromEmbeddedT505NLoader(opKey)
+                    GptLoaderChoice.X216B -> bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
+                    GptLoaderChoice.T505N -> bootFirehoseFromRemoteT505NLoader()
                     GptLoaderChoice.MANUAL -> {
                         val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
                         appendLog("Uploading manual loader (${cur.loaderName})...")
@@ -856,7 +911,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         val sizeBytes: Long,
         // What the log shows for this step instead of the raw partition/file name.
         val logLabel: String,
-        val open: () -> InputStream
+        val open: suspend () -> InputStream
     )
 
     /** openInputStream() is declared nullable (the provider can return null, e.g. the file was
@@ -869,14 +924,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runX216BWipeAndWriteSequence() {
         runTask("X216B Auto Wipe & Write") {
-            val opKey = requireOperationAuthorized("flash_frp_x216b")
+            requireOperationAuthorized("flash_frp_x216b")
             val useEmbedded = true
 
-            if (useEmbedded && !EmbeddedFirmware.allPresent(context)) {
-                throw IllegalStateException(
-                    "Firmware is not ready."
-                )
-            }
+            // Fetches sizes for all 4 files from the server catalog up front -- this also
+            // acts as the "firmware is ready" precondition check (throws naming the exact
+            // missing slug) instead of EmbeddedFirmware.allPresent()'s local file check.
+            val remoteSizes: Map<String, Long>? = if (useEmbedded) {
+                remoteFirmwareSizes(listOf(X216B_FRP_SLUG, X216B_PERSISTENT_SLUG, X216B_MISC_SLUG, X216B_SEC_EFS_SLUG))
+            } else null
 
             if (!transport.isConnected) {
                 val device = transport.findEdlDevice()
@@ -894,7 +950,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             if (!_uiState.value.firehoseReady) {
                 if (useEmbedded) {
-                    bootFirehoseFromEmbeddedLoader(opKey)
+                    bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
                 } else {
                     val loaderUri = _uiState.value.loaderUri
                         ?: throw IllegalStateException("Please select a custom loader first, or enable embedded firmware!")
@@ -914,23 +970,24 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
-                appendLog("Writing firmware images...")
+                val sizes = remoteSizes!!
+                appendLog("Writing firmware images (downloading from server)...")
                 listOf(
                     WriteJob("frp", setOf("frp"), "frp",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "Erasing FRP 1") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP, opKey)
+                        sizes.getValue(X216B_FRP_SLUG), "Erasing FRP 1") {
+                        remoteFirmwareStream(X216B_FRP_SLUG)
                     },
                     WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "Erasing FRP 2") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT, opKey)
+                        sizes.getValue(X216B_PERSISTENT_SLUG), "Erasing FRP 2") {
+                        remoteFirmwareStream(X216B_PERSISTENT_SLUG)
                     },
                     WriteJob("misc", setOf("misc"), "misc",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "Erasing DATA") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC, opKey)
+                        sizes.getValue(X216B_MISC_SLUG), "Erasing DATA") {
+                        remoteFirmwareStream(X216B_MISC_SLUG)
                     },
                     WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "Erasing MDM") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS, opKey)
+                        sizes.getValue(X216B_SEC_EFS_SLUG), "Erasing MDM") {
+                        remoteFirmwareStream(X216B_SEC_EFS_SLUG)
                     }
                 )
             } else {
@@ -1003,13 +1060,16 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         bootFirehoseWithBytes(loaderBytes)
     }
 
+    /** Same as [bootFirehoseFromEmbeddedT505NLoader] but downloads the loader from the
+     *  'yas-firmware' Storage bucket instead of the APK's bundled assets. */
+    private suspend fun bootFirehoseFromRemoteT505NLoader() {
+        appendLog("Downloading T505N loader from server...")
+        bootFirehoseWithBytes(remoteFirmwareBytes(T505N_LOADER_SLUG))
+    }
+
     /** Opens the 9008 USB device if needed, forces eMMC storage, and boots the T505N loader
      *  into Firehose if it isn't already up. Shared by both T505N one-tap buttons below. */
-    private suspend fun prepareT505NFirehose(serverKey: ByteArray) {
-        if (!T505NFirmware.allPresent(context)) {
-            throw IllegalStateException("T505N firmware is not ready. ${T505NFirmware.describeStatus(context)}")
-        }
-
+    private suspend fun prepareT505NFirehose() {
         if (!transport.isConnected) {
             val device = transport.findEdlDevice()
                 ?: throw IllegalStateException("No 9008 device detected on USB!")
@@ -1032,31 +1092,40 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (!_uiState.value.firehoseReady) {
-            bootFirehoseFromEmbeddedT505NLoader(serverKey)
+            bootFirehoseFromRemoteT505NLoader()
         }
     }
 
     /** Writes frp(+persistent)(+misc) to the GPT partitions matching those names, in the
-     *  same "FRP 1 / FRP 2 / DATA" step order and typo-tolerant aliases as X216B's sequence. */
-    private suspend fun writeT505NPartitions(currentParts: List<PartitionEntry>, includeMisc: Boolean, serverKey: ByteArray) {
+     *  same "FRP 1 / FRP 2 / DATA" step order and typo-tolerant aliases as X216B's sequence.
+     *  Every file is downloaded from the server (see [remoteFirmwareStream]) instead of the
+     *  APK's bundled assets. */
+    private suspend fun writeT505NPartitions(currentParts: List<PartitionEntry>, includeMisc: Boolean) {
+        val slugs = buildList {
+            add(T505N_FRP_SLUG); add(T505N_PERSISTENT_SLUG)
+            if (includeMisc) add(T505N_MISC_SLUG)
+        }
+        val sizes = remoteFirmwareSizes(slugs)
+        appendLog("Writing firmware images (downloading from server)...")
+
         val jobs = buildList {
             add(
                 WriteJob("frp", setOf("frp"), "frp",
-                    T505NFirmware.sizeOf(context, T505NFirmware.FRP), "Erasing FRP 1") {
-                    T505NFirmware.openStream(context, T505NFirmware.FRP, serverKey)
+                    sizes.getValue(T505N_FRP_SLUG), "Erasing FRP 1") {
+                    remoteFirmwareStream(T505N_FRP_SLUG)
                 }
             )
             add(
                 WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                    T505NFirmware.sizeOf(context, T505NFirmware.PERSISTENT), "Erasing FRP 2") {
-                    T505NFirmware.openStream(context, T505NFirmware.PERSISTENT, serverKey)
+                    sizes.getValue(T505N_PERSISTENT_SLUG), "Erasing FRP 2") {
+                    remoteFirmwareStream(T505N_PERSISTENT_SLUG)
                 }
             )
             if (includeMisc) {
                 add(
                     WriteJob("misc", setOf("misc"), "misc",
-                        T505NFirmware.sizeOf(context, T505NFirmware.MISC), "Erasing DATA") {
-                        T505NFirmware.openStream(context, T505NFirmware.MISC, serverKey)
+                        sizes.getValue(T505N_MISC_SLUG), "Erasing DATA") {
+                        remoteFirmwareStream(T505N_MISC_SLUG)
                     }
                 )
             }
@@ -1091,8 +1160,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  device (see [T505NFirmware]). */
     fun runT505NFormatFrpSequence() {
         runTask("T505N Format + FRP") {
-            val opKey = requireOperationAuthorized("flash_frp_t505n")
-            prepareT505NFirehose(opKey)
+            requireOperationAuthorized("flash_frp_t505n")
+            prepareT505NFirehose()
 
             appendLog("Reading Full GPT Partition Table...")
             scanAllGptInternal()
@@ -1102,8 +1171,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             appendLog("=== WRITING PARTITIONS (MISC, FRP, PERSISTENT) ===")
-            appendLog("Writing firmware images...")
-            writeT505NPartitions(currentParts, includeMisc = true, serverKey = opKey)
+            writeT505NPartitions(currentParts, includeMisc = true)
 
             appendLog("Operation completed successfully.")
             appendLog("Rebooting device...")
@@ -1115,8 +1183,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  frp + persistent (misc/DATA is left untouched), then reboots. */
     fun runT505NEraseFrpSequence() {
         runTask("T505N Erase FRP") {
-            val opKey = requireOperationAuthorized("flash_frp_t505n")
-            prepareT505NFirehose(opKey)
+            requireOperationAuthorized("flash_frp_t505n")
+            prepareT505NFirehose()
 
             appendLog("Reading Full GPT Partition Table...")
             scanAllGptInternal()
@@ -1126,8 +1194,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT) ===")
-            appendLog("Writing firmware images...")
-            writeT505NPartitions(currentParts, includeMisc = false, serverKey = opKey)
+            writeT505NPartitions(currentParts, includeMisc = false)
 
             appendLog("Operation completed successfully.")
             appendLog("Rebooting device...")

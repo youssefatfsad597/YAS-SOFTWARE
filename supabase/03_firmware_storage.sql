@@ -95,7 +95,9 @@ grant execute on function public.firmware_catalog() to authenticated;
 --    key_material_hex + sha256_plaintext for ONE named file. Every call is logged to
 --    yas_operation_log the same way a sensitive operation is.
 -- ---------------------------------------------------------------------------
-create or replace function public.authorize_firmware_download(p_device_id text, p_slug text, p_android_id text default null)
+drop function if exists public.authorize_firmware_download(text, text, text);
+
+create or replace function public.authorize_firmware_download(p_device_id text, p_slug text, p_android_id text default null, p_tamper_reason text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
   v_uid uuid := auth.uid();
@@ -104,6 +106,7 @@ declare
   f public.yas_firmware_files%rowtype;
   v_aid text := left(nullif(trim(coalesce(p_android_id, '')), ''), 64);
   v_slug text := left(nullif(trim(coalesce(p_slug, '')), ''), 200);
+  v_tamper text := nullif(trim(coalesce(p_tamper_reason, '')), '');
   v_status text := 'denied';
 begin
   if v_uid is null then
@@ -114,6 +117,15 @@ begin
   end if;
   if v_slug is null then
     return jsonb_build_object('granted', false, 'status', 'invalid_file');
+  end if;
+
+  -- Same tamper short-circuit as authorize_operation (see 02_operation_auth.sql) --
+  -- banned immediately, no firmware key released this call or any future one.
+  if v_tamper is not null then
+    perform public.yas_auto_ban_device(v_uid, p_device_id, v_aid, v_tamper);
+    insert into public.yas_operation_log(user_id, device_id, operation, granted, status)
+      values (v_uid, p_device_id, 'download:' || v_slug, false, 'tamper_auto_banned');
+    return jsonb_build_object('granted', false, 'status', 'tamper_auto_banned');
   end if;
 
   if public.yas_is_banned(p_device_id, v_aid) then
@@ -170,8 +182,8 @@ begin
   );
 end; $$;
 
-revoke all on function public.authorize_firmware_download(text, text, text) from public, anon;
-grant execute on function public.authorize_firmware_download(text, text, text) to authenticated;
+revoke all on function public.authorize_firmware_download(text, text, text, text) from public, anon;
+grant execute on function public.authorize_firmware_download(text, text, text, text) to authenticated;
 
 -- ---------------------------------------------------------------------------
 -- 4) admin_upsert_firmware_file: used by tools/upload_firmware.py (service_role key,

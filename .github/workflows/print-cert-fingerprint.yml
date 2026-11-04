@@ -1,0 +1,45 @@
+name: Print Existing Release Cert Fingerprint (read-only)
+
+# Does NOT generate a new keystore. Decodes the SAME keystore already stored
+# in the KEYSTORE_BASE64 secret (the one release.yml signs every build
+# with) and prints its SHA-256 fingerprint, so you can compare it character
+# by character against what you're typing into other forms (e.g. the
+# "Upload Firmware File to Server" workflow's cert_sha256 field).
+#
+# Uses the exact same secrets release.yml already uses -- nothing new to add:
+#   KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_PASSWORD
+# (alias is hardcoded to "yas_key" here because release.yml hardcodes it the
+# same way in its gradle call, regardless of any KEY_ALIAS secret value.)
+#
+# Safe to run as many times as you want -- it only reads, never writes.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  print-fingerprint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Decode the EXISTING keystore (same one release.yml uses)
+        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/yas-release.keystore
+
+      - name: Print SHA-256 fingerprint
+        run: |
+          set -e
+          FULL=$(keytool -list -v -keystore /tmp/yas-release.keystore -alias "yas_key" -storepass "${{ secrets.KEYSTORE_PASSWORD }}")
+          HASH=$(echo "$FULL" | grep "SHA256:" | head -n1 | sed 's/.*SHA256: //' | tr -d ':' | tr '[:upper:]' '[:lower:]')
+          echo "## Existing RELEASE_CERT_SHA256 (from your current keystore)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "$HASH" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "Compare this character-by-character against the RELEASE_CERT_SHA256 secret and against anything you type into cert_sha256 fields." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up
+        if: always()
+        run: rm -f /tmp/yas-release.keystore
