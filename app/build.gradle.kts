@@ -37,6 +37,26 @@ android {
         }
     }
 
+    // "online" is the existing, untouched edition (login, license, server-derived
+    // firmware keys, remote catalog...) -- its applicationId is left EXACTLY as the
+    // defaultConfig one above so this flavor builds a byte-for-byte-equivalent APK to
+    // what shipped before flavors existed (same package, same update path, same
+    // behavior). "offline" is a separate app (different applicationId) with no login,
+    // no server calls, and unencrypted firmware bundled directly as assets -- see
+    // app/src/online/ vs app/src/offline/ for the files each one pulls in.
+    flavorDimensions += "edition"
+    productFlavors {
+        create("online") {
+            dimension = "edition"
+            // deliberately NOT changed -- keeps applicationId = defaultConfig's "com.yas.flashedl"
+        }
+        create("offline") {
+            dimension = "edition"
+            applicationIdSuffix = ".offline"
+            versionNameSuffix = "-offline"
+        }
+    }
+
     // Release .so files ship with debug symbols stripped automatically by AGP;
     // debug keeps them so crashes stay readable locally.
 

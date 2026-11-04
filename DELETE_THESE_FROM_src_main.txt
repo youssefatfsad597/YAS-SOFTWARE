@@ -1,0 +1,23 @@
+امسح الملفات دي من app/src/main/java/com/edl/flasher/ بعد ما تدمج الزيب ده
+(لأنها بقت موجودة في app/src/online/ بدل كده):
+
+app/src/main/java/com/edl/flasher/auth/AdminService.kt
+app/src/main/java/com/edl/flasher/auth/AdminScreen.kt
+app/src/main/java/com/edl/flasher/auth/AuthGate.kt
+app/src/main/java/com/edl/flasher/auth/KillSwitchWorker.kt
+app/src/main/java/com/edl/flasher/auth/LicenseService.kt
+app/src/main/java/com/edl/flasher/auth/NativeCore.kt
+app/src/main/java/com/edl/flasher/auth/OperationAuthClient.kt
+app/src/main/java/com/edl/flasher/auth/OperationKeyClient.kt
+app/src/main/java/com/edl/flasher/auth/RemoteFirmwareClient.kt
+app/src/main/java/com/edl/flasher/auth/SensitiveOperationGate.kt
+app/src/main/java/com/edl/flasher/auth/TamperGuard.kt
+app/src/main/java/com/edl/flasher/auth/YasIcons.kt
+app/src/main/java/com/edl/flasher/protocol/EmbeddedFirmware.kt
+app/src/main/java/com/edl/flasher/protocol/T505NFirmware.kt
+app/src/main/java/com/edl/flasher/protocol/T509Firmware.kt
+app/src/main/java/com/edl/flasher/protocol/RemoteFirmware.kt
+app/src/main/java/com/edl/flasher/protocol/FirmwareCipher.kt
+
+بعد المسح، مجلد app/src/main/java/com/edl/flasher/auth/ هيبقى فاضي تمامًا -- سيبه
+فاضي أو امسحه، الاتنين مفيش فرق (Gradle مش بيهتم بمجلد فاضي).
