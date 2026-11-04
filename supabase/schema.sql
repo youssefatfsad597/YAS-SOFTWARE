@@ -120,10 +120,25 @@ revoke all on public.yas_devices from anon, authenticated;
 grant select on public.yas_profiles to authenticated;
 grant select on public.yas_devices to authenticated;
 
--- Single-device policy: only one device may hold an active session per account.
--- Switching to a different device is allowed only after a 4-hour cool-down since
--- the previous device's last activity, so sharing one account across devices is
--- effectively limited to one device at a time.
+-- Columns authorize_device() below depends on. "add column if not exists" is idempotent,
+-- so this is safe whether 02_operation_auth.sql / 05_unlimited_devices.sql already ran on
+-- this project or not -- re-running schema.sql alone can never drop either column.
+alter table public.yas_profiles add column if not exists force_logout_at timestamptz;
+alter table public.yas_profiles add column if not exists unlimited_devices boolean not null default false;
+
+-- Single-device policy: only one device may hold an active session per account, UNLESS
+-- yas_profiles.unlimited_devices is true for it (see the "set unlimited_devices = true"
+-- statement near the end of this file) -- that account skips the cool-down entirely and
+-- can register as many devices as it wants, one after another, with no wait.
+--
+-- IMPORTANT: this function was previously duplicated with small variations across
+-- schema.sql / 02_operation_auth.sql / 05_unlimited_devices.sql. Because every one of
+-- those is "create or replace function", whichever file you ran MOST RECENTLY silently
+-- became the live version -- so re-running this file after 02/05 used to UNDO both the
+-- kill-switch check and the unlimited_devices bypass without any error or warning. This
+-- copy is now the single up-to-date version (kill-switch + unlimited_devices included);
+-- the copies in 02_operation_auth.sql and 05_unlimited_devices.sql are kept only as
+-- historical/standalone references and should not be re-run after this file.
 create or replace function public.authorize_device(p_device_id text, p_device_name text default null, p_android_id text default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare
@@ -148,6 +163,12 @@ begin
   end if;
   select * into p from public.yas_profiles where user_id = v_uid;
   if not found then return jsonb_build_object('active',false,'status','pending','message','الحساب غير مسجل في نظام التراخيص.'); end if;
+
+  -- Kill-switch: an admin pressed "قطع فوري" since this device last checked in.
+  if p.force_logout_at is not null then
+    return jsonb_build_object('active',false,'status','force_logout','message','تم إنهاء الجلسة من لوحة الإدارة. سجّل الدخول من جديد بعد إعادة تفعيل الحساب.');
+  end if;
+
   v_status := p.status;
   if p.status = 'active' and (p.expires_at is null or p.expires_at <= now()) then v_status := 'expired'; end if;
   if v_status <> 'active' then
@@ -168,21 +189,25 @@ begin
   end if;
 
   -- Unknown device, or one the admin deleted earlier (treated as a brand-new device).
-  select * into v_other from public.yas_devices where user_id=v_uid and revoked_at is null and deleted_at is null order by last_seen_at desc limit 1;
-  if v_other.id is not null then
-    v_wait_seconds := v_cooldown_seconds - extract(epoch from (now() - v_other.last_seen_at))::integer;
-    if v_wait_seconds > 0 then
-      return jsonb_build_object(
-        'active',false,'status','device_cooldown','expires_at',p.expires_at,'wait_seconds',v_wait_seconds,
-        'message','لا يُسمح إلا بجهاز واحد في المرة الواحدة. يمكنك الدخول من جهاز آخر بعد ' ||
-          case when v_wait_seconds >= 3600
-            then (v_wait_seconds/3600)::text || ' ساعة و' || ((v_wait_seconds%3600)/60)::text || ' دقيقة'
-            else (greatest(v_wait_seconds,60)/60)::text || ' دقيقة'
-          end || '.'
-      );
+  -- Skipped entirely for unlimited_devices accounts: registering a new device never
+  -- touches, revokes, or waits on any of their other devices.
+  if not p.unlimited_devices then
+    select * into v_other from public.yas_devices where user_id=v_uid and revoked_at is null and deleted_at is null order by last_seen_at desc limit 1;
+    if v_other.id is not null then
+      v_wait_seconds := v_cooldown_seconds - extract(epoch from (now() - v_other.last_seen_at))::integer;
+      if v_wait_seconds > 0 then
+        return jsonb_build_object(
+          'active',false,'status','device_cooldown','expires_at',p.expires_at,'wait_seconds',v_wait_seconds,
+          'message','لا يُسمح إلا بجهاز واحد في المرة الواحدة. يمكنك الدخول من جهاز آخر بعد ' ||
+            case when v_wait_seconds >= 3600
+              then (v_wait_seconds/3600)::text || ' ساعة و' || ((v_wait_seconds%3600)/60)::text || ' دقيقة'
+              else (greatest(v_wait_seconds,60)/60)::text || ' دقيقة'
+            end || '.'
+        );
+      end if;
+      -- Cool-down elapsed: release the old device and hand the session to this one.
+      update public.yas_devices set revoked_at = now() where id = v_other.id;
     end if;
-    -- Cool-down elapsed: release the old device and hand the session to this one.
-    update public.yas_devices set revoked_at = now() where id = v_other.id;
   end if;
 
   if v_existing.id is not null then
@@ -194,6 +219,12 @@ begin
   end if;
   return jsonb_build_object('active',true,'status','active','expires_at',p.expires_at,'message','تم تسجيل الدخول من جهاز جديد.');
 end; $$;
+
+-- One-time (idempotent, safe to re-run) grant of the unlimited-devices exception to this
+-- account. Re-run this single statement any time for any other account.
+update public.yas_profiles
+set unlimited_devices = true
+where user_id = (select id from auth.users where lower(email) = lower('youssefatfsad597@gmail.com'));
 
 create or replace function public.admin_list_users()
 returns jsonb language plpgsql security definer set search_path = '' as $$
