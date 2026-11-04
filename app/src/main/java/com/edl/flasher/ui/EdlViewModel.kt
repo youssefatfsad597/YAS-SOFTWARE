@@ -2961,6 +2961,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 it.copy(isBusy = true, currentTask = taskTitle, progress = 0f, transferSpeedMbps = 0.0)
             }
             try {
+                // Every operation -- including a plain info read -- confirms the server
+                // connection first, in one place, with one message. No per-operation checks.
+                val (reachable, reason) = licenseService.checkServerReachable()
+                if (!reachable) {
+                    val suffix = if (reason.isNotBlank()) " -- $reason" else ""
+                    appendLog("ERROR: No server connection.$suffix")
+                    return@launch
+                }
                 block()
             } catch (e: Exception) {
                 appendLog("ERROR [$taskTitle]: ${e.message}")

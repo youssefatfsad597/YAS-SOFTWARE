@@ -870,7 +870,12 @@ fun EdlMainScreen(
         ) {
             val wide = maxWidth >= 720.dp
             val inspectorWidth = (maxWidth * 0.36f).coerceIn(300.dp, 420.dp)
-            val dockHeight = maxHeight * (if (dockExpanded) 0.58f else 0.30f)
+            // Relative to the screen, but capped: on a short phone a flat 30% of the height
+            // left too little room above it for tab content (e.g. the Read GPT partition
+            // list could be squeezed to nothing). Capping the collapsed dock keeps more of
+            // the screen for whichever tab is open while still scaling down on tiny screens.
+            val dockHeight = (maxHeight * (if (dockExpanded) 0.55f else 0.24f))
+                .coerceIn(130.dp, if (dockExpanded) maxHeight * 0.7f else 220.dp)
 
             Column(modifier = Modifier.fillMaxSize()) {
                 TopBar(
@@ -1915,7 +1920,11 @@ private fun ReadGptTab(
             onBackupPartition = onBackupPartition,
             onFlashPartition = onFlashPartition,
             onRequestErasePartition = onRequestErasePartition,
-            modifier = Modifier.weight(1f)
+            // weight(1f) alone can be squeezed to 0dp on a phone (short screen + the loader
+            // card above taking its natural height) and the partition list would then simply
+            // not render. heightIn(min=...) keeps the flexible/proportional sizing but puts a
+            // floor under it so the GPT sections are always visible, on any screen size.
+            modifier = Modifier.weight(1f).heightIn(min = 220.dp)
         )
     }
 }
@@ -3270,16 +3279,15 @@ EDL (Emergency Download Mode) هو وضع صيانة جوه شريحة Qualcomm 
 ! ألوان الأسلاك في الغالب بالشكل ده، لكن في كابلات قليلة بتختلف. لو الطريقة مجابتش نتيجة، جرّب كابل تاني.
 
 ## ثانيًا: الدخول في EDL
-1. افصل التابلت من أي كابل أو شاحن.
-2. اعمل إيقاف تشغيل كامل (Power Off) واستنى لحد ما الشاشة تطفي خالص.
-3. وصّل طرف الكابل المعدل في التابلت بس -- طرفه التاني يفضل لسه فاضي، مش موصّل بالموبايل.
-4. والكابل المعدل موصّل بالتابلت، دوس على زرار Volume Up و Volume Down مع بعض، وكرر الضغط حوالي 20 مرة.
-5. على طول بعد الـ 20 ضغطة، وصّل كابل بيانات سليم (شغال) بين الطرف الفاضي من الكابل المعدل وبين الموبايل اللي عليه التطبيق (عن طريق OTG) -- التوصيلة دي لازم تتم بسرعة وإنت مستمر تضغط على الأزرار في نفس اللحظة.
-6. لو ظهرت على شاشة التابلت علامة شحن (أيقونة بطارية) بعد التوصيل، معناه إنه دخل شحن عادي مش EDL -- افصل الكابل السليم فورًا (سيب الكابل المعدل في التابلت زي ما هو) وجرّب تاني من الخطوة 4.
+1. افصل التابلت من أي كابل أو شاحن، واعمل له إيقاف تشغيل كامل (Power Off) واستنى لحد ما الشاشة تطفي خالص.
+2. وصّل الكابل المعدل في الاتنين مع بعض من الأول: طرفه في الـ OTG (على الموبايل اللي عليه التطبيق)، وطرفه التاني في التابلت.
+3. دوس بسرعة على زرار Volume Up و Volume Down مع بعض، وكرر الضغط حوالي 15 مرة.
+4. بعد كده شيل الكابل المعدل من الـ OTG ومن التابلت.
+5. وصّل كابل بيانات سليم (شغال عادي) مكان الكابل المعدل -- والتطبيق المفروض يقرا الجهاز على طول.
+6. لو ظهرت على شاشة التابلت علامة شحن (أيقونة بطارية) وانت لسه بتوصّل الكابل المعدل، شيله وقرّبه تاني؛ لو اتكررت، ممكن تكون المشكلة في الكابل المعدل نفسه وتحتاج تجرب كابل تاني.
 7. لو الجهاز ظهر في التطبيق على إنه 9008، يبقى دخل EDL بنجاح وتقدر تكمل من غير ما تفصل أي كابل.
-8. لو مظهرش ولا طلعت علامة شحن، افصل كل حاجة، اعمل الخطوات من 1 لـ 7 تاني من الأول، وزوّد عدد مرات الضغط على أزرار الصوت.
+8. لو مظهرش، اعمل الخطوات من 1 لـ 7 تاني من الأول، وزوّد عدد مرات الضغط على أزرار الصوت.
 9. بعد ما يظهر 9008، افتح تبويب X216B أو Read GPT حسب اللي محتاجه.
-! السرعة مهمة: التأخير بين آخر ضغطة وتوصيل الكابل السليم هو أكتر سبب يخلي الجهاز يدخل شحن عادي بدل EDL.
 """.trimIndent()
 )
 
@@ -3528,8 +3536,8 @@ private val EXPLAIN_QA: List<ExplainQA> = listOf(
         """
 1. اتأكد إن التابلت مطفي تمامًا (Power Off) قبل ما توصل الكابل المعدل.
 2. اتأكد إن السلك الأخضر موصّل بالأسود بشكل ثابت ومفيش شريط عازل بينهم، وإن الأحمر والأبيض مش لامسينهم.
-3. لو شاشة التابلت وريتلك علامة شحن (أيقونة بطارية) بعد ما وصّلت الكابل السليم، يبقى الدخول فشل ودخل شحن عادي -- افصل الكابل السليم على طول وجرّب تاني، لأن التأخير هو أكتر سبب لده.
-4. زوّد عدد مرات الضغط على Volume Up + Volume Down مع بعض (جرّب 30 مرة أو أكتر)، وخلي توصيل الكابل السليم بعد آخر ضغطة يكون سريع قد ما تقدر.
+3. لو شاشة التابلت وريتلك علامة شحن (أيقونة بطارية) وانت لسه بتوصّل الكابل المعدل نفسه (قبل ما تشيله)، شيله وقرّبه تاني -- ولو اتكررت، جرّب كابل تاني تعمل منه الكابل المعدل، لأن المشكلة غالبًا في الكابل نفسه.
+4. زوّد عدد مرات الضغط على Volume Up + Volume Down مع بعض (جرّب 25-30 مرة بدل الـ 15)، وخلي شيل الكابل المعدل وتوصيل الكابل السليم بعده سريع قد ما تقدر.
 5. جرّب كابل سليم تاني (بيانات مش شحن بس)، لأن بعض الكابلات بتبقى شحن بس.
 6. اعمل الخطوات كلها من الأول مرة تانية.
 """.trimIndent()

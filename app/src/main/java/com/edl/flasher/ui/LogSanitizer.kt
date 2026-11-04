@@ -29,8 +29,6 @@ object LogSanitizer {
         "^Reading Full GPT Partition Table\\.*$" to "Reading the partition table...",
         "^Scanning full GPT.*$" to "Scanning storage for partitions...",
         "^Full GPT Loaded: Total (\\d+) partitions ready\\.?$" to "Partition table loaded: $1 partitions found.",
-        "^=== STEP 1: .*$" to "Step 1: Erasing partitions...",
-        "^=== STEP 2: .*$" to "Step 2: Writing FRP, SEC_EFS and PERSISTENT...",
         "^Storage type set to (\\w+).*$" to "Storage type: $1",
         "^Detected Samsung Download-Mode device.*$" to "Samsung Download Mode device detected.",
         "^WARNING: the loader refused .*$" to
@@ -50,7 +48,14 @@ object LogSanitizer {
             "WARNING: Device check after write -- $1",
         "^Writing '(.*)' -> partition '(.*)'.*$" to "Writing '$1' to '$2'...",
         "^Quick-format mode: sending small '(.*)'.*$" to "Quick-format mode: sending a small '$1' on purpose.",
-        "^Quick-format mode: sending small userdata.*$" to "Quick-format mode: sending a small userdata image on purpose."
+        "^Quick-format mode: sending small userdata.*$" to "Quick-format mode: sending a small userdata image on purpose.",
+        // One unified rule for every stage header in the app ("=== STEP 1: ... ===",
+        // "=== WRITING PARTITIONS (...) ===", "=== CHANGE SERIAL NUMBER ===", ...) instead of
+        // a hand-written rewrite per message: strips the "===" ASCII-art and lower-cases the
+        // first letter so every stage line reads the same simple way, e.g. "step 1: ..." or
+        // "writing partitions (frp, persistent)...". Must stay LAST so a more specific rule
+        // above (if one is ever added) can still take precedence.
+        "^===\\s*(.+?)\\s*===$" to "\u0001$1"
     ).map { Regex(it.first, setOf(RegexOption.DOT_MATCHES_ALL)) to it.second }
 
     private val errorWrapper = Regex("^ERROR \\[([^\\]]*)\\]:\\s*(.*)$", RegexOption.DOT_MATCHES_ALL)
@@ -66,7 +71,18 @@ object LogSanitizer {
         }
         if (dropPatterns.any { it.containsMatchIn(msg) }) return null
         for ((regex, replacement) in rewrites) {
-            if (regex.containsMatchIn(msg)) return scrub(regex.replace(msg, replacement))
+            if (regex.containsMatchIn(msg)) {
+                val rewritten = regex.replace(msg, replacement)
+                // Marker left by the generic "=== ... ===" stage-header rule: finish the
+                // simplification (lower-case the first letter, add a trailing "...") here,
+                // since Regex.replace can't do case changes inline.
+                if (rewritten.startsWith("\u0001")) {
+                    val body = rewritten.removePrefix("\u0001")
+                    val lowered = body.replaceFirstChar { it.lowercase() }
+                    return scrub(if (lowered.endsWith("...") || lowered.endsWith(".")) lowered else "$lowered...")
+                }
+                return scrub(rewritten)
+            }
         }
         return scrub(msg)
     }
