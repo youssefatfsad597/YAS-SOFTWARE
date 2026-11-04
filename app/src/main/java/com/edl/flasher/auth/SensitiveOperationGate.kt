@@ -48,10 +48,19 @@ object SensitiveOperationGate {
             )
         }
 
-        val key = OperationKeyClient.deriveFirmwareKey(grant, context, System.currentTimeMillis() / 1000)
-            ?: return Outcome.Denied("expired_or_replayed_grant")
-
-        return Outcome.Key(key)
+        return when (val result = OperationKeyClient.deriveFirmwareKeyDiagnosed(grant, context, System.currentTimeMillis() / 1000)) {
+            is OperationKeyClient.KeyResult.Success -> Outcome.Key(result.key)
+            is OperationKeyClient.KeyResult.Failure -> Outcome.Denied(
+                when (val reason = result.reason) {
+                    is OperationKeyClient.KeyFailure.Stale ->
+                        "expired_grant (skew=${reason.skewSeconds}s, ttl=${reason.ttlSeconds}s -- " +
+                            "تحقق من ضبط الوقت والتاريخ تلقائيًا على الجهاز)"
+                    OperationKeyClient.KeyFailure.Malformed -> "malformed_grant"
+                    OperationKeyClient.KeyFailure.NonceReused -> "replayed_grant"
+                    OperationKeyClient.KeyFailure.NativeLibMissing -> "native_key_derivation_failed"
+                }
+            )
+        }
     }
 }
 
