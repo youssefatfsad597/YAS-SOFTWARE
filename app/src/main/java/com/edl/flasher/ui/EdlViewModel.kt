@@ -2,7 +2,6 @@ package com.edl.flasher.ui
 
 import android.app.Application
 import android.hardware.usb.UsbDevice
-import com.edl.flasher.BuildConfig
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
@@ -162,20 +161,6 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     // supabase/03_firmware_storage.sql and the "Upload Firmware File to Server" GitHub
     // Action / tools/upload_firmware.py). Must match the --slug value used at upload
     // time EXACTLY, including the device-folder prefix.
-    // "offline" is this app's second product flavor (see app/build.gradle.kts) -- it has no
-    // Supabase project at all, so RemoteFirmware.catalog() always returns emptyList() and
-    // every slug lookup fails with "not registered on the server". That build instead ships
-    // every X216B/T505N/T509 service file as plain, unencrypted assets (app/src/offline/assets/),
-    // read via EmbeddedFirmware/T505NFirmware/T509Firmware -- so any X216B/T505N flow must check
-    // this flag and use those local-asset objects instead of the remote*/bootFirehoseFromRemote*
-    // helpers, which only work when a server catalog actually exists (the online flavor).
-    private val isOfflineBuild = BuildConfig.FLAVOR == "offline"
-
-    // EmbeddedFirmware/T505NFirmware/T509Firmware.readAllBytes()/openStream() take a serverKey
-    // only to share one call signature with the online flavor (which uses it to decrypt);
-    // the offline flavor's versions ignore it completely and read the asset bytes as-is.
-    private val EMPTY_SERVER_KEY = ByteArray(0)
-
     private val X216B_LOADER_SLUG = "x216b/X216B.elf"
     private val X216B_FRP_SLUG = "x216b/frp.bin"
     private val X216B_PERSISTENT_SLUG = "x216b/persistent.bin"
@@ -311,12 +296,6 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkEmbeddedFirmware() {
-        if (isOfflineBuild) {
-            val ready = EmbeddedFirmware.allPresent(context)
-            _uiState.update { it.copy(embeddedFirmwareReady = ready, embeddedFirmwareStatus = EmbeddedFirmware.describeStatus(context)) }
-            if (ready) appendLog("X216B firmware ready (bundled offline assets).")
-            return
-        }
         viewModelScope.launch(Dispatchers.IO) {
             val (ready, status) = remoteCatalogHasAll(
                 listOf(X216B_LOADER_SLUG, X216B_FRP_SLUG, X216B_PERSISTENT_SLUG, X216B_MISC_SLUG, X216B_SEC_EFS_SLUG)
@@ -327,12 +306,6 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkT505NFirmware() {
-        if (isOfflineBuild) {
-            val ready = T505NFirmware.allPresent(context)
-            _uiState.update { it.copy(t505nFirmwareReady = ready, t505nFirmwareStatus = T505NFirmware.describeStatus(context)) }
-            if (ready) appendLog("T505N firmware ready (bundled offline assets).")
-            return
-        }
         viewModelScope.launch(Dispatchers.IO) {
             val (ready, status) = remoteCatalogHasAll(
                 listOf(T505N_LOADER_SLUG, T505N_FRP_SLUG, T505N_PERSISTENT_SLUG, T505N_MISC_SLUG)
@@ -351,12 +324,6 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun checkT509Firmware() {
-        if (isOfflineBuild) {
-            val ready = T509Firmware.allPresent(context)
-            _uiState.update { it.copy(t509FirmwareReady = ready, t509FirmwareStatus = T509Firmware.describeStatus(context)) }
-            if (ready) appendLog("T509 firmware ready (bundled offline assets).")
-            return
-        }
         viewModelScope.launch(Dispatchers.IO) {
             val (ready, status) = remoteCatalogHasAll(listOf(T509_FDL1_SLUG, T509_FDL2_SLUG))
             _uiState.update { it.copy(t509FirmwareReady = ready, t509FirmwareStatus = status) }
@@ -472,18 +439,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(t509BromConnected = true, usbConnected = true, deviceDescription = "Unisoc BROM") }
             }
 
-            if (isOfflineBuild) {
-                if (!T509Firmware.allPresent(context)) {
-                    throw IllegalStateException(T509Firmware.describeStatus(context))
-                }
-                appendLog("=== STEP 1: Loading FDL1/FDL2 (bundled offline assets) ===")
-                sprdFdl.uploadFdl1(T509Firmware.readAllBytes(context, T509Firmware.FDL1, EMPTY_SERVER_KEY))
-                sprdFdl.uploadFdl2(T509Firmware.readAllBytes(context, T509Firmware.FDL2, EMPTY_SERVER_KEY))
-            } else {
-                appendLog("=== STEP 1: Downloading FDL1/FDL2 from server ===")
-                sprdFdl.uploadFdl1(remoteFirmwareBytes(T509_FDL1_SLUG))
-                sprdFdl.uploadFdl2(remoteFirmwareBytes(T509_FDL2_SLUG))
-            }
+            appendLog("=== STEP 1: Downloading FDL1/FDL2 from server ===")
+            sprdFdl.uploadFdl1(remoteFirmwareBytes(T509_FDL1_SLUG))
+            sprdFdl.uploadFdl2(remoteFirmwareBytes(T509_FDL2_SLUG))
 
             appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->
@@ -931,16 +889,8 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             if (!_uiState.value.firehoseReady) {
                 val cur = _uiState.value
                 when (cur.gptLoaderChoice) {
-                    GptLoaderChoice.X216B -> if (isOfflineBuild) {
-                        bootFirehoseFromEmbeddedLoader(EMPTY_SERVER_KEY)
-                    } else {
-                        bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
-                    }
-                    GptLoaderChoice.T505N -> if (isOfflineBuild) {
-                        bootFirehoseFromEmbeddedT505NLoader(EMPTY_SERVER_KEY)
-                    } else {
-                        bootFirehoseFromRemoteT505NLoader()
-                    }
+                    GptLoaderChoice.X216B -> bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
+                    GptLoaderChoice.T505N -> bootFirehoseFromRemoteT505NLoader()
                     GptLoaderChoice.MANUAL -> {
                         val uri = cur.loaderUri ?: throw IllegalStateException("No manual loader selected.")
                         appendLog("Uploading manual loader (${cur.loaderName})...")
@@ -977,18 +927,12 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             requireOperationAuthorized("flash_frp_x216b")
             val useEmbedded = true
 
-            // Fetches sizes for all 4 files up front -- this also acts as the "firmware is
-            // ready" precondition check (throws naming the exact missing file) before any
-            // partition gets wiped. The offline flavor has no server catalog at all (see
-            // isOfflineBuild above), so it checks the bundled assets via EmbeddedFirmware
-            // instead of calling remoteFirmwareSizes(), which would always fail for that build.
-            val remoteSizes: Map<String, Long>? = if (useEmbedded && !isOfflineBuild) {
+            // Fetches sizes for all 4 files from the server catalog up front -- this also
+            // acts as the "firmware is ready" precondition check (throws naming the exact
+            // missing slug) instead of EmbeddedFirmware.allPresent()'s local file check.
+            val remoteSizes: Map<String, Long>? = if (useEmbedded) {
                 remoteFirmwareSizes(listOf(X216B_FRP_SLUG, X216B_PERSISTENT_SLUG, X216B_MISC_SLUG, X216B_SEC_EFS_SLUG))
             } else null
-
-            if (useEmbedded && isOfflineBuild && !EmbeddedFirmware.allPresent(context)) {
-                throw IllegalStateException(EmbeddedFirmware.describeStatus(context))
-            }
 
             if (!transport.isConnected) {
                 val device = transport.findEdlDevice()
@@ -1005,9 +949,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (!_uiState.value.firehoseReady) {
-                if (useEmbedded && isOfflineBuild) {
-                    bootFirehoseFromEmbeddedLoader(EMPTY_SERVER_KEY)
-                } else if (useEmbedded) {
+                if (useEmbedded) {
                     bootFirehoseFromRemoteLoader(X216B_LOADER_SLUG)
                 } else {
                     val loaderUri = _uiState.value.loaderUri
@@ -1027,27 +969,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
 
             appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
 
-            val writeQueue: List<WriteJob> = if (useEmbedded && isOfflineBuild) {
-                appendLog("Writing firmware images (bundled offline assets)...")
-                listOf(
-                    WriteJob("frp", setOf("frp"), "frp",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.FRP), "Erasing FRP 1") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.FRP, EMPTY_SERVER_KEY)
-                    },
-                    WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.PERSISTENT), "Erasing FRP 2") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.PERSISTENT, EMPTY_SERVER_KEY)
-                    },
-                    WriteJob("misc", setOf("misc"), "misc",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.MISC), "Erasing DATA") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.MISC, EMPTY_SERVER_KEY)
-                    },
-                    WriteJob("sec_efs", setOf("sec_efs"), "sec_efs",
-                        EmbeddedFirmware.sizeOf(context, EmbeddedFirmware.SEC_EFS), "Erasing MDM") {
-                        EmbeddedFirmware.openStream(context, EmbeddedFirmware.SEC_EFS, EMPTY_SERVER_KEY)
-                    }
-                )
-            } else if (useEmbedded) {
+            val writeQueue: List<WriteJob> = if (useEmbedded) {
                 val sizes = remoteSizes!!
                 appendLog("Writing firmware images (downloading from server)...")
                 listOf(
@@ -1170,11 +1092,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         }
 
         if (!_uiState.value.firehoseReady) {
-            if (isOfflineBuild) {
-                bootFirehoseFromEmbeddedT505NLoader(EMPTY_SERVER_KEY)
-            } else {
-                bootFirehoseFromRemoteT505NLoader()
-            }
+            bootFirehoseFromRemoteT505NLoader()
         }
     }
 
@@ -1183,65 +1101,33 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  Every file is downloaded from the server (see [remoteFirmwareStream]) instead of the
      *  APK's bundled assets. */
     private suspend fun writeT505NPartitions(currentParts: List<PartitionEntry>, includeMisc: Boolean) {
-        val jobs: List<WriteJob> = if (isOfflineBuild) {
-            if (!T505NFirmware.allPresent(context)) {
-                throw IllegalStateException(
-                    "MISSING T505N offline assets -- commit frp.bin/persistent.bin/misc.bin/T505N.elf " +
-                        "under app/src/offline/assets/t505n/ and rebuild."
-                )
-            }
-            appendLog("Writing firmware images (bundled offline assets)...")
-            buildList {
-                add(
-                    WriteJob("frp", setOf("frp"), "frp",
-                        T505NFirmware.sizeOf(context, T505NFirmware.FRP), "Erasing FRP 1") {
-                        T505NFirmware.openStream(context, T505NFirmware.FRP, EMPTY_SERVER_KEY)
-                    }
-                )
-                add(
-                    WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        T505NFirmware.sizeOf(context, T505NFirmware.PERSISTENT), "Erasing FRP 2") {
-                        T505NFirmware.openStream(context, T505NFirmware.PERSISTENT, EMPTY_SERVER_KEY)
-                    }
-                )
-                if (includeMisc) {
-                    add(
-                        WriteJob("misc", setOf("misc"), "misc",
-                            T505NFirmware.sizeOf(context, T505NFirmware.MISC), "Erasing DATA") {
-                            T505NFirmware.openStream(context, T505NFirmware.MISC, EMPTY_SERVER_KEY)
-                        }
-                    )
-                }
-            }
-        } else {
-            val slugs = buildList {
-                add(T505N_FRP_SLUG); add(T505N_PERSISTENT_SLUG)
-                if (includeMisc) add(T505N_MISC_SLUG)
-            }
-            val sizes = remoteFirmwareSizes(slugs)
-            appendLog("Writing firmware images (downloading from server)...")
+        val slugs = buildList {
+            add(T505N_FRP_SLUG); add(T505N_PERSISTENT_SLUG)
+            if (includeMisc) add(T505N_MISC_SLUG)
+        }
+        val sizes = remoteFirmwareSizes(slugs)
+        appendLog("Writing firmware images (downloading from server)...")
 
-            buildList {
-                add(
-                    WriteJob("frp", setOf("frp"), "frp",
-                        sizes.getValue(T505N_FRP_SLUG), "Erasing FRP 1") {
-                        remoteFirmwareStream(T505N_FRP_SLUG)
-                    }
-                )
-                add(
-                    WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
-                        sizes.getValue(T505N_PERSISTENT_SLUG), "Erasing FRP 2") {
-                        remoteFirmwareStream(T505N_PERSISTENT_SLUG)
-                    }
-                )
-                if (includeMisc) {
-                    add(
-                        WriteJob("misc", setOf("misc"), "misc",
-                            sizes.getValue(T505N_MISC_SLUG), "Erasing DATA") {
-                            remoteFirmwareStream(T505N_MISC_SLUG)
-                        }
-                    )
+        val jobs = buildList {
+            add(
+                WriteJob("frp", setOf("frp"), "frp",
+                    sizes.getValue(T505N_FRP_SLUG), "Erasing FRP 1") {
+                    remoteFirmwareStream(T505N_FRP_SLUG)
                 }
+            )
+            add(
+                WriteJob("persistent", setOf("persistent", "persestent", "presistent"), "persistent",
+                    sizes.getValue(T505N_PERSISTENT_SLUG), "Erasing FRP 2") {
+                    remoteFirmwareStream(T505N_PERSISTENT_SLUG)
+                }
+            )
+            if (includeMisc) {
+                add(
+                    WriteJob("misc", setOf("misc"), "misc",
+                        sizes.getValue(T505N_MISC_SLUG), "Erasing DATA") {
+                        remoteFirmwareStream(T505N_MISC_SLUG)
+                    }
+                )
             }
         }
 
@@ -2416,7 +2302,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             val complete = atTry.containsKey("AT+DEVCONINFO") ||
                                 atTry.keys.any { it.contains("GSN") }
                             if (complete) break
-                            delay(700)
+                            delay(300)
                         }
                         val at: Map<String, String> = atTry
                         if (at.isEmpty()) {
@@ -2494,9 +2380,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             line("Limit", kv["LIMIT"].orEmpty())
                             line("SDP", kv["SDP"].orEmpty())
                             line("Partitions (HVID)", kv["HVID"].orEmpty().replace(",", ", ").replace(":", " = "))
-                            line("Battery (+CBC)", v("AT+CBC"))
-                            line("Signal (+CSQ)", v("AT+CSQ"))
-                            line("Radio (+CFUN)", v("AT+CFUN?"))
+                            line("Battery", v("AT+CBC"))
+                            line("Signal", v("AT+CSQ"))
+                            line("Radio state", v("AT+CFUN?"))
                             line("SIM status", v("AT+CPIN?"))
                             val shown = setOf("MN","BASE","SN","UN","PN","VER","HIDVER","PRD","CC","OMCCODE","MCC","MNC","AID","CON","LOCK","LIMIT","SDP","HVID","IMEI")
                             val extra = kv.filterKeys { it !in shown }
@@ -2674,7 +2560,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             if (currentSerial.isNotBlank()) _uiState.update { it.copy(infoSerial = currentSerial) }
             appendLog(
                 if (currentSerial.isNotBlank()) "Current serial: $currentSerial"
-                else "Current serial: unreadable (continuing anyway)"
+                else "Could not read the current serial (continuing anyway)"
             )
             setTaskProgress(0.15f)
 
@@ -2710,21 +2596,21 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                         at.changeSerialSequence(dev, sn, maxAttempts = 1, log = { msg -> appendLog(msg) })
                     }
                 }.getOrElse { e ->
-                    appendLog("ERROR: AT communication error: ${e.message}")
+                    appendLog("ERROR: Could not communicate with the device: ${e.message}")
                     false
                 }
                 if (written) break
             }
 
             if (!written) {
-                appendLog("ERROR: modem did not acknowledge the write.")
+                appendLog("ERROR: The device did not confirm the new serial.")
                 appendLog("Possible reasons:")
                 appendLog("- Wrong USB mode (dial *#0808# -> include MODEM)")
-                appendLog("- Firmware rejects engineering writes")
+                appendLog("- This firmware does not allow the change")
                 appendLog("- Device locked by Knox / corporate policy")
                 return@runTask
             }
-            appendLog("Modem acknowledged the serial write.")
+            appendLog("The device confirmed the new serial.")
 
             // ── Stage 4: Reboot so the new serial takes effect ─────────────────────
             setTaskProgress(0.65f)
@@ -2793,7 +2679,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
             appendLog(
                 if (currentCsc.isNotBlank()) "Current CSC: $currentCsc"
-                else "Current CSC: unreadable (continuing anyway)"
+                else "Could not read the current CSC (continuing anyway)"
             )
             setTaskProgress(0.15f)
 
@@ -2829,21 +2715,21 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                         at.changeCscSequence(dev, csc, maxAttempts = 1, log = { msg -> appendLog(msg) })
                     }
                 }.getOrElse { e ->
-                    appendLog("ERROR: AT communication error: ${e.message}")
+                    appendLog("ERROR: Could not communicate with the device: ${e.message}")
                     false
                 }
                 if (written) break
             }
 
             if (!written) {
-                appendLog("ERROR: modem did not acknowledge the CSC write.")
+                appendLog("ERROR: The device did not confirm the new CSC.")
                 appendLog("Possible reasons:")
                 appendLog("- Wrong USB mode (dial *#0808# -> include MODEM)")
-                appendLog("- Firmware rejects engineering writes")
+                appendLog("- This firmware does not allow the change")
                 appendLog("- Device locked by Knox / corporate policy")
                 return@runTask
             }
-            appendLog("Modem acknowledged the CSC write.")
+            appendLog("The device confirmed the new CSC.")
 
             // ── Stage 4: Reboot so the new CSC takes effect ─────────────────────────
             setTaskProgress(0.65f)

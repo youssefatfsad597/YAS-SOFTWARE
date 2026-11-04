@@ -2722,7 +2722,7 @@ private fun T505NTab(
     if (showRestoreConfirm) {
         YASConfirmDialog(
             title = "Restore Storage?",
-            message = "Restore Storage formats the phone over the AT port (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
+            message = "Restore Storage formats the phone (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
             confirmText = "Restore Now",
             danger = true,
             onConfirm = {
@@ -2997,7 +2997,7 @@ private fun AdbMtpTab(
     if (showFormatMtpConfirm) {
         YASConfirmDialog(
             title = "Format MTP?",
-            message = "Formats the phone over the AT port (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
+            message = "Formats the phone (MTP mode) and reboots it, so userdata is rebuilt at its full size. ALL USER DATA IS ERASED. FRP / Samsung account lock is not removed.",
             confirmText = "Format Now",
             danger = true,
             onConfirm = {
@@ -3010,7 +3010,7 @@ private fun AdbMtpTab(
     if (showSerialConfirm) {
         YASConfirmDialog(
             title = "Change Serial?",
-            message = "Reads ONLY the device's current serial in the background over AT (MTP mode, one quick query, not a full info read), then asks you for the new 11-character serial. The phone reboots normally once it's written.",
+            message = "Reads the device's current serial in the background (quick, not a full info read), then asks you for the new 11-character serial. The phone reboots normally once it's written.",
             confirmText = "Start",
             danger = true,
             onConfirm = {
@@ -3023,7 +3023,7 @@ private fun AdbMtpTab(
     if (showCscConfirm) {
         YASConfirmDialog(
             title = "Change CSC?",
-            message = "Reads ONLY the device's current Sales Code in the background over AT (MTP mode, one quick query, not a full info read), then asks you for the new 3-letter CSC. The phone reboots once it's written so the new region settings take effect.",
+            message = "Reads the device's current Sales Code in the background (quick, not a full info read), then asks you for the new 3-letter CSC. The phone reboots once it's written so the new region settings take effect.",
             confirmText = "Start",
             danger = true,
             onConfirm = {
@@ -3272,11 +3272,14 @@ EDL (Emergency Download Mode) هو وضع صيانة جوه شريحة Qualcomm 
 ## ثانيًا: الدخول في EDL
 1. افصل التابلت من أي كابل أو شاحن.
 2. اعمل إيقاف تشغيل كامل (Power Off) واستنى لحد ما الشاشة تطفي خالص.
-3. وصّل طرف الكابل المعدل في التابلت، ووصّل الطرف التاني بالموبايل اللي عليه التطبيق (عن طريق OTG) — يعني الكابل المعدل بيوصل التابلت بالموبايل مباشرة من غير ما تفصله.
-4. دوس على زرار Volume Up و Volume Down مع بعض، وكرر الضغط حوالي 20 مرة.
-5. لو الجهاز ظهر في التطبيق على إنه 9008، يبقى دخل EDL بنجاح وتقدر تكمل من غير ما تفصل أي كابل.
-6. لو مظهرش، افصل الكابل المعدل بالكامل، اعمل الخطوات من 1 لـ 5 تاني من الأول، وزوّد عدد مرات الضغط على أزرار الصوت.
-7. بعد ما يظهر 9008، افتح تبويب X216B أو Read GPT حسب اللي محتاجه.
+3. وصّل طرف الكابل المعدل في التابلت بس -- طرفه التاني يفضل لسه فاضي، مش موصّل بالموبايل.
+4. والكابل المعدل موصّل بالتابلت، دوس على زرار Volume Up و Volume Down مع بعض، وكرر الضغط حوالي 20 مرة.
+5. على طول بعد الـ 20 ضغطة، وصّل كابل بيانات سليم (شغال) بين الطرف الفاضي من الكابل المعدل وبين الموبايل اللي عليه التطبيق (عن طريق OTG) -- التوصيلة دي لازم تتم بسرعة وإنت مستمر تضغط على الأزرار في نفس اللحظة.
+6. لو ظهرت على شاشة التابلت علامة شحن (أيقونة بطارية) بعد التوصيل، معناه إنه دخل شحن عادي مش EDL -- افصل الكابل السليم فورًا (سيب الكابل المعدل في التابلت زي ما هو) وجرّب تاني من الخطوة 4.
+7. لو الجهاز ظهر في التطبيق على إنه 9008، يبقى دخل EDL بنجاح وتقدر تكمل من غير ما تفصل أي كابل.
+8. لو مظهرش ولا طلعت علامة شحن، افصل كل حاجة، اعمل الخطوات من 1 لـ 7 تاني من الأول، وزوّد عدد مرات الضغط على أزرار الصوت.
+9. بعد ما يظهر 9008، افتح تبويب X216B أو Read GPT حسب اللي محتاجه.
+! السرعة مهمة: التأخير بين آخر ضغطة وتوصيل الكابل السليم هو أكتر سبب يخلي الجهاز يدخل شحن عادي بدل EDL.
 """.trimIndent()
 )
 
@@ -3423,8 +3426,8 @@ private val EXPLAIN_SECTIONS: List<ExplainSection> = listOf(
 • "Download Mode": يبعت الجهاز لوضع التحميل.
 • "Reboot": إعادة تشغيل عادية.
 • "FORMAT MTP": نفس وظيفة "Restore Storage" في تبويب T505N، بس من هنا.
-• "Change Serial": بيقرا السيريال الحالي بسرعة (استعلام واحد بس، مش قراءة كاملة)، وبعدين بيغيّره (11 حرف/رقم) عن طريق أوامر AT في أجهزة سامسونج. محاولة واحدة سريعة، بعدها الجهاز بيعمل reboot لوحده.
-• "Change CSC": نفس الآلية بالظبط بس لـ Sales Code (3 حروف): يقرا الـ CSC الحالي بسرعة، يغيّره بمحاولة واحدة، وبعدها الجهاز بيعمل reboot لوحده عشان الكود الجديد يسري.
+• "Change Serial": بيقرا السيريال الحالي بسرعة، وبعدين بيسألك عن السيريال الجديد (11 حرف/رقم) ويكتبه في أجهزة سامسونج، وبعدها الجهاز بيعمل reboot لوحده عشان الرقم الجديد يسري.
+• "Change CSC": نفس الفكرة بالظبط بس لـ Sales Code (3 حروف): يقرا الـ CSC الحالي، يسألك عن الكود الجديد، يكتبه، وبعدها الجهاز بيعمل reboot لوحده عشان الكود الجديد يسري.
 
 ## قسم ADB (لازم أندرويد عادي + USB Debugging شغال)
 • "Read Info": بيقرا SN / IMEI عن طريق ADB.
@@ -3525,9 +3528,9 @@ private val EXPLAIN_QA: List<ExplainQA> = listOf(
         """
 1. اتأكد إن التابلت مطفي تمامًا (Power Off) قبل ما توصل الكابل المعدل.
 2. اتأكد إن السلك الأخضر موصّل بالأسود بشكل ثابت ومفيش شريط عازل بينهم، وإن الأحمر والأبيض مش لامسينهم.
-3. زوّد عدد مرات الضغط على Volume Up + Volume Down مع بعض (جرّب 30 مرة أو أكتر).
-4. بعد الضغط، فصّل الكابل المعدل وجرّب كابل سليم تاني.
-5. جرّب كابل OTG أو كابل بيانات تاني، لأن بعض الكابلات بتبقى شحن بس.
+3. لو شاشة التابلت وريتلك علامة شحن (أيقونة بطارية) بعد ما وصّلت الكابل السليم، يبقى الدخول فشل ودخل شحن عادي -- افصل الكابل السليم على طول وجرّب تاني، لأن التأخير هو أكتر سبب لده.
+4. زوّد عدد مرات الضغط على Volume Up + Volume Down مع بعض (جرّب 30 مرة أو أكتر)، وخلي توصيل الكابل السليم بعد آخر ضغطة يكون سريع قد ما تقدر.
+5. جرّب كابل سليم تاني (بيانات مش شحن بس)، لأن بعض الكابلات بتبقى شحن بس.
 6. اعمل الخطوات كلها من الأول مرة تانية.
 """.trimIndent()
     ),
