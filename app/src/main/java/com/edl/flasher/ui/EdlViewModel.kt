@@ -213,7 +213,20 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
         transport.registerDetachListener(
             onDetached = { onUsbDetached(); scanUsb() },
             onAttached = { scanUsb() },
-            onOtherDetached = { scanUsb() }
+            // "Other" fires for any device detach that isn't the one EdlUsbTransport itself has
+            // open (e.g. the phone was only ever connected over ADB/MTP -- a plain ADB session
+            // never calls into EdlUsbTransport's openDevice, so its tracked `device` stays null
+            // and a real cable unplug is reported here instead of via onDetached). Without this,
+            // adbConnected/t509BromConnected never got cleared and the header badge kept showing
+            // a stale purple "ADB" after the cable was physically removed. If no USB device of
+            // any kind is left on the bus, this WAS the last one -- treat it as a full detach.
+            onOtherDetached = {
+                val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
+                if (usbManager.deviceList.isEmpty()) {
+                    onUsbDetached()
+                }
+                scanUsb()
+            }
         )
         // Watcher: picks up every USB attach / re-enumeration (e.g. after rebooting into EDL)
         // so the cable never has to be re-plugged.
@@ -2301,15 +2314,21 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             "AT+CGMI", "AT+CGMM", "AT+CGMR", "AT+GMI", "AT+GMM", "AT+GMR",
                             "ATI", "AT+GCAP", "AT+CBC", "AT+CSQ", "AT+CFUN?", "AT+CPIN?"
                         )
-                        // The modem port is often not ready on the very first query: retry once.
+                        // The modem port is often not ready on the very first query: retry a
+                        // couple more times, and specifically keep retrying while AT+DEVCONINFO
+                        // answered but its IMEI(...) field is missing -- a long single-line reply
+                        // like this one is the one most likely to arrive truncated on a cold port,
+                        // and IMEI was the field most often lost that way (showing "Unavailable"
+                        // even though the device did have one).
                         var atTry: Map<String, String> = emptyMap()
-                        for (attempt in 0 until 2) {
+                        for (attempt in 0 until 3) {
                             atTry = runCatching { AtCommandTransport(context).use { it.queryReadOnly(dev, atCmds) } }
                                 .getOrDefault(emptyMap())
-                            val complete = atTry.containsKey("AT+DEVCONINFO") ||
-                                atTry.keys.any { it.contains("GSN") }
+                            val devConInfo = atTry["AT+DEVCONINFO"].orEmpty()
+                            val complete = (devConInfo.isNotBlank() && devConInfo.contains("IMEI(", ignoreCase = true)) ||
+                                atTry.keys.any { it.contains("GSN") || it.contains("IMEINUM") }
                             if (complete) break
-                            delay(300)
+                            delay(350)
                         }
                         val at: Map<String, String> = atTry
                         if (at.isEmpty()) {
@@ -2334,13 +2353,16 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                                 .forEach { kv[it.groupValues[1]] = it.groupValues[2].replace(Regex("\\s+"), "").trim() }
 
                             val found = LinkedHashSet<String>()
-                            kv["IMEI"]?.takeIf { it.length in 14..16 && it.all { c -> c.isDigit() } }?.let { found.add(it) }
+                            // Some replies pad the value with stray separators (e.g. "IMEI(35..1;" if the
+                            // closing paren got merged with the next field) -- strip non-digits before
+                            // checking length instead of rejecting the whole value outright.
+                            kv["IMEI"]?.filter { it.isDigit() }?.takeIf { it.length in 14..16 }?.let { found.add(it) }
                             listOf("AT+CGSN", "AT+GSN", "AT+IMEINUM").forEach { k ->
-                                Regex("(?<![0-9])[0-9]{15}(?![0-9])").findAll(at[k].orEmpty()).forEach { found.add(it.value) }
+                                Regex("(?<![0-9])[0-9]{14,16}(?![0-9])").findAll(at[k].orEmpty()).forEach { found.add(it.value) }
                             }
                             // Last resort: look for IMEI(...) anywhere in any reply (covers shifted/merged replies).
                             if (found.isEmpty()) {
-                                Regex("IMEI\\(([0-9]{14,16})\\)").findAll(at.values.joinToString("\n"))
+                                Regex("IMEI\\(([0-9]{14,16})").findAll(at.values.joinToString("\n"))
                                     .forEach { found.add(it.groupValues[1]) }
                             }
                             imeis.addAll(found)
@@ -2391,9 +2413,10 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                             line("Signal", v("AT+CSQ"))
                             line("Radio state", v("AT+CFUN?"))
                             line("SIM status", v("AT+CPIN?"))
-                            val shown = setOf("MN","BASE","SN","UN","PN","VER","HIDVER","PRD","CC","OMCCODE","MCC","MNC","AID","CON","LOCK","LIMIT","SDP","HVID","IMEI")
-                            val extra = kv.filterKeys { it !in shown }
-                            if (extra.isNotEmpty()) { group("Other"); extra.forEach { (k, value) -> line(k, value) } }
+                            // Deliberately no "Other" / raw fallback here: every field we show above is
+                            // translated into a plain label first, so the literal AT+... command strings
+                            // and raw KEY(value) modem syntax never reach the screen, even for a field
+                            // this app doesn't recognize yet.
                             atText = sbAt.toString().replace(Regex("\\[[A-Za-z ]+\\]\\n(?=\\n|\\[|$)"), "").replace(Regex("\\n{3,}"), "\n\n").trim().ifBlank { "Modem answered but returned no readable info." }
                         }
                     }
