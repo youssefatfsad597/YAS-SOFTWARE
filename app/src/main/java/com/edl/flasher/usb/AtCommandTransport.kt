@@ -753,6 +753,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
             "CSC must be exactly 3 letters (A-Z)."
         }
         val upperCsc = newCsc.uppercase()
+        var lastAckReply = ""
 
         repeat(maxAttempts) { attempt ->
             if (attempt > 0) kotlinx.coroutines.delay(CSC_RETRY_DELAY_MS)
