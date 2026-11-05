@@ -71,18 +71,18 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // on top of that, same as CSC_STEP_DELAY_MS. Was 1200ms, then 600ms, then 300ms; cut
         // again since the flow now does a single attempt and a quick serial-only read
         // beforehand, so every extra ms here is pure added latency on the one shot we take.
-        const val SERIAL_STEP_DELAY_MS = 150L
+        const val SERIAL_STEP_DELAY_MS = 70L
         // Settle time after the serial write before reading it back, so the modem has a moment
         // to commit the NV value -- separate from SERIAL_STEP_DELAY_MS so it can be tuned on
         // its own. readModemSerial() retries with its own delay if this isn't quite enough.
-        const val SERIAL_POST_WRITE_SETTLE_MS = 150L
+        const val SERIAL_POST_WRITE_SETTLE_MS = 80L
         // CSC (Sales Code) writes are a handful of lightweight AT+PRECONFG/activation
         // commands with no flash-heavy work behind them, so they tolerate a shorter
         // inter-command gap than the serial sequence. Each exchange() already blocks until
         // the device replies (or its own idle timeout), so this is pure extra padding on
         // top of that -- cut in step with SERIAL_STEP_DELAY_MS for the same single-attempt,
         // fastest-possible flow.
-        const val CSC_STEP_DELAY_MS = 150L
+        const val CSC_STEP_DELAY_MS = 70L
         // Wait before a CSC retry attempt (separate from the serial retry delay above).
         // Only matters if maxAttempts is ever raised above 1 again.
         const val CSC_RETRY_DELAY_MS = 150L
@@ -549,10 +549,7 @@ class AtCommandTransport(private val context: Context) : Closeable {
         var lastAckReply = ""
 
         for (attempt in 0 until maxAttempts) {
-            if (attempt > 0) {
-                log("Retry $attempt of $maxAttempts -- waiting ${SERIAL_RETRY_DELAY_MS / 1000.0}s before next attempt...")
-                kotlinx.coroutines.delay(SERIAL_RETRY_DELAY_MS)
-            }
+            if (attempt > 0) kotlinx.coroutines.delay(SERIAL_RETRY_DELAY_MS)
 
             // ---- Full 7-step service init sequence (from MA UNLOCKER) ----
             val cmds = buildList {
@@ -589,16 +586,10 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val acknowledged = sequenceOk && replies.size == cmds.size &&
                 last.contains("SERIALNO", true) && last.contains("OK", true)
 
-            // Check whether the device explicitly rejected the write.
-            val rejected = isRejected(last)
-            if (rejected && !acknowledged) {
-                log("The device did not accept the new serial.")
-            }
-
-            if (acknowledged) {
-                log("Device confirmed the new serial.")
-                break
-            }
+            // Mid-sequence rejections and an un-acknowledged write are expected on some
+            // firmware and are not reported here -- the post-write read-back below is the
+            // real check, so nothing is logged until that result is known.
+            if (acknowledged) break
 
             // If we've exhausted all attempts without acknowledgment, fall through to best-effort check.
         }
@@ -606,7 +597,6 @@ class AtCommandTransport(private val context: Context) : Closeable {
         // Post-write verification: read back the serial from the device.
         kotlinx.coroutines.delay(SERIAL_POST_WRITE_SETTLE_MS)
         val after = readModemSerial(device, attempts = 2)
-        log("Checking the serial on the device: '${after.ifBlank { "(none)" }}'")
 
         val directMatch = after.trim().equals(newSerial, ignoreCase = true)
         return if (directMatch) {
@@ -657,11 +647,11 @@ class AtCommandTransport(private val context: Context) : Closeable {
                         val reply = exchange(conn, epIn, epOut, cmd)
                         replies?.add(reply)
 
-                        val bad = isRejected(reply)
-                        if (bad) {
-                            log(rejectionReason(reply))
-                            allOk = false
-                        }
+                        // Mid-sequence steps (service-mode unlock commands) routinely answer
+                        // with something other than a plain OK on this firmware -- that is
+                        // expected, not a failure, and is never shown to the user. Only the
+                        // final outcome (checked by the caller from `replies`) matters.
+                        if (isRejected(reply)) allOk = false
                         if (i < commands.size - 1) kotlinx.coroutines.delay(delayMs)
                     }
                     return allOk
@@ -764,13 +754,8 @@ class AtCommandTransport(private val context: Context) : Closeable {
         }
         val upperCsc = newCsc.uppercase()
 
-        var lastAckReply = ""
-
         repeat(maxAttempts) { attempt ->
-            if (attempt > 0) {
-                log("CSC retry $attempt of $maxAttempts -- waiting ${CSC_RETRY_DELAY_MS / 1000.0}s...")
-                kotlinx.coroutines.delay(CSC_RETRY_DELAY_MS)
-            }
+            if (attempt > 0) kotlinx.coroutines.delay(CSC_RETRY_DELAY_MS)
 
             val cmds = listOf(
                 "AT+SWATD=0",
@@ -797,22 +782,11 @@ class AtCommandTransport(private val context: Context) : Closeable {
             val acknowledged = sequenceOk && replies.size == cmds.size &&
                 last.contains("PRECONFG", true) && last.contains(upperCsc, ignoreCase = true)
 
-            if (!acknowledged) {
-                val rejected = isRejected(last)
-                if (rejected) {
-                    log("The device did not accept the new CSC.")
-                } else {
-                    log("Did not get a clear answer from the device.")
-                }
-            }
-
-            if (acknowledged) {
-                log("Device confirmed the new CSC.")
-                return true
-            }
+            // Mid-sequence rejections are expected on some firmware and are not reported --
+            // only the final outcome below is shown to the user.
+            if (acknowledged) return true
         }
 
-        log("Could not confirm the CSC was changed.")
         return false
     }
 
