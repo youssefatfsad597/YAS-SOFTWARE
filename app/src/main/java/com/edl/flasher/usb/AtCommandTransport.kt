@@ -360,7 +360,13 @@ class AtCommandTransport(private val context: Context) : Closeable {
         }
         val lines = sb.toString().replace("\r", "\n").lines()
             .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.equals(cmd, ignoreCase = true) && it != "OK" && it != "#OK#" }
+            // Drop the device's own command echo and the terminator -- without this, a modem that
+            // echoes the command (e.g. "AT+IMEINUM" on its own line, or "AT+IMEINUM<value>" glued
+            // together with no line break) leaks the raw "AT+..." command text into the reply that
+            // gets shown to the user instead of just the value.
+            .filter { it.isNotEmpty() && it != "OK" && it != "#OK#" }
+            .map { line -> if (line.startsWith(cmd, ignoreCase = true)) line.substring(cmd.length).trim() else line }
+            .filter { !it.equals(cmd, ignoreCase = true) && it.isNotEmpty() }
         return lines.joinToString("\n")
     }
 
