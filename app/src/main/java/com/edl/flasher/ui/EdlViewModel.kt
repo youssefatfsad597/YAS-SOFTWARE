@@ -260,6 +260,13 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 firehoseReady = false,
                 odinConnected = false,
                 odinSessionReady = false,
+                // These were missing: without them the header badge kept showing a stale
+                // purple "ADB" (or BROM) state after the cable was physically unplugged,
+                // because adbConnected / t509BromConnected are only ever set by specific
+                // user-triggered actions (readAdbInfo, runAdbShell, ...) and nothing else
+                // was clearing them on disconnect.
+                adbConnected = false,
+                t509BromConnected = false,
                 deviceDescription = "Device disconnected",
                 odinDeviceDescription = "Device disconnected"
             )
@@ -439,11 +446,11 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(t509BromConnected = true, usbConnected = true, deviceDescription = "Unisoc BROM") }
             }
 
-            appendLog("=== STEP 1: Downloading FDL1/FDL2 from server ===")
+            appendLog("=== Preparing loader ===")
             sprdFdl.uploadFdl1(remoteFirmwareBytes(T509_FDL1_SLUG))
             sprdFdl.uploadFdl2(remoteFirmwareBytes(T509_FDL2_SLUG))
 
-            appendLog("=== STEP 2: Erasing userdata / FRP / persist ===")
+            appendLog("=== Erasing userdata / FRP / persist ===")
             listOf("userdata", "frp", "persist").forEachIndexed { idx, part ->
                 // userdata is by far the largest of the three -- give it extra time so a
                 // slow-but-still-in-progress erase isn't mistaken for a hang/failure.
@@ -452,7 +459,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 _uiState.update { it.copy(progress = (idx + 1).toFloat() / 3f) }
             }
 
-            appendLog("=== STEP 3: Rebooting device ===")
+            appendLog("=== Rebooting ===")
             sprdFdl.reset()
             transport.close()
             _uiState.update { it.copy(t509BromConnected = false, usbConnected = false) }
@@ -967,7 +974,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("GPT Partition Table is empty! Check storage type (UFS/eMMC).")
             }
 
-            appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT, MISC, SEC_EFS) ===")
+            appendLog("=== Writing partitions (FRP, Persistent, Misc, SEC_EFS) ===")
 
             val writeQueue: List<WriteJob> = if (useEmbedded) {
                 val sizes = remoteSizes!!
@@ -1170,7 +1177,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("GPT Partition Table is empty! Check storage type (UFS/eMMC).")
             }
 
-            appendLog("=== WRITING PARTITIONS (MISC, FRP, PERSISTENT) ===")
+            appendLog("=== Writing partitions (Misc, FRP, Persistent) ===")
             writeT505NPartitions(currentParts, includeMisc = true)
 
             appendLog("Operation completed successfully.")
@@ -1193,7 +1200,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 throw IllegalStateException("GPT Partition Table is empty! Check storage type (UFS/eMMC).")
             }
 
-            appendLog("=== WRITING PARTITIONS (FRP, PERSISTENT) ===")
+            appendLog("=== Writing partitions (FRP, Persistent) ===")
             writeT505NPartitions(currentParts, includeMisc = false)
 
             appendLog("Operation completed successfully.")
@@ -1778,7 +1785,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             // Safety: never let a package with extra system images touch anything but userdata.
             _uiState.update { it.copy(skipSystemFilesInUserdataTar = true) }
 
-            appendLog("=== FORMAT T505N: ${_uiState.value.userdataTarName} ===")
+            appendLog("=== Formatting: ${_uiState.value.userdataTarName} ===")
             flashTarsWithOdin(listOf("USERDATA" to uri), honorSelection = false)
 
             odin.shutdown(reboot = true)
@@ -2535,7 +2542,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     fun runChangeSerial() {
         runTask("Change Serial Number") {
             requireOperationAuthorized("change_serial")
-            appendLog("=== CHANGE SERIAL NUMBER ===")
+            appendLog("Changing serial...")
 
             setTaskProgress(0.02f)
             val mtpDevices = MtpInfoReader.findModemDevices(context)
@@ -2545,23 +2552,16 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read ONLY the current serial (fast) -- not the full device info ──
-            appendLog("Reading current serial...")
+            // ── Stage 1: Read ONLY the current serial (fast, silent) -- not the full device
+            // info "Read Info" does, and not logged: it's just context for the input dialog. ──
             var currentSerial = ""
             for (dev in mtpDevices) {
                 currentSerial = runCatching {
-                    AtCommandTransport(context).use { at -> at.readModemSerial(dev) }
-                }.getOrElse { e ->
-                    appendLog("Could not read current serial: ${e.message}")
-                    ""
-                }
+                    AtCommandTransport(context).use { at -> at.readModemSerial(dev, attempts = 1) }
+                }.getOrElse { "" }
                 if (currentSerial.isNotBlank()) break
             }
             if (currentSerial.isNotBlank()) _uiState.update { it.copy(infoSerial = currentSerial) }
-            appendLog(
-                if (currentSerial.isNotBlank()) "Current serial: $currentSerial"
-                else "Could not read the current serial (continuing anyway)"
-            )
             setTaskProgress(0.15f)
 
             // ── Stage 2: Ask the user for the new serial now that we know the old one ──
@@ -2583,11 +2583,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("ERROR: Serial must be exactly 11 characters, letters A-Z and digits only.")
                 return@runTask
             }
-            appendLog("Target serial: $sn")
             setTaskProgress(0.2f)
 
             // ── Stage 3: Write new serial (service-init + serial write with retries) ──
-            appendLog("Writing new serial number...")
             var written = false
             for (dev in mtpDevices) {
                 written = runCatching {
@@ -2603,18 +2601,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (!written) {
-                appendLog("ERROR: The device did not confirm the new serial.")
-                appendLog("Possible reasons:")
-                appendLog("- Wrong USB mode (dial *#0808# -> include MODEM)")
-                appendLog("- This firmware does not allow the change")
-                appendLog("- Device locked by Knox / corporate policy")
+                appendLog("ERROR: The device did not accept the new serial.")
+                appendLog("(Wrong USB mode, unsupported firmware, or Knox/MDM locked.)")
                 return@runTask
             }
-            appendLog("The device confirmed the new serial.")
 
             // ── Stage 4: Reboot so the new serial takes effect ─────────────────────
             setTaskProgress(0.65f)
-            appendLog("Rebooting device...")
+            appendLog("Rebooting...")
             for (dev in mtpDevices) {
                 val ok = runCatching {
                     AtCommandTransport(context).use { at ->
@@ -2630,8 +2624,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update {
                 it.copy(mtpInfoText = "", mtpStorageText = "", infoImei = "", infoSerial = sn)
             }
-            appendLog("Operation completed successfully.")
-            appendLog("Serial is now \"$sn\".")
+            appendLog("Done. Serial: $sn")
         }
     }
 
@@ -2655,7 +2648,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
     fun runChangeCsc() {
         runTask("Change Sales Code (CSC)") {
             requireOperationAuthorized("change_csc")
-            appendLog("=== CHANGE SALES CODE (CSC) ===")
+            appendLog("Changing CSC...")
 
             setTaskProgress(0.02f)
             val mtpDevices = MtpInfoReader.findModemDevices(context)
@@ -2665,22 +2658,15 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 return@runTask
             }
 
-            // ── Stage 1: Read ONLY the current CSC (fast) -- not the full device info ──
-            appendLog("Reading current CSC...")
+            // ── Stage 1: Read ONLY the current CSC (fast, silent) -- just context for the
+            // input dialog, not logged. ──
             var currentCsc = ""
             for (dev in mtpDevices) {
                 currentCsc = runCatching {
-                    AtCommandTransport(context).use { at -> at.readModemCsc(dev) }
-                }.getOrElse { e ->
-                    appendLog("Could not read current CSC: ${e.message}")
-                    ""
-                }
+                    AtCommandTransport(context).use { at -> at.readModemCsc(dev, attempts = 1) }
+                }.getOrElse { "" }
                 if (currentCsc.isNotBlank()) break
             }
-            appendLog(
-                if (currentCsc.isNotBlank()) "Current CSC: $currentCsc"
-                else "Could not read the current CSC (continuing anyway)"
-            )
             setTaskProgress(0.15f)
 
             // ── Stage 2: Ask the user for the new CSC now that we know the old one ──
@@ -2702,11 +2688,9 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
                 appendLog("ERROR: CSC must be exactly 3 letters (A-Z).")
                 return@runTask
             }
-            appendLog("Target CSC: $csc")
             setTaskProgress(0.2f)
 
             // ── Stage 3: Write new CSC (service-init + PRECONFG write with retries) ──
-            appendLog("Writing new CSC...")
             var written = false
             for (dev in mtpDevices) {
                 written = runCatching {
@@ -2722,18 +2706,14 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             if (!written) {
-                appendLog("ERROR: The device did not confirm the new CSC.")
-                appendLog("Possible reasons:")
-                appendLog("- Wrong USB mode (dial *#0808# -> include MODEM)")
-                appendLog("- This firmware does not allow the change")
-                appendLog("- Device locked by Knox / corporate policy")
+                appendLog("ERROR: The device did not accept the new CSC.")
+                appendLog("(Wrong USB mode, unsupported firmware, or Knox/MDM locked.)")
                 return@runTask
             }
-            appendLog("The device confirmed the new CSC.")
 
             // ── Stage 4: Reboot so the new CSC takes effect ─────────────────────────
             setTaskProgress(0.65f)
-            appendLog("Rebooting device...")
+            appendLog("Rebooting...")
             for (dev in mtpDevices) {
                 val ok = runCatching {
                     AtCommandTransport(context).use { at ->
