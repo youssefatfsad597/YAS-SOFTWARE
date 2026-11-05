@@ -49,11 +49,13 @@ object LogSanitizer {
         "^Writing '(.*)' -> partition '(.*)'.*$" to "Writing '$1' to '$2'...",
         "^Quick-format mode: sending small '(.*)'.*$" to "Quick-format mode: sending a small '$1' on purpose.",
         "^Quick-format mode: sending small userdata.*$" to "Quick-format mode: sending a small userdata image on purpose.",
-        // One unified rule for every stage header in the app ("=== STEP 1: ... ===",
-        // "=== WRITING PARTITIONS (...) ===", "=== CHANGE SERIAL NUMBER ===", ...) instead of
-        // a hand-written rewrite per message: strips the "===" ASCII-art and lower-cases the
-        // first letter so every stage line reads the same simple way, e.g. "step 1: ..." or
-        // "writing partitions (frp, persistent)...". Must stay LAST so a more specific rule
+        // One unified rule for every stage header in the app ("=== Downloading firmware ===",
+        // "=== Writing partitions ===", "=== Changing serial ===", ...): strips the "==="
+        // ASCII-art only. Stage text is already written in short, properly-cased form at each
+        // call site (see EdlViewModel.kt), so this must NOT alter casing itself -- a previous
+        // version lower-cased just the first character, which mangled ALL-CAPS headers (e.g.
+        // "CHANGE SERIAL NUMBER" -> "cHANGE SERIAL NUMBER") and would also have mangled
+        // embedded dynamic text such as file names. Must stay LAST so a more specific rule
         // above (if one is ever added) can still take precedence.
         "^===\\s*(.+?)\\s*===$" to "\u0001$1"
     ).map { Regex(it.first, setOf(RegexOption.DOT_MATCHES_ALL)) to it.second }
@@ -73,13 +75,12 @@ object LogSanitizer {
         for ((regex, replacement) in rewrites) {
             if (regex.containsMatchIn(msg)) {
                 val rewritten = regex.replace(msg, replacement)
-                // Marker left by the generic "=== ... ===" stage-header rule: finish the
-                // simplification (lower-case the first letter, add a trailing "...") here,
-                // since Regex.replace can't do case changes inline.
+                // Marker left by the generic "=== ... ===" stage-header rule: just add a
+                // trailing "..." if the text doesn't already end with punctuation. Casing is
+                // left exactly as written at the call site (see note above).
                 if (rewritten.startsWith("\u0001")) {
                     val body = rewritten.removePrefix("\u0001")
-                    val lowered = body.replaceFirstChar { it.lowercase() }
-                    return scrub(if (lowered.endsWith("...") || lowered.endsWith(".")) lowered else "$lowered...")
+                    return scrub(if (body.endsWith("...") || body.endsWith(".")) body else "$body...")
                 }
                 return scrub(rewritten)
             }
