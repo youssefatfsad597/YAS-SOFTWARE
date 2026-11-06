@@ -20,7 +20,7 @@ import java.security.MessageDigest
  * regardless of what a patched local APK does.
  *
  * Usage:
- *   val items = RemoteFirmware.catalog(licenseService)                 // for a picker UI
+ *   val items = RemoteFirmware.catalog(context, licenseService)        // for a picker UI
  *   RemoteFirmware.openStream(context, licenseService, "x216b/sec_efs.bin").use { stream ->
  *       // read plaintext bytes; throws if denied, or IOException if the integrity
  *       // check at the end of the stream fails (wrong key / corrupted / tampered)
@@ -30,7 +30,7 @@ object RemoteFirmware {
 
     class DownloadDenied(val status: String) : Exception(status)
 
-    suspend fun catalog(licenseService: LicenseService): List<RemoteFirmwareClient.CatalogItem> =
+    suspend fun catalog(context: Context, licenseService: LicenseService): List<RemoteFirmwareClient.CatalogItem> =
         RemoteFirmwareClient(licenseService).catalog()
 
     /** Opens a decrypting stream for one catalog slug (e.g. "x216b/sec_efs.bin"). Throws
