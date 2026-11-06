@@ -307,7 +307,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  not an error; the real check happens again right before each operation anyway. */
     private suspend fun remoteCatalogHasAll(slugs: List<String>): Pair<Boolean, String> {
         val present = try {
-            RemoteFirmware.catalog(licenseService).map { it.slug }.toSet()
+            RemoteFirmware.catalog(context, licenseService).map { it.slug }.toSet()
         } catch (_: Exception) {
             emptySet()
         }
@@ -879,7 +879,7 @@ class EdlViewModel(application: Application) : AndroidViewModel(application) {
      *  "every file is registered" precondition check -- throws naming the exact missing
      *  slug instead of failing partway through a multi-partition write. */
     private suspend fun remoteFirmwareSizes(slugs: List<String>): Map<String, Long> {
-        val bySlug = RemoteFirmware.catalog(licenseService).associateBy { it.slug }
+        val bySlug = RemoteFirmware.catalog(context, licenseService).associateBy { it.slug }
         return slugs.associateWith { slug ->
             bySlug[slug]?.sizeBytes?.takeIf { it >= 0 }
                 ?: throw IllegalStateException(
